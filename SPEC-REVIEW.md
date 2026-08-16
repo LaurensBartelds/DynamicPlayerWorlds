@@ -1,5 +1,13 @@
 # Review of `gzmn-player-worlds-spec.md` v0.2
 
+**Status: applied.** These findings have been folded into the spec, which is
+now at v0.3 — see the changelog at the top of it. This document is retained as
+the rationale for those changes and as the record of what the v0.2 design got
+wrong, which is worth keeping: several of the fixes look arbitrary without the
+failure they were responding to. Two items were deliberately left open, OQ-10
+and OQ-12, because both are facts about the deployment rather than design
+decisions.
+
 Reviewed against the draft dated v0.2, all 676 lines. Findings are grouped by
 severity. Every item cites the requirement it applies to so it can be
 triaged individually.
