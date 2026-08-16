@@ -2,7 +2,7 @@
 
 Version 0.3 (draft). Multi-node with object storage is in scope.
 
-Changes from 0.2, all from the review in `SPEC-REVIEW.md`:
+Changes from 0.2, all from a technical review of that draft:
 
 - Player profiles are now committed as part of a world snapshot rather than
   on an independent timer, closing the duplication window between PostgreSQL
