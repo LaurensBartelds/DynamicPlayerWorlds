@@ -34,8 +34,9 @@ marked **[defer-ok]**.
 
 ## 1. Decisions taken
 
-These four were open before this plan and are now settled. Each gets an ADR in
-`docs/adr/` as part of task F0.
+All six were open before this plan and are now settled. Each gets an ADR in
+`docs/adr/` as part of task F0, and D1, D2, D5 and D6 are amendments to the spec
+that should fold into v0.4.
 
 | # | Decision | Rationale |
 | --- | --- | --- |
@@ -43,6 +44,8 @@ These four were open before this plan and are now settled. Each gets an ADR in
 | D2 | **Control plane is a Postgres command table plus `LISTEN`/`NOTIFY`.** The durable row is the contract; `NOTIFY` is only a latency optimisation with polling as fallback. | §3.2 of the spec specifies plugin messaging, but a Velocity plugin message needs a connected player as its carrier. `/world admin unload <id>` against a node the caller is not on, and ejecting a banned player from a world elsewhere on the network, have no channel at all under plugin messaging. Postgres is already the single linearization point (MN-3a), so this adds no new infrastructure and no second source of truth. See §7. |
 | D3 | **Java 21, Gradle with the Kotlin DSL.** | Spec-native; no `kotlin-stdlib` to shade and relocate into two plugin jars; every Paper and Velocity upgrade note applies verbatim rather than needing translation. Kotlin's real wins here are null safety and async ergonomics — the first is recovered with JSpecify + NullAway failing the build (§4), and the second is largely moot because concurrency on a node is tiny (≤5 worlds, a few dozen players). The hard problems are ordering and fencing, which coroutines do not help with. |
 | D4 | **Monorepo: `:core` + `:backend` + `:proxy` in one Gradle build.** | The DB schema and the control-plane protocol are shared by both plugins and must never version-skew. One CI run proves the whole system. The Pelican extension (PHP, v1.1, optional) is kept out for now so PHP tooling does not enter CI for a component that may never be built. |
+| D5 | **A node self-fences at lease expiry, not after 30 minutes.** A database outage ejects players at `lease_expires − nodes.fence-safety-margin-seconds`; `storage.max-sync-failure-minutes` applies only to object storage. | Resolves the contradiction between spec §9 and MN-10a. See §9.2. |
+| D6 | **Snapshot copies are taken by quiesce → snapshot → verify**: auto-save off, forced save, quiet-period wait, reflink copy, post-copy re-stat, structural validation fused into the hash pass. | Closes the torn-region window MN-5a leaves open, using the established Minecraft `save-off` / `save-all flush` / copy / `save-on` idiom rather than a novel mechanism. See §9.1. |
 
 ---
 
@@ -443,6 +446,11 @@ violates a safety property. Checks that ship with the foundation:
   inverted and it opened a takeover window against a live node).
 - `node.heartbeat-seconds * 3 <= nodes.lease-seconds` (MN-9's tolerance
   argument; 30/180 gives six missed heartbeats).
+- `node.heartbeat-seconds <= nodes.fence-safety-margin-seconds < nodes.lease-seconds`
+  (§9.2 — a margin below one heartbeat interval fences on a single missed beat;
+  a margin above the lease fences immediately and permanently).
+- `storage.snapshot-quiesce-timeout-ms` leaves room inside
+  `storage.commit-timeout-seconds` (§9.1 runs inside the commit budget).
 - `profiles.retain-snapshots == storage.manifest-retention-count` (§8.1).
 - `storage.commit-timeout-seconds` < the kick path's tolerance (§9 of spec).
 - Scratch, cache and quarantine paths exist, are writable, and are on the same
@@ -481,6 +489,120 @@ reviewer vigilance.
   (`transfers.holding-timeout-seconds`).
 - **Shutdown is a first-class path** (FR-28): an ordered, timeout-bounded
   shutdown sequence, tested, so a planned restart never loses a world.
+
+### 9.1 Snapshot copy: quiesce → snapshot → verify (D6)
+
+MN-5a's procedure — save on the main thread, then `cp --reflink=auto` the dirty
+files — leaves the window it exists to close. Paper's chunk IO is asynchronous
+and the server keeps ticking between the save returning and the copy running, so
+a region file can be rewritten *during* its own copy. Reflink copies are not
+atomic against a concurrent in-place write.
+
+The chosen procedure is the standard one for backing up a live datastore that
+has no native snapshot: **quiesce the writer, take the snapshot, verify it.**
+For Minecraft specifically this is the long-established `save-off` /
+`save-all flush` / copy / `save-on` idiom that every server backup script uses;
+we are hardening it, not inventing anything.
+
+1. **Main thread** — `setAutoSave(false)` on all three dimensions. Wrapped in
+   `try`/`finally` *and* watched by an independent watchdog, because an
+   auto-save flag left off means the world never saves again and the next crash
+   loses everything. That is a strictly worse bug than the one this prevents, so
+   restoring the flag must not depend on the happy path.
+2. **Main thread** — `World#save()` per dimension.
+3. **Off thread — quiet-period wait.** Poll `(size, mtime)` across the dirty set
+   until nothing has changed for `storage.snapshot-quiet-ms` (default 250),
+   bounded by `storage.snapshot-quiesce-timeout-ms` (default 5000). This is the
+   API-only substitute for flushing Paper's chunk IO queue, which has no stable
+   API and which we will not reach into (§5.1). On timeout, continue — step 5
+   catches whatever moved.
+4. **Copy** the dirty set into a per-sync snapshot directory on the same
+   filesystem, using reflink (`FICLONE` / `copy_file_range`) with a detected
+   fallback to a plain copy. Never hard links — MN-5a is right that a shared
+   inode makes the copy pointless.
+5. **Re-stat the sources.** Any file whose `(size, mtime)` moved while it was
+   being copied is re-copied, bounded by `storage.snapshot-copy-retries`
+   (default 3). A file that will not settle aborts this sync; the next one picks
+   it up. Aborting a sync is cheap, uploading a torn region is not.
+6. **Restore auto-save.**
+7. **Validate structurally while hashing.** Every `.mca` file gets its 8 KiB
+   header checked as it is read: offsets and sector counts inside file bounds,
+   no overlapping sector allocations, each chunk's declared length consistent
+   with its sector count. Content addressing means we already read every byte to
+   hash it, so validation shares that pass and costs approximately nothing. A
+   file that fails aborts the snapshot rather than being uploaded.
+8. **Upload, write manifest, commit** (MN-3a). The snapshot directory is deleted
+   on success, and orphan snapshot directories found at startup are deleted
+   outright — they are derived data, not crash debris, so unlike MN-13's scratch
+   directories they are not quarantined.
+
+Why not the alternatives:
+
+- **Filesystem snapshots** (btrfs subvolume, LVM, ZFS) are strictly stronger —
+  genuinely atomic across all files — and are what this would use if the nodes
+  ran on bare metal. Pelican runs nodes in containers, where those operations
+  need host privileges. Worth keeping as an opt-in fast path if a node is ever
+  deployed outside a container; not the baseline.
+- **Copy-then-verify without quiescing** detects tearing but gives no
+  convergence bound on a busy world: the retry can lose the race repeatedly.
+- **Reading the live folder directly** is what MN-5a already rejects, correctly.
+
+Two consequences worth stating plainly. First, MN-5a's "close to free" claim for
+`cp --reflink=auto` holds only on XFS and btrfs; on ext4 it silently degrades to
+a full copy of the dirty set, which is why §10.4 probes and logs the real verdict
+at startup and why the free-space check must budget for the snapshot directory.
+Second, the module split falls out cleanly: steps 1–2 and 6 are
+`backend/platform` (`WorldRuntime`), and steps 3–5, 7 and 8 are `:core` — so the
+riskiest correctness code in the system is unit-testable without booting a
+server.
+
+New config: `storage.snapshot-quiet-ms`, `storage.snapshot-quiesce-timeout-ms`,
+`storage.snapshot-copy-retries`, `storage.verify-region-structure` (default
+true; a kill switch, not a tuning knob).
+
+### 9.2 Lease self-expiry and the database-outage bound (D5)
+
+Spec §9 and MN-10a cannot both hold: §9 keeps a node playing for
+`storage.max-sync-failure-minutes` (30) when the database is unreachable, while
+MN-10a self-fences when the heartbeat cannot extend the lease — and the
+heartbeat needs the database. With a 180-second lease, MN-10a fires roughly
+twenty-seven minutes first. Resolved in favour of lease expiry.
+
+The node distinguishes two states the spec conflates:
+
+- **Lease observed lost** — the database is reachable and the conditional
+  update affected zero rows, so another node holds it or the generation moved
+  on. Run MN-10's shutdown path immediately. This is MN-10a exactly as written.
+- **Database unreachable** — ownership is *unknown*. Fencing instantly buys
+  nothing for integrity: the node cannot commit without the database (MN-3a) and
+  its uploads are harmless by construction (MN-2, MN-3). The real risk is
+  divergence, where another node takes the expired lease and loads the world
+  while this one keeps ticking a copy whose progress can never be committed.
+
+So the rule is the standard lease-client one: **a lease holder must give up
+strictly before the grantor would consider the lease expired.** The node tracks
+`leaseValidUntil`, the `lease_expires` value returned by its last *successful*
+heartbeat in database time, and runs the MN-10 shutdown path at
+`leaseValidUntil − nodes.fence-safety-margin-seconds` (default 30). Because the
+margin is subtracted client-side against a grant issued in database time, the
+node always releases before any other node can take over, without needing the
+two clocks to agree.
+
+With the 180/30 timings that ejects players about 150 seconds — five missed
+heartbeats — into a database outage, losing at most one sync interval of
+progress. New joins are already refused from the first failure (spec §9).
+`storage.max-sync-failure-minutes` now applies **only** to the
+object-storage-unreachable path (§12.7), where the lease keeps renewing normally
+and the local copy stays authoritative — which is what makes 30 minutes a
+reasonable figure there and an impossible one here.
+
+The world's scratch directory is quarantined on this path per MN-10, since it
+has diverged from the last committed manifest and must never be reused as a warm
+cache. Note that this is cheaper than it sounds: the local *object* cache is
+content-addressed and immutable, so it survives untouched and a later reload of
+that world is still mostly warm.
+
+New config: `nodes.fence-safety-margin-seconds` (default 30).
 
 ---
 
@@ -619,60 +741,29 @@ Ordered. Each task states what "done" means. Rough sizes assume one developer.
 | F9 | Test harness: `:testing` fixtures, Testcontainers factories, MinIO fixture, one smoke test per layer | Green in CI, under five minutes | M |
 | F10 | CI/CD: all five workflows, Renovate, branch protection, SBOM, license check | Nightly Paper-latest job green and demonstrably able to go red | M |
 | F11 | **[defer-ok]** e2e compose harness (2 nodes, Velocity, MinIO, Postgres) | One player joins a lobby in CI | L |
+| F12 | **[defer-ok]** Durability primitives: reflink copier with fallback detection, region-file structural validator, hash-and-validate single pass (§9.1 steps 4–7) | Property tests over synthetic `.mca` files: every single-byte corruption of a header is rejected; a file mutated mid-copy is detected and retried | M |
 
 F0–F2 are prerequisites for everything. F3, F5 and F6 can proceed in parallel
 afterwards. F11 can wait until milestone 5, when a second node first exists.
+
+F12 is marked defer-ok because it belongs to milestone 6, but it is worth
+pulling forward: it is pure `:core` code with no server dependency, it is the
+highest-consequence correctness code in the system, and it is far easier to test
+in isolation than inside a running sync.
 
 ---
 
 ## 15. Open questions and spec issues found
 
-Four of these are contradictions rather than gaps — the spec cannot be
-implemented as written until they are resolved. Marked **[blocking]** where
-milestone 1 or 2 hits them.
+Resolved since the first draft, now recorded as decisions rather than
+questions: the database-outage bound (D5, §9.2), the snapshot copy procedure
+(D6, §9.1), and the package root `nl.gzmn.playerworlds`. All three should fold
+into spec v0.4.
 
-**Q1 [blocking] — §9 and MN-10a contradict each other on a database outage.**
-§9 says a node with an unreachable database "keeps already-loaded worlds
-playable" and forces an unload only after `storage.max-sync-failure-minutes`
-(30). But MN-10a says a node self-fences when its heartbeat fails to extend the
-lease — and the heartbeat needs the database. With a 180-second lease, every
-node self-fences and drops every player roughly 2–3 minutes into a database
-outage, twenty-seven minutes before §9's bound applies. As written the 30-minute
-figure is unreachable for the DB case.
+Of what remains, none is blocking for F0–F12; Q1 and Q2 become blocking at
+milestones 5 and 9 respectively.
 
-My reading is that the node must distinguish two states the spec conflates:
-
-- *Lease observed lost* — the database is reachable and the row says another
-  node owns it. Fence immediately; MN-10a is exactly right.
-- *Database unreachable* — ownership is unknown. Fencing here buys nothing for
-  integrity: the node cannot commit anything without the database (MN-3a), and
-  its uploads are harmless by construction (MN-2, MN-3). The real cost is
-  divergence — another node may take the expired lease and load the world while
-  this one keeps ticking a copy whose progress will be discarded.
-
-So the honest bound for the DB-unreachable case is lease expiry minus a safety
-margin (~150s), not 30 minutes, and `storage.max-sync-failure-minutes` should
-apply only to object storage being unreachable — which is genuinely survivable
-for much longer, since the lease keeps renewing and the local copy stays
-authoritative. **Do you agree with that split?** It changes the failure
-behaviour operators will see, so I do not want to assume it.
-
-**Q2 [blocking] — MN-5a's snapshot copy is not actually quiescent.**
-The procedure is `World#save()` on the main thread, then `cp --reflink=auto`
-the dirty files. But Paper's chunk IO is asynchronous and the server keeps
-ticking between the save returning and the copy running, so a region file can
-be rewritten *while it is being copied* — which reproduces the torn-region
-problem MN-5a exists to prevent, just in a narrower window. Reflink copies are
-not atomic with respect to a concurrent in-place write.
-
-Cheap mitigation, and my recommendation: record `(size, mtime)` before the
-copy, re-check after, and redo the copy if either changed; then validate the
-copied region file's header against its sector table before uploading. Both are
-inexpensive and turn a silent corruption into a retry. Worth confirming you want
-that rather than something stronger, such as pausing auto-save around the
-snapshot window.
-
-**Q3 — the `/world` command root is claimed by both components.**
+**Q1 — the `/world` command root is claimed by both components.**
 Spec §6 puts `/world leave` and `/world report` on the backend and everything
 else on the proxy. A Velocity plugin registering `/world` intercepts the whole
 namespace, so the two backend subcommands become unreachable unless the proxy
@@ -680,29 +771,24 @@ handler explicitly forwards unrecognised — or specifically those — subcomman
 to the backend. Not hard, but it must be designed in, not discovered. Confirm
 the proxy owns the root and forwards a known list.
 
-**Q4 — FR-39's report table is missing from §4, and its chat log needs a
+**Q2 — FR-39's report table is missing from §4, and its chat log needs a
 retention policy.** Proposal in §6. The chat-log capture in particular stores
 player conversation, so it needs an explicit retention period and a maintenance
 sweep. What retention do you want — 30 days, 90, until the report is handled?
 
-**Q5 — proxy tab completion (FR-24c) cannot hit the database per keystroke.**
+**Q3 — proxy tab completion (FR-24c) cannot hit the database per keystroke.**
 The membership index in §4 makes the query cheap, but a query per tab-completion
 per player is still the wrong shape. Foundation answer: a membership cache on
 the proxy invalidated over the D2 control channel. Flagging it because it means
 the control plane carries cache invalidation from the start, which F7 already
 provides for.
 
-**Q6 — OQ-10 and OQ-12 remain open in the spec and affect foundation choices.**
+**Q4 — OQ-10 and OQ-12 remain open in the spec and affect foundation choices.**
 How many `worlds` nodes at launch, and does MinIO run on the same host as the
 nodes? If MinIO shares a host with the nodes, a single host failure takes both
 the working copy and the source of truth, which removes most of the value of
 the split — and it changes how much the e2e harness (F11) needs to model. Not
-blocking for F0–F10.
-
-**Q7 — is `nl.gzmn.playerworlds` the package root you want?** The repository is
-`DynamicPlayerWorlds` while the spec says "GZMN Player Worlds"; plugin names in
-the spec are `gzmn-worlds` and `gzmn-worlds-proxy`. Package root, Maven
-coordinates and plugin names are painful to change later. Confirm before F1.
+blocking for F0–F12.
 
 ---
 
