@@ -12,6 +12,9 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
+import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
+import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
@@ -31,9 +34,12 @@ import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlPlane;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
@@ -92,6 +98,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
     private @Nullable NodeHeartbeat nodeHeartbeat;
+    private @Nullable ControlPlane controlPlane;
+    private @Nullable ExecutorService listenExecutor;
 
     /**
      * Last policy read from the database.
@@ -356,6 +364,49 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         this.idleUnload = sweep;
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
+
+        startControlPlane(
+                worldRegistry, lifecycle, worldFolders, membershipCache, openedDatabase, pools, node, this.policy);
+    }
+
+    /** Starts the control plane listener and command dispatcher (milestone 5). */
+    private void startControlPlane(
+            WorldRegistry worldRegistry,
+            WorldLifecycleService lifecycle,
+            WorldFolders worldFolders,
+            MembershipCache membershipCache,
+            Database openedDatabase,
+            PluginExecutors pools,
+            NodeConfig node,
+            NetworkPolicy loadedPolicy) {
+        ExecutorService listen = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "gzmn-backend-listen");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.listenExecutor = listen;
+
+        NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
+        ControlPlane plane = ControlPlane.forNode(
+                node.nodeId(),
+                node.database(),
+                nodeCommands,
+                loadedPolicy.controlPollInterval(),
+                loadedPolicy.controlClaimTimeout());
+
+        plane.register(
+                CommandKind.UNLOAD_WORLD,
+                new UnloadWorldHandler(worldRegistry, lifecycle, worldFolders, pools, nodeCommands, this::policy));
+        plane.register(
+                CommandKind.INVALIDATE_CACHE,
+                new InvalidateCacheHandler(new NetworkSettings(openedDatabase), membershipCache, pools.db()));
+        EjectPlayerHandler ejectHandler =
+                new EjectPlayerHandler(membershipCache, worldFolders, pools, nodeCommands, this::policy);
+        plane.register(CommandKind.KICK_MEMBER, ejectHandler);
+        plane.register(CommandKind.EJECT_PLAYER, ejectHandler);
+
+        plane.start(pools.sched(), listen);
+        this.controlPlane = plane;
     }
 
     /**
@@ -415,6 +466,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         return registry;
     }
 
+    /** The control plane consumer, or {@code null} when enable refused. */
+    public @Nullable ControlPlane controlPlane() {
+        return controlPlane;
+    }
+
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
@@ -463,6 +519,18 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         this.nodeHeartbeat = null;
         if (heartbeat != null) {
             heartbeat.deregister();
+        }
+
+        ControlPlane plane = this.controlPlane;
+        this.controlPlane = null;
+        if (plane != null) {
+            plane.close();
+        }
+
+        ExecutorService listen = this.listenExecutor;
+        this.listenExecutor = null;
+        if (listen != null) {
+            listen.shutdownNow();
         }
 
         getServer().getScheduler().cancelTasks(this);

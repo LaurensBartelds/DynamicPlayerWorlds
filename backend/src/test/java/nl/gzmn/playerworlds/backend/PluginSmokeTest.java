@@ -69,6 +69,7 @@ class PluginSmokeTest {
         assertThat(plugin.platform().identity().dataVersion()).isEqualTo(Platform.BUILD_DATA_VERSION);
         assertThat(plugin.executors()).isNotNull();
         assertThat(plugin.metrics()).isNotNull();
+        assertThat(plugin.controlPlane()).isNotNull();
 
         // Milestone 1: the world registry exists and starts empty, and network
         // policy came from the database rather than from the in-code defaults
