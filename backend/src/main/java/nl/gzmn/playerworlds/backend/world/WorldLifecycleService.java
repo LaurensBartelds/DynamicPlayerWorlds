@@ -1,5 +1,6 @@
 package nl.gzmn.playerworlds.backend.world;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
@@ -19,6 +20,7 @@ import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.WorldLayout;
 import nl.gzmn.playerworlds.backend.platform.WorldLifecycle;
 import nl.gzmn.playerworlds.backend.platform.WorldRuntime;
+import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -31,6 +33,11 @@ import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.EventLogger;
 import nl.gzmn.playerworlds.core.obs.LogEvent;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
+import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
+import nl.gzmn.playerworlds.core.storage.Manifest;
+import nl.gzmn.playerworlds.core.storage.ManifestCodec;
+import nl.gzmn.playerworlds.core.storage.ObjectStore;
+import nl.gzmn.playerworlds.core.storage.WorldDownloader;
 import org.bukkit.World;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -76,6 +83,58 @@ public final class WorldLifecycleService {
     private final Supplier<NetworkPolicy> policy;
     private final Path worldContainer;
     private final int nodeDataVersion;
+    private final @Nullable WorldDownloader worldDownloader;
+    private final @Nullable ObjectStore objectStore;
+    private final @Nullable WorldCommitService commitService;
+    private final @Nullable LocalObjectCache cache;
+
+    public WorldLifecycleService(
+            PlayerWorldRepository worlds,
+            MembershipRepository membership,
+            MembershipCache membershipCache,
+            PluginExecutors executors,
+            Platform platform,
+            WorldFolders folders,
+            WorldRegistry registry,
+            WorldsMetrics metrics,
+            Supplier<NetworkPolicy> policy,
+            Path worldContainer,
+            @Nullable WorldDownloader worldDownloader,
+            @Nullable ObjectStore objectStore,
+            @Nullable WorldCommitService commitService,
+            @Nullable LocalObjectCache cache) {
+        this.worlds = Objects.requireNonNull(worlds, "worlds");
+        this.membership = Objects.requireNonNull(membership, "membership");
+        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
+        this.executors = Objects.requireNonNull(executors, "executors");
+        this.platform = Objects.requireNonNull(platform, "platform");
+        this.folders = Objects.requireNonNull(folders, "folders");
+        this.registry = Objects.requireNonNull(registry, "registry");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.policy = Objects.requireNonNull(policy, "policy");
+        this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
+        this.nodeDataVersion = platform.identity().dataVersion();
+        this.worldDownloader = worldDownloader;
+        this.objectStore = objectStore;
+        this.commitService = commitService;
+        this.cache = cache;
+    }
+
+    public @Nullable WorldDownloader worldDownloader() {
+        return worldDownloader;
+    }
+
+    public @Nullable ObjectStore objectStore() {
+        return objectStore;
+    }
+
+    public @Nullable WorldCommitService commitService() {
+        return commitService;
+    }
+
+    public @Nullable LocalObjectCache cache() {
+        return cache;
+    }
 
     public WorldLifecycleService(
             PlayerWorldRepository worlds,
@@ -88,17 +147,21 @@ public final class WorldLifecycleService {
             WorldsMetrics metrics,
             Supplier<NetworkPolicy> policy,
             Path worldContainer) {
-        this.worlds = Objects.requireNonNull(worlds, "worlds");
-        this.membership = Objects.requireNonNull(membership, "membership");
-        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
-        this.executors = Objects.requireNonNull(executors, "executors");
-        this.platform = Objects.requireNonNull(platform, "platform");
-        this.folders = Objects.requireNonNull(folders, "folders");
-        this.registry = Objects.requireNonNull(registry, "registry");
-        this.metrics = Objects.requireNonNull(metrics, "metrics");
-        this.policy = Objects.requireNonNull(policy, "policy");
-        this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
-        this.nodeDataVersion = platform.identity().dataVersion();
+        this(
+                worlds,
+                membership,
+                membershipCache,
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                policy,
+                worldContainer,
+                null,
+                null,
+                null,
+                null);
     }
 
     // -----------------------------------------------------------------------
@@ -191,7 +254,14 @@ public final class WorldLifecycleService {
                     // Pre-generation is asynchronous and bounded (FR-4). A failure
                     // here is not a failed create: the world exists and is
                     // playable, the spawn area is just cold.
-                    return pregenerateSpawn(row, current).thenCompose(ignored -> promoteToReady(row, loaded));
+                    return pregenerateSpawn(row, current)
+                            .thenCompose(ignored -> promoteToReady(row, loaded))
+                            .thenApply(outcome -> {
+                                if (commitService != null && outcome instanceof CreateOutcome.Created) {
+                                    var _ = commitService.requestCommit(row.id());
+                                }
+                                return outcome;
+                            });
                 })
                 .exceptionallyCompose(failure -> {
                     log.error("create failed for world {}", row.id(), failure);
@@ -208,17 +278,18 @@ public final class WorldLifecycleService {
      */
     private CompletableFuture<Boolean> pregenerateSpawn(PlayerWorld row, NetworkPolicy current) {
         String bukkitName = folders.bukkitWorldName(row.id(), DimensionKind.OVERWORLD);
-        return platform.worldLifecycle()
-                .pregenerateSpawn(bukkitName, current.pregenSpawnChunks())
-                .handle((ignored, failure) -> {
-                    if (failure != null) {
-                        log.warn(
-                                "spawn pre-generation failed for world {}; the world is still usable",
-                                row.id(),
-                                failure);
-                    }
-                    return Boolean.TRUE;
-                });
+        CompletableFuture<Void> future;
+        try {
+            future = platform.worldLifecycle().pregenerateSpawn(bukkitName, current.pregenSpawnChunks());
+        } catch (Exception e) {
+            future = CompletableFuture.failedFuture(e);
+        }
+        return future.handle((ignored, failure) -> {
+            if (failure != null) {
+                log.warn("spawn pre-generation failed for world {}; the world is still usable", row.id(), failure);
+            }
+            return Boolean.TRUE;
+        });
     }
 
     private CompletableFuture<CreateOutcome> promoteToReady(PlayerWorld row, LoadedWorld loaded) {
@@ -341,6 +412,29 @@ public final class WorldLifecycleService {
 
     /** Runs on the io executor: stats the folders, then hops to main to load them. */
     private CompletableFuture<LoadOutcome> materialiseExisting(PlayerWorld row, NetworkPolicy current) {
+        long startNanos = System.nanoTime();
+        boolean isCold = false;
+
+        if (row.manifestKey() != null
+                && !row.manifestKey().isBlank()
+                && objectStore != null
+                && worldDownloader != null) {
+            try {
+                byte[] manifestBytes = objectStore.getBytes(row.manifestKey());
+                String manifestJson = new String(manifestBytes, StandardCharsets.UTF_8);
+                Manifest manifest = ManifestCodec.decode(manifestJson);
+                WorldDownloader.Result dlResult = worldDownloader.materialize(manifest, worldContainer);
+                isCold = !dlResult.wasWarm();
+                if (commitService != null) {
+                    commitService.cacheManifest(row.id(), manifest);
+                }
+            } catch (Exception e) {
+                log.error("could not download or materialize manifest for world {}", row.id(), e);
+                return CompletableFuture.completedFuture(new LoadOutcome.Failed(
+                        row.id(), "could not materialize world from storage: " + e.getMessage()));
+            }
+        }
+
         Set<DimensionKind> onDisk = dimensionsOnDisk(row.id());
         if (onDisk.isEmpty()) {
             if (row.state() == WorldState.CREATING) {
@@ -358,15 +452,12 @@ public final class WorldLifecycleService {
                     case CreateOutcome.NodeFull full -> new LoadOutcome.NodeFull(full.loaded(), full.cap());
                 });
             }
-            // A READY row whose folders are gone. Milestone 6 downloads them from
-            // object storage; until then this is a genuine inconsistency and
-            // saying so beats silently generating a new world over the top.
-            return CompletableFuture.completedFuture(
-                    new LoadOutcome.Failed(row.id(), "no world folder on this node and object storage is milestone 6"));
+            // A READY row whose folders are gone and no manifest could be loaded.
+            return CompletableFuture.completedFuture(new LoadOutcome.Failed(row.id(), "no world folder on this node"));
         }
 
         LoadedWorld loaded = registry.register(LoadedWorld.of(row));
-        long startNanos = System.nanoTime();
+        final boolean finalIsCold = isCold;
 
         return onMain(() -> {
                     for (DimensionKind dimension : onDisk) {
@@ -395,9 +486,12 @@ public final class WorldLifecycleService {
                             }
                             cacheMembership(row);
                             metrics.setWorldsLoaded(registry.size());
-                            // Warm by definition on a single node: the folders were
-                            // already here. Milestone 6 introduces the cold path.
-                            metrics.worldLoadWarm(Duration.ofNanos(System.nanoTime() - startNanos));
+                            Duration loadDuration = Duration.ofNanos(System.nanoTime() - startNanos);
+                            if (finalIsCold) {
+                                metrics.worldLoadCold(loadDuration);
+                            } else {
+                                metrics.worldLoadWarm(loadDuration);
+                            }
                             events.info(LogEvent.WORLD_JOIN, "world loaded: " + row.name(), row.id());
                             return (LoadOutcome) new LoadOutcome.Loaded(loaded);
                         },

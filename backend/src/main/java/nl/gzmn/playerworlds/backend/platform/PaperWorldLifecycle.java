@@ -74,16 +74,20 @@ public final class PaperWorldLifecycle implements WorldLifecycle {
         int low = -(chunkSide / 2);
         int high = low + chunkSide - 1;
 
-        List<CompletableFuture<Chunk>> pending = new ArrayList<>(chunkSide * chunkSide);
-        for (int x = low; x <= high; x++) {
-            for (int z = low; z <= high; z++) {
-                // gen = true so the chunks are actually generated; urgent = false
-                // so this queues behind real player chunk loads rather than ahead
-                // of them (FR-4: the point is to stop competing with the tick).
-                pending.add(world.getChunkAtAsync(centreX + x, centreZ + z, true, false));
+        try {
+            List<CompletableFuture<Chunk>> pending = new ArrayList<>(chunkSide * chunkSide);
+            for (int x = low; x <= high; x++) {
+                for (int z = low; z <= high; z++) {
+                    // gen = true so the chunks are actually generated; urgent = false
+                    // so this queues behind real player chunk loads rather than ahead
+                    // of them (FR-4: the point is to stop competing with the tick).
+                    pending.add(world.getChunkAtAsync(centreX + x, centreZ + z, true, false));
+                }
             }
+            return CompletableFuture.allOf(pending.toArray(new CompletableFuture<?>[0]));
+        } catch (Exception e) {
+            return CompletableFuture.failedFuture(e);
         }
-        return CompletableFuture.allOf(pending.toArray(new CompletableFuture<?>[0]));
     }
 
     @Override
