@@ -70,6 +70,7 @@ class PluginSmokeTest {
         assertThat(plugin.executors()).isNotNull();
         assertThat(plugin.metrics()).isNotNull();
         assertThat(plugin.controlPlane()).isNotNull();
+        assertThat(plugin.heartbeat()).isNotNull();
 
         // Milestone 1: the world registry exists and starts empty, and network
         // policy came from the database rather than from the in-code defaults

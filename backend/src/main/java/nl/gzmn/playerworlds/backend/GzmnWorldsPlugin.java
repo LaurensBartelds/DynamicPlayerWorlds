@@ -41,6 +41,7 @@ import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
@@ -388,6 +389,27 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 pools,
                 node,
                 this.policy);
+        startHeartbeat(openedDatabase, pools, node, selected.identity(), worldRegistry);
+    }
+
+    /** Publishes this node's heartbeat row (MN-17, MN-18). */
+    private void startHeartbeat(
+            Database openedDatabase,
+            PluginExecutors pools,
+            NodeConfig node,
+            ServerIdentity identity,
+            WorldRegistry worldRegistry) {
+        NodeHeartbeat heartbeat = new NodeHeartbeat(
+                new NodeRepository(openedDatabase),
+                node,
+                identity,
+                worldRegistry::size,
+                () -> getServer().getOnlinePlayers().size());
+        this.nodeHeartbeat = heartbeat;
+        // First heartbeat immediately so the proxy can discover this node right away (MN-17)
+        pools.db().execute(heartbeat);
+        long intervalSeconds = node.heartbeatInterval().toSeconds();
+        var _ = pools.sched().scheduleWithFixedDelay(heartbeat, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
     }
 
     /** Starts the control plane listener and command dispatcher (milestone 5). */
@@ -492,6 +514,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         return controlPlane;
     }
 
+    /** The node heartbeat publisher, or {@code null} when enable refused. */
+    public @Nullable NodeHeartbeat heartbeat() {
+        return nodeHeartbeat;
+    }
+
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
@@ -538,8 +565,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // immediately rather than after the node ages out of the alive set.
         NodeHeartbeat heartbeat = this.nodeHeartbeat;
         this.nodeHeartbeat = null;
-        if (heartbeat != null) {
-            heartbeat.deregister();
+        PluginExecutors pools = this.executors;
+        if (heartbeat != null && pools != null) {
+            try {
+                BoundedOperations.run(pools.db(), Duration.ofSeconds(2), heartbeat::deregister);
+            } catch (Exception e) {
+                getLogger().warning(() -> "could not deregister node heartbeat cleanly: " + e.getMessage());
+            }
         }
 
         ControlPlane plane = this.controlPlane;
@@ -566,7 +598,6 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         if (worldsMetrics != null) {
             worldsMetrics.close();
         }
-        PluginExecutors pools = this.executors;
         this.executors = null;
         if (pools != null) {
             pools.shutdown(PluginExecutors.DEFAULT_SHUTDOWN_TIMEOUT);
