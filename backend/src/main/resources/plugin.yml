@@ -1,0 +1,8 @@
+name: gzmn-worlds
+version: '${version}'
+main: nl.gzmn.playerworlds.backend.GzmnWorldsPlugin
+api-version: '1.21'
+description: Private per-player worlds for the GZMN network
+authors: [GZMN]
+website: https://github.com/LaurensBartelds/DynamicPlayerWorlds
+folia-supported: false

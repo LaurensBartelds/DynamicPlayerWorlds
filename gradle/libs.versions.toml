@@ -1,0 +1,68 @@
+# The only place a dependency version is written. See CONTRIBUTING.md.
+[versions]
+# Platform APIs. An MC bump touches these two lines and nothing else.
+# paperApi doubles as the +mc<version> suffix on the plugin jars.
+paperApi = "1.21.4-R0.1-SNAPSHOT"
+velocityApi = "3.4.0-SNAPSHOT"
+
+# Runtime
+hikari = "7.1.0"
+postgresql = "42.7.13"
+flyway = "13.3.0"
+slf4j = "2.0.18"
+logback = "1.6.3"
+logstashEncoder = "9.0"
+micrometer = "1.17.0"
+awsSdk = "2.53.1"
+zstd = "1.5.7-15"
+jspecify = "1.0.1"
+
+# Test
+junit = "6.1.3"
+assertj = "3.27.7"
+testcontainers = "2.0.5"
+archunit = "1.5.0"
+
+# Build tooling
+errorprone = "2.50.0"
+nullaway = "0.13.8"
+palantirFormat = "2.97.0"
+
+[libraries]
+paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paperApi" }
+velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocityApi" }
+
+hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
+postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+flyway-core = { module = "org.flywaydb:flyway-core", version.ref = "flyway" }
+flyway-postgresql = { module = "org.flywaydb:flyway-database-postgresql", version.ref = "flyway" }
+
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
+logstash-encoder = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstashEncoder" }
+
+micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }
+micrometer-prometheus = { module = "io.micrometer:micrometer-registry-prometheus", version.ref = "micrometer" }
+
+awssdk-s3 = { module = "software.amazon.awssdk:s3", version.ref = "awsSdk" }
+zstd = { module = "com.github.luben:zstd-jni", version.ref = "zstd" }
+jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
+
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
+testcontainers-junit = { module = "org.testcontainers:testcontainers-junit-jupiter" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
+testcontainers-minio = { module = "org.testcontainers:testcontainers-minio" }
+archunit-junit5 = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
+
+errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone" }
+nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version = "8.9.0" }
+errorprone = { id = "net.ltgt.errorprone", version = "5.1.0" }
+forbiddenapis = { id = "de.thetaphi.forbiddenapis", version = "3.10" }
+shadow = { id = "com.gradleup.shadow", version = "8.3.9" }

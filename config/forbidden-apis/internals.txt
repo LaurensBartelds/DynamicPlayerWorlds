@@ -1,0 +1,24 @@
+# Server internals are banned. See CONTRIBUTING.md rule 1 and ADR 0003.
+#
+# Be clear about what this file does and does not achieve. net.minecraft and
+# org.bukkit.craftbukkit are never on our compile classpath — paper-api does not
+# expose them — so code referencing them does not compile in the first place,
+# and that compile error is the real gate. `ignoreSignaturesOfMissingClasses`
+# means these entries are simply skipped while that stays true.
+#
+# They earn their place as a tripwire for the day someone adds a dependency that
+# puts those classes on the classpath (paperweight-userdev, a server jar, a
+# shaded NMS helper). At that moment compilation stops being a barrier and this
+# file becomes the one that fails the build, with a message saying why.
+#
+# Reflection into internals — Class.forName("net.minecraft…") — cannot be caught
+# by signature matching at all. Review is the only control there.
+
+@defaultMessage Server internals are banned; the API-only rule is what keeps a Minecraft upgrade cheap (CONTRIBUTING.md rule 1)
+net.minecraft.**
+org.bukkit.craftbukkit.**
+
+# The clock rule (CONTRIBUTING.md rule 5) is deliberately NOT enforced here. A
+# blanket ban would also catch legitimate duration measurement in metrics, which
+# is what System.nanoTime is for. ArchitectureTest scopes it to the packages
+# where reading a local clock is actually a correctness bug.
