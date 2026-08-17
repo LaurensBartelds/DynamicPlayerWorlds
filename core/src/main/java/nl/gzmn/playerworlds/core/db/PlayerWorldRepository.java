@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
@@ -115,8 +116,20 @@ public final class PlayerWorldRepository extends Repository {
             WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, Visibility visibility)
             throws SQLException {
         Objects.requireNonNull(id, "id");
-        return database.inTransaction(connection ->
-                insertCreating(connection, id, ownerUuid, name, id.folder(), seed, borderRadius, visibility));
+        Objects.requireNonNull(ownerUuid, "ownerUuid");
+        MembershipRepository membership = new MembershipRepository(database);
+        return database.inTransaction(connection -> {
+            PlayerWorld row =
+                    insertCreating(connection, id, ownerUuid, name, id.folder(), seed, borderRadius, visibility);
+            // The owner's own membership row, in the same transaction. FR-31a
+            // describes a transfer as updating "both player_world_member.role
+            // rows", so the owner is expected to have one; without it
+            // /world members omits the owner and FR-29's transfer finds only one
+            // row to move. player_world.owner_uuid stays authoritative either
+            // way — this row is the denormalised convenience, not the truth.
+            membership.insertMember(connection, id, ownerUuid, Role.OWNER, null);
+            return row;
+        });
     }
 
     /**
