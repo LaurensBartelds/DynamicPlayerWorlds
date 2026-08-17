@@ -109,6 +109,23 @@ the jar filename (`+mc<version>`), not part of the project version.
   validates the two against each other, and refuses rather than running with a
   default that violates a safety property.
 
+- Milestone-2 plan `docs/plans/02-membership-and-invites.md`, and membership,
+  invites and roles (FR-6 to FR-9, FR-31a).
+- The proxy is a working plugin: `config.toml`, a database pool, the enable
+  bootstrap, and the `/world` root with `invite`, `accept`, `kick`, `members`
+  and `promote`. **Resolves OQ-15** — the proxy owns the root and forwards a
+  declared list to the backend.
+- `player_name` (migration V2), a username cache the proxy fills on login.
+  Section 4 stores UUIDs and section 6's commands take names; nothing bridged
+  the two. Carried as OQ-20.
+- Role enforcement in world (FR-9): a VISITOR cannot break or place blocks and
+  cannot open containers, while interact stays permitted. `MembershipCache`
+  holds each loaded world's roles so enforcement never queries on the tick
+  thread (NFR-2), and fails closed — an uncached world treats everyone as a
+  visitor rather than assuming they may build.
+- `/pworld tp <owner> <name>` lets a member enter a world they do not own, which
+  is what makes the roles exercisable on a single server.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper

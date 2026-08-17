@@ -327,7 +327,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         if (command == null) {
             getLogger().severe("plugin.yml does not declare the pworld command; the operator surface is unavailable");
         } else {
-            PworldCommand handler = new PworldCommand(lifecycle, worldRegistry, worldFolders, worldRepository, pools);
+            PworldCommand handler = new PworldCommand(
+                    lifecycle,
+                    worldRegistry,
+                    worldFolders,
+                    worldRepository,
+                    membershipRepository,
+                    new nl.gzmn.playerworlds.core.db.PlayerNameRepository(openedDatabase),
+                    pools);
             command.setExecutor(handler);
             command.setTabCompleter(handler);
             // Say so positively. A command gated behind a permission is tested for

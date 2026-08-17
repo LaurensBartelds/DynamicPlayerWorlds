@@ -17,6 +17,8 @@ import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
+import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import org.bukkit.Bukkit;
@@ -58,6 +60,8 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
     private final WorldRegistry registry;
     private final WorldFolders folders;
     private final PlayerWorldRepository worlds;
+    private final MembershipRepository membership;
+    private final PlayerNameRepository names;
     private final PluginExecutors executors;
 
     public PworldCommand(
@@ -65,11 +69,15 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             WorldRegistry registry,
             WorldFolders folders,
             PlayerWorldRepository worlds,
+            MembershipRepository membership,
+            PlayerNameRepository names,
             PluginExecutors executors) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.folders = Objects.requireNonNull(folders, "folders");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
+        this.membership = Objects.requireNonNull(membership, "membership");
+        this.names = Objects.requireNonNull(names, "names");
         this.executors = Objects.requireNonNull(executors, "executors");
     }
 
@@ -204,7 +212,14 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             return;
         }
         if (args.length < 2) {
-            error(sender, "usage: /pworld tp <name>");
+            error(sender, "usage: /pworld tp <name>  |  /pworld tp <owner> <name>");
+            return;
+        }
+        // Two arguments means somebody else's world, which is what makes FR-9's
+        // roles testable on a single server: without a way in, a VISITOR never
+        // exists anywhere but in the database.
+        if (args.length >= 3) {
+            teleportToOthersWorld(sender, player, args[1], args[2]);
             return;
         }
         String name = args[1];
@@ -252,6 +267,58 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
                                                 "this node is holding " + full.loaded() + " worlds (limit " + full.cap()
                                                         + ")");
                                     case LoadOutcome.Failed reason -> error(sender, reason.reason());
+                                }
+                            },
+                            executors.main());
+        });
+    }
+
+    /**
+     * {@code /pworld tp <owner> <name>} — enter a world somebody else owns.
+     *
+     * <p>Membership is checked here rather than assumed, because this is the only
+     * route into another player's world until the proxy's {@code /world join}
+     * lands with the transfer path (milestone 5). A non-member is refused with
+     * the same message as a world that does not exist: telling a stranger that a
+     * private world exists is the leak specification section 5.5 exists to
+     * prevent.
+     */
+    private void teleportToOthersWorld(CommandSender sender, Player player, String ownerName, String worldName) {
+        executors.db().execute(() -> {
+            final Optional<PlayerWorld> found;
+            try {
+                Optional<UUID> owner = names.uuidOf(ownerName);
+                if (owner.isEmpty()) {
+                    onMain(() -> error(sender, "no world called '" + worldName + "' that you can enter"));
+                    return;
+                }
+                found = worlds.findByOwnerAndName(owner.get(), worldName);
+                if (found.isEmpty()
+                        || membership
+                                .findMember(found.get().id(), player.getUniqueId())
+                                .isEmpty()) {
+                    onMain(() -> error(sender, "no world called '" + worldName + "' that you can enter"));
+                    return;
+                }
+                membership.markJoined(found.get().id(), player.getUniqueId());
+            } catch (SQLException e) {
+                log.error("/pworld tp lookup failed", e);
+                onMain(() -> error(sender, "could not read that world; see the server log"));
+                return;
+            }
+            var _ = lifecycle
+                    .load(found.get().id())
+                    .whenCompleteAsync(
+                            (outcome, failure) -> {
+                                if (failure != null) {
+                                    log.error("/pworld tp load failed", failure);
+                                    error(sender, "could not load that world; see the server log");
+                                    return;
+                                }
+                                if (outcome instanceof LoadOutcome.Loaded loaded) {
+                                    teleportToSpawn(player, loaded.world());
+                                } else {
+                                    error(sender, "that world could not be loaded right now");
                                 }
                             },
                             executors.main());

@@ -9,6 +9,57 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
+## Milestone 2 — membership, invites and roles: code complete, unverified
+
+Plan [`02-membership-and-invites.md`](02-membership-and-invites.md).
+`./gradlew check build` is green: 195 tests, none failing and none skipped.
+
+The proxy is now a real plugin. It has `config.toml`, a database pool, the same
+enable bootstrap the backend has, and it owns `/world` — **which resolves
+OQ-15**. Subcommands implemented: `invite`, `accept`, `kick`, `members`,
+`promote`. `create`, `join` and `browse` need placement and the transfer handoff
+and stay on `/pworld` until milestones 5 and 8.
+
+Roles are enforced, not merely stored (D10): a VISITOR cannot break or place
+blocks and cannot open containers, while interact — buttons, levers, doors —
+stays permitted per FR-9.
+
+### What must happen on a node before this milestone is believed
+
+Two servers are needed here, or two accounts on one:
+
+- [ ] **Deploy the proxy plugin.** It has never run. Its `config.toml` needs a
+      database URL and a `lobby-server` matching a server in `velocity.toml`.
+- [ ] `/world invite`, then `/world accept` from the other account, then
+      `/world members` shows both names.
+- [ ] **Role enforcement.** `/world promote` and demote a member, then have them
+      enter with `/pworld tp <owner> <name>` and confirm a VISITOR cannot break a
+      block or open a chest, and a BUILDER can.
+- [ ] `/world kick` removes the membership and the invite together.
+
+### Known gaps, deliberate
+
+- **A membership change does not reach an already-loaded world.** The node
+  caches roles when the world loads and drops them when it unloads; the control
+  plane's `INVALIDATE_CACHE` that would push a change through lands in milestone
+  5. Until then a promote or kick takes effect on the world's next load. Stated
+  here rather than buried, because it is surprising.
+- **FR-8's immediate ejection is not wired.** Kicking removes the membership and
+  the invite; ejecting a player who is *inside* the world at the time is the
+  control plane's `KICK_MEMBER`, whose handler arrives with the transfer path.
+- **The membership commands take no world name.** Section 6 gives them none
+  either, so with a cap of two worlds they refuse rather than guess which world
+  is meant. A world argument arrives with milestone 5.
+
+### Found while building
+
+- **Section 4 has no username storage anywhere**, while every section 6 command
+  takes a player name. Added `player_name` (V2) as a proxy-filled cache, carried
+  as **OQ-20**. Its one consequence: a player who has never logged in since the
+  cache existed cannot be named as a command argument.
+- The shaded-jar gate caught gson's Error Prone annotations arriving through
+  toml4j — the fourth time that gate has paid for itself.
+
 ## Milestone 1 — world lifecycle: done, verified on a real node
 
 Confirmed on the GZMN test instance (Paper 26.2-112, PostgreSQL 17.11): the
@@ -284,10 +335,12 @@ Carried in the spec as OQ-13 to OQ-16 so they are not lost.
       `created_at` and `handled_at`, which is what any of the three answers sweeps
       on, and the period itself belongs in `network_setting` so it can change
       without a migration. Now needed by the F40 maintenance sweep instead.
-- [ ] **OQ-15** Confirm the proxy owns the `/world` root and forwards `leave`
-      and `report` to the backend. Needed by milestone 5. Milestone 1 kept the
-      backend off that root entirely by using `/pworld` (plan 01, D8), so the
-      answer is still free.
+- [x] **OQ-15** Resolved in milestone 2: the proxy owns `/world` and forwards a
+      declared list to the backend. The list is empty until `/world leave` and
+      `/world report` exist, but naming it in code is what stops either from
+      being silently unreachable.
+- [ ] **OQ-20** Is a proxy-filled `player_name` cache the right way to turn the
+      player names in section 6's commands into the UUIDs section 4 stores?
 - [ ] **OQ-17** Does Paper generate the end arrival platform when the
       destination world comes from a plugin rather than from its own portal
       search? Blocking for milestone 1's acceptance; see the checklist above.
