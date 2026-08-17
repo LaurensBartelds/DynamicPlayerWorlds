@@ -125,7 +125,7 @@ not. Paper and Velocity stay `compileOnly` and are not shaded.
 | `build` | every push / PR | `./gradlew check build` |
 | `dependency-review` | PRs | vulnerable / disallowed-licence deps |
 | `paper-latest` | nightly | compile + boot against newest Paper |
-| `e2e` | nightly | compose harness (F11; stub until then) |
+| `e2e` | nightly | compose harness — lobby join through Velocity |
 | `release` | `v*` tags | jars, CycloneDX SBOM, checksums |
 
 Renovate opens dependency PRs. Paper, Velocity and MockBukkit are grouped as

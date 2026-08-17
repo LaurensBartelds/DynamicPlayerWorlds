@@ -1,0 +1,16 @@
+# World defaults for a fast flat lobby boot in CI. Paper merges missing keys.
+_version: 31
+spawn:
+  keep-spawn-loaded: false
+  keep-spawn-loaded-range: 2
+environment:
+  disable-ice-and-snow: true
+  disable-thunder: true
+  treasure-maps:
+    enabled: false
+entities:
+  spawning:
+    per-player-mob-spawns: false
+anticheat:
+  anti-xray:
+    enabled: false

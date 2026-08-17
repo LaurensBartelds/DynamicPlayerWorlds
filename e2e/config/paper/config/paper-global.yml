@@ -1,0 +1,12 @@
+# Paper global config for e2e nodes. Only the Velocity forwarding block is
+# load-bearing; Paper fills the rest of the schema on first boot.
+_version: 29
+proxies:
+  velocity:
+    enabled: true
+    online-mode: false
+    secret: e2e-forwarding-secret-not-for-prod
+update-checker:
+  enabled: false
+timings:
+  enabled: false

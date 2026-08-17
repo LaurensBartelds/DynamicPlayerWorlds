@@ -61,11 +61,16 @@ the jar filename (`+mc<version>`), not part of the project version.
   `WorldFixture`, with smoke tests for the unit, database and object-storage
   layers; MockBukkit plugin-surface smoke on `:backend` against Paper 26.2.
 - CI/CD (F10): GitHub Actions workflows for every-push `build`, nightly
-  `paper-latest` (compile + real Paper boot against newest API), deferred `e2e`
-  schedule, tag `release` with CycloneDX SBOM and checksums, and PR
+  `paper-latest` (compile + real Paper boot against newest API), nightly `e2e`
+  compose harness, tag `release` with CycloneDX SBOM and checksums, and PR
   `dependency-review`. Renovate groups Paper/Velocity/MockBukkit under
   `minecraft-update`. `app.cash.licensee` fails `check` on a disallowed
   transitive licence; `-PpaperApi=` overrides the catalog pin for the nightly.
+- e2e compose harness (F11): `e2e/` boots Postgres + MinIO + Velocity + two
+  Paper nodes; test-only `:e2e-harness` plugin exposes `/e2e ping|status` over
+  RCON and join markers; minecraft-protocol offline bot joins the lobby through
+  the proxy (handshake protocol 776 with 26.1 packet schemas). Entry point
+  `e2e/scripts/run.sh` for CI and local runs.
 
 ### Changed
 

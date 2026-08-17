@@ -4,8 +4,8 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4, F5, F6, F7, F8, F9 and F10 are done. `./gradlew build` is green on all four modules
-against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
+F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10 and F11 are done. `./gradlew build` is green on all
+modules against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
 ## First, in an environment that can reach repo.papermc.io — done
@@ -153,13 +153,19 @@ in blocks `repo.papermc.io`. They compile now.
       remains in the owning modules; MockBukkit plugin-surface smoke in
       `:backend`. `:core` keeps `TestPostgres` to avoid a dependency cycle.
 - [x] **F10** CI/CD. Done: five workflows under `.github/workflows/` (`build`,
-      `paper-latest`, `e2e` stub for F11, `release`, `dependency-review`),
-      Renovate with a `minecraft-update` group for Paper/Velocity/MockBukkit,
-      licensee licence gate on `check`, CycloneDX SBOM on release, and
-      `-PpaperApi=` override so the nightly compiles and boots against Paper's
-      newest API/server without rewriting the catalog. Branch-protection
-      settings are documented in `CONTRIBUTING.md` (GitHub UI; not codable here).
-- [ ] **F11** *(defer-ok)* e2e docker compose harness.
+      `paper-latest`, `e2e`, `release`, `dependency-review`), Renovate with a
+      `minecraft-update` group for Paper/Velocity/MockBukkit, licensee licence
+      gate on `check`, CycloneDX SBOM on release, and `-PpaperApi=` override so
+      the nightly compiles and boots against Paper's newest API/server without
+      rewriting the catalog. Branch-protection settings are documented in
+      `CONTRIBUTING.md` (GitHub UI; not codable here). The e2e workflow body
+      landed with F11.
+- [x] **F11** e2e docker compose harness. Done: `e2e/compose.yml` boots Postgres
+      18.3, MinIO, Velocity and two Paper nodes; `:e2e-harness` answers `/e2e`
+      over RCON and logs join markers; a minecraft-protocol bot joins the lobby
+      through the proxy (handshake advertises protocol 776 with 26.1 packet
+      schemas). Nightly workflow `e2e.yml` runs `e2e/scripts/run.sh`.
+      Acceptance: one player joins a lobby in CI.
 - [ ] **F12** *(defer-ok, worth pulling forward)* Durability primitives: the
       reflink copier with fallback detection and the region-file structural
       validator (MN-5c). Pure `:core` code, no server needed, and the

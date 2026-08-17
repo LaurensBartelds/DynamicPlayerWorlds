@@ -1,0 +1,16 @@
+{
+  "name": "gzmn-worlds-e2e-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline minecraft-protocol client that joins the e2e lobby through Velocity",
+  "type": "module",
+  "scripts": {
+    "join": "node join-lobby.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "minecraft-protocol": "1.67.0"
+  }
+}

@@ -1,0 +1,50 @@
+# Minimal spigot.yml — short view distance, no lag-intensive defaults.
+settings:
+  debug: false
+  save-user-cache-on-stop-only: true
+  moved-wrongly-threshold: 0.0625
+  moved-too-quickly-multiplier: 10.0
+  timeout-time: 60
+  restart-on-crash: false
+  user-cache-size: 100
+  bungeecord: false
+  netty-threads: 2
+  attribute:
+    maxHealth:
+      max: 2048.0
+    movementSpeed:
+      max: 2048.0
+    attackDamage:
+      max: 2048.0
+players:
+  disable-saving: false
+world-settings:
+  default:
+    verbose: false
+    view-distance: 4
+    simulation-distance: 4
+    merge-radius:
+      item: 4.0
+      exp: 6.0
+    mob-spawn-range: 2
+    entity-activation-range:
+      animals: 16
+      monsters: 16
+      raiders: 16
+      misc: 8
+      water: 8
+      villagers: 16
+      flying-monsters: 16
+    ticks-per:
+      hopper-transfer: 8
+      hopper-check: 1
+    hopper-amount: 1
+    dragon-death-sound-radius: 0
+config-version: 12
+messages:
+  whitelist: You are not whitelisted on this server!
+  unknown-command: Unknown command. Type "/help" for help.
+  server-full: The server is full!
+  outdated-client: Outdated client! Please use {0}
+  outdated-server: Outdated server! I'm still on {0}
+  restart: Server is restarting

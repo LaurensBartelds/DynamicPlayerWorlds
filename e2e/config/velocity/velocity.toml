@@ -1,0 +1,48 @@
+# Velocity config for the e2e compose harness (F11).
+# online-mode is off so the mineflayer bot can join without a Mojang session.
+# Modern forwarding carries the (offline) UUID and name into Paper.
+
+config-version = "2.7"
+
+bind = "0.0.0.0:25565"
+motd = "<gray>gzmn-worlds e2e</gray>"
+show-max-players = 10
+online-mode = false
+force-key-authentication = false
+prevent-client-proxy-connections = false
+player-info-forwarding-mode = "modern"
+forwarding-secret-file = "forwarding.secret"
+announce-forge = false
+kick-existing-players = false
+ping-passthrough = "DISABLED"
+
+[servers]
+# "lobby" is paper-a: the acceptance criterion is one player joining a lobby.
+# paper-b is registered so multi-node routing has somewhere to go later.
+lobby = "paper-a:25565"
+node-b = "paper-b:25565"
+try = ["lobby"]
+
+[forced-hosts]
+
+[advanced]
+compression-threshold = 256
+compression-level = -1
+login-ratelimit = 0
+connection-timeout = 5000
+read-timeout = 30000
+haproxy-protocol = false
+tcp-fast-open = false
+bungee-plugin-message-channel = true
+show-ping-requests = false
+failover-on-unexpected-server-disconnect = true
+announce-proxy-commands = true
+log-command-executions = false
+log-player-connections = true
+accepts-transfers = false
+
+[query]
+enabled = false
+port = 25565
+map = "gzmn-e2e"
+show-plugins = false

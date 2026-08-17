@@ -1,0 +1,16 @@
+name: e2e-harness
+main: nl.gzmn.playerworlds.e2e.E2eHarnessPlugin
+version: ${version}
+api-version: '${apiVersion}'
+description: Test-only join markers and RCON probes for the e2e compose harness. Not for production.
+author: GZMN
+load: POSTWORLD
+commands:
+  e2e:
+    description: e2e harness probe (RCON)
+    usage: /e2e <ping|status>
+    permission: e2e.harness
+permissions:
+  e2e.harness:
+    description: Run e2e harness probe commands
+    default: op

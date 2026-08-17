@@ -35,11 +35,14 @@ it usually means the change is larger than it looks.
 # CI paper-latest override (does not rewrite libs.versions.toml).
 # Quote the property on PowerShell so the dots are not split into task names.
 ./gradlew check build "-PpaperApi=26.2.build.112-stable"
+# e2e compose harness (Docker + Node + Python 3); see e2e/README.md
+e2e/scripts/run.sh
 ```
 
 `:core` and `:testing` build from Maven Central. `:backend` and `:proxy` need
 `repo.papermc.io`, which some sandboxes block — if resolution fails there,
-say so rather than working around it.
+say so rather than working around it. The e2e harness lives under `e2e/` and is
+not part of `./gradlew check`.
 
 ## What tends to go wrong here
 

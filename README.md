@@ -46,9 +46,10 @@ Requires JDK 25 (Paper 26.x targets 25; see ADR 0003).
 ./gradlew spotlessApply  # fix formatting
 ```
 
-CI mirrors `./gradlew check build` on every push. A nightly job also compiles and
-boots against Paper's newest build (`paper-latest`) so a Minecraft upgrade break
-shows up before an operator hits it. See `.github/workflows/`.
+CI mirrors `./gradlew check build` on every push. Nightly jobs also compile and
+boot against Paper's newest build (`paper-latest`) and run the compose e2e
+harness (`e2e/`, lobby join through Velocity). See `.github/workflows/` and
+`e2e/README.md`.
 
 Plugin jars are written to `backend/build/libs/` and `proxy/build/libs/`, named
 `gzmn-worlds-<version>+mc<paper-api-version>.jar`. The Minecraft version an

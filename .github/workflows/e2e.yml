@@ -1,8 +1,8 @@
-# Nightly end-to-end compose harness (plan §11 / F10 workflow, F11 harness).
+# Nightly end-to-end compose harness (plan §11 / F11).
 #
-# The workflow is wired now so the schedule, permissions and branch-protection
-# check name exist before the harness does. The job stays an explicit skip until
-# F11 lands docker compose (Postgres + MinIO + Velocity + 2 Paper nodes).
+# Boots Postgres + MinIO + Velocity + 2 Paper nodes, then drives an offline
+# mineflayer client through the proxy onto the lobby backend. Acceptance:
+# one player joins a lobby in CI.
 name: e2e
 
 on:
@@ -21,18 +21,38 @@ jobs:
   e2e:
     name: compose harness
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Harness deferred to F11
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Run e2e harness
         run: |
-          echo "::notice title=e2e deferred::The e2e compose harness lands in foundation task F11."
-          echo "This workflow exists so the nightly schedule and required-check"
-          echo "name are ready the day the harness is merged. No containers are"
-          echo "started yet."
-          if [[ -f e2e/docker-compose.yml || -f e2e/compose.yml ]]; then
-            echo "Found an e2e compose file but no runner yet — failing so F11 wires it."
-            exit 1
-          fi
+          chmod +x e2e/scripts/*.sh
+          e2e/scripts/run.sh
+
+      - name: Upload e2e logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: |
+            e2e/runtime/paper-a/logs/
+            e2e/runtime/paper-b/logs/
+            e2e/runtime/velocity/logs/
+          if-no-files-found: ignore
+          retention-days: 14
