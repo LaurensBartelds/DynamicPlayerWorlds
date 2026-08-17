@@ -36,6 +36,15 @@ public final class LoadedWorld {
     private final int borderRadius;
 
     /**
+     * The lease generation this world was loaded against (FR-11's fencing token).
+     *
+     * <p>Zero until milestone 7 makes leases real. Carried now because FR-11's
+     * transfer check compares against it, and a comparison that silently had
+     * nothing to compare would pass for the wrong reason.
+     */
+    private final long generation;
+
+    /**
      * Which of the three dimensions exist on disk and are loaded.
      *
      * <p>Copy-on-write behind {@code volatile} rather than a mutable set: the
@@ -56,6 +65,10 @@ public final class LoadedWorld {
     private int retryWaitSweeps;
 
     public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius) {
+        this(id, ownerUuid, name, seed, borderRadius, 0L);
+    }
+
+    public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, long generation) {
         this.id = Objects.requireNonNull(id, "id");
         this.ownerUuid = Objects.requireNonNull(ownerUuid, "ownerUuid");
         this.name = Objects.requireNonNull(name, "name");
@@ -64,12 +77,13 @@ public final class LoadedWorld {
             throw new IllegalArgumentException("borderRadius must be at least 1, was: " + borderRadius);
         }
         this.borderRadius = borderRadius;
+        this.generation = generation;
     }
 
     /** From a database row, keeping only what the tick thread cannot re-read. */
     public static LoadedWorld of(PlayerWorld row) {
         Objects.requireNonNull(row, "row");
-        return new LoadedWorld(row.id(), row.ownerUuid(), row.name(), row.seed(), row.borderRadius());
+        return new LoadedWorld(row.id(), row.ownerUuid(), row.name(), row.seed(), row.borderRadius(), row.generation());
     }
 
     public WorldId id() {
@@ -87,6 +101,11 @@ public final class LoadedWorld {
     /** Shared by all three dimensions, so one materialised later matches (FR-2). */
     public long seed() {
         return seed;
+    }
+
+    /** The lease generation this world was loaded against (FR-11). */
+    public long generation() {
+        return generation;
     }
 
     /** Overworld and end radius; the nether divides it (FR-3). */

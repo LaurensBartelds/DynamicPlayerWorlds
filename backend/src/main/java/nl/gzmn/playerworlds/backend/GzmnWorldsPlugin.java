@@ -12,6 +12,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
@@ -90,6 +91,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable WorldRegistry registry;
     private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
+    private @Nullable NodeHeartbeat nodeHeartbeat;
 
     /**
      * Last policy read from the database.
@@ -453,6 +455,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             // restart leaves the folders as a clean shutdown would rather than as
             // a crash would.
             sweep.unloadAllForShutdown();
+        }
+
+        // MN-17: leave the registration cleanly, so the proxy stops routing here
+        // immediately rather than after the node ages out of the alive set.
+        NodeHeartbeat heartbeat = this.nodeHeartbeat;
+        this.nodeHeartbeat = null;
+        if (heartbeat != null) {
+            heartbeat.deregister();
         }
 
         getServer().getScheduler().cancelTasks(this);
