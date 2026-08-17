@@ -151,6 +151,29 @@ public final class PlayerWorldRepository extends Repository {
         });
     }
 
+    /**
+     * Moves a world between states, only from the state the caller expects.
+     *
+     * <p>Conditional on {@code from} so two concurrent operations cannot both
+     * believe they won: FR-35's archival and FR-36's restore are each written as
+     * a state transition precisely so a crash leaves a state the FR-40 sweep can
+     * recognise and resume from.
+     *
+     * @return true when this call performed the transition
+     */
+    public boolean transitionState(WorldId id, WorldState from, WorldState to) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(to, "to");
+        return database.inTransaction(connection ->
+                execute(connection, "UPDATE player_world SET state = ? WHERE id = ? AND state = ?", statement -> {
+                            statement.setString(1, to.wire());
+                            statement.setObject(2, id.value());
+                            statement.setString(3, from.wire());
+                        })
+                        == 1);
+    }
+
     /** {@link #touchLastPlayed(Connection, WorldId)} in its own transaction. */
     public boolean touchLastPlayed(WorldId id) throws SQLException {
         Objects.requireNonNull(id, "id");

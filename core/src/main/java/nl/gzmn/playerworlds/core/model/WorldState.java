@@ -28,7 +28,16 @@ public enum WorldState {
     /** FR-35 is part-way through packing the world to object storage. */
     ARCHIVING,
 
-    /** FR-35 finished. Live folders are gone; the archive is authoritative. */
+    /**
+     * FR-35 finished: live folders are gone and the archive is authoritative.
+     *
+     * <p>Until milestone 11 writes an archive there is nothing to be
+     * authoritative, so {@code /world delete} moves a world here without packing
+     * or removing anything — the state transition and the FR-1 cap release, with
+     * the folders retained. A world in this state with no
+     * {@code player_world_archive} row is that case, and {@code /world restore}
+     * moves it straight back.
+     */
     ARCHIVED,
 
     /** FR-36 is part-way through unpacking an archive back to live folders. */

@@ -40,7 +40,7 @@ public final class NodeRepository extends Repository {
             String address,
             int loadedWorlds,
             int onlinePlayers,
-            /** Absent until the node reports one; MN-15 excludes on it only when present. */
+            // Absent until the node reports one; MN-15 excludes on it only when present.
             @Nullable Integer heapPercent,
             @Nullable Double tps,
             boolean draining,

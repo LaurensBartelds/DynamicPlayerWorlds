@@ -25,6 +25,7 @@ import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldMember;
+import nl.gzmn.playerworlds.core.model.WorldState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -51,7 +52,7 @@ public final class WorldCommand {
 
     /** Implemented here, for the enable log line and for tests. */
     public static final List<String> SUBCOMMANDS =
-            List.of("create", "join", "invite", "accept", "kick", "members", "promote");
+            List.of("create", "join", "delete", "restore", "invite", "accept", "kick", "members", "promote");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -136,6 +137,23 @@ public final class WorldCommand {
                                                     StringArgumentType.getString(context, "seed"));
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
+                .then(BrigadierCommand.literalArgumentBuilder("delete")
+                        .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
+                                .executes(context -> {
+                                    delete(context, StringArgumentType.getString(context, "name"), false);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                        .executes(context -> {
+                                            delete(context, StringArgumentType.getString(context, "name"), true);
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("restore")
+                        .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
+                                .executes(context -> {
+                                    restore(context, StringArgumentType.getString(context, "name"));
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
@@ -229,6 +247,110 @@ public final class WorldCommand {
         } catch (NumberFormatException e) {
             return seedText.hashCode();
         }
+    }
+
+    /**
+     * {@code /world delete <name> [confirm]} - FR-27, in part.
+     *
+     * <p>FR-27 performs FR-35's archival: pack all three dimensions to object
+     * storage, verify the checksum, then remove the live folders. Object storage
+     * is milestone 6 and archival is milestone 11, so what this does today is the
+     * half that can be done safely - the state transition and the cap release.
+     * The world folders and every profile stay exactly where they are.
+     *
+     * <p>That ordering is deliberate and is CONTRIBUTING rule 8: a destructive
+     * path verifies before it destroys. Nothing here has anything to verify
+     * against yet, so nothing here destroys. {@code /world restore} brings the
+     * world straight back.
+     */
+    private void delete(CommandContext<CommandSource> context, String name, boolean confirmed) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), name);
+            if (found.isEmpty()) {
+                error(caller, "you own no world called '" + name + "'");
+                return;
+            }
+            PlayerWorld world = found.get();
+            if (world.state() == WorldState.ARCHIVED) {
+                info(caller, "'" + name + "' is already archived; use /world restore " + name + " to bring it back");
+                return;
+            }
+            if (world.state() != WorldState.READY) {
+                error(caller, "'" + name + "' is " + world.state() + " and cannot be deleted right now");
+                return;
+            }
+            if (!confirmed) {
+                // FR-27 requires typed confirmation, and this is the whole of it:
+                // the player has to type the world's name a second time.
+                error(caller, "this archives '" + name + "' and frees a world slot.");
+                info(caller, "type /world delete " + name + " confirm to go ahead");
+                return;
+            }
+
+            if (!worlds.transitionState(world.id(), WorldState.READY, WorldState.ARCHIVED)) {
+                error(caller, "'" + name + "' changed while you were confirming; try again");
+                return;
+            }
+            success(caller, "archived '" + name + "'; you have a world slot free");
+            info(
+                    caller,
+                    "nothing was erased - the world data is still on its server and /world restore " + name
+                            + " brings it back");
+            log.info(
+                    "world {} archived by its owner (FR-27, state transition only; FR-35's pack to object storage "
+                            + "arrives with milestone 11, so the folders are retained)",
+                    world.id());
+
+            // A world loaded on a node right now keeps ticking until its idle
+            // sweep drops it (FR-25). Telling the node to unload immediately is
+            // the control plane's UNLOAD_WORLD, which is the rest of milestone 5.
+        });
+    }
+
+    /**
+     * {@code /world restore <name>} - FR-36, in part.
+     *
+     * <p>FR-36 unpacks the archive and verifies its checksum. Until milestone 11
+     * writes one there is nothing to unpack: the folders were never removed, so a
+     * restore is the state transition back.
+     */
+    private void restore(CommandContext<CommandSource> context, String name) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), name);
+            if (found.isEmpty()) {
+                error(caller, "you own no world called '" + name + "'");
+                return;
+            }
+            PlayerWorld world = found.get();
+            if (world.state() != WorldState.ARCHIVED) {
+                error(caller, "'" + name + "' is " + world.state() + " and does not need restoring");
+                return;
+            }
+            // FR-32's pattern: the cap is re-checked at the moment the world
+            // re-enters the count, not only when it left it.
+            int owned = worlds.countOwnedBy(caller.getUniqueId());
+            if (owned >= current.maxWorldsPerPlayer()) {
+                error(
+                        caller,
+                        "you already own " + owned + " worlds (limit " + current.maxWorldsPerPlayer()
+                                + "); archive one before restoring this");
+                return;
+            }
+            if (!worlds.transitionState(world.id(), WorldState.ARCHIVED, WorldState.READY)) {
+                error(caller, "'" + name + "' changed while you were restoring; try again");
+                return;
+            }
+            success(caller, "restored '" + name + "'");
+        });
     }
 
     /**
