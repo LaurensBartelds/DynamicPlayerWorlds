@@ -29,9 +29,9 @@ behind an interface in `backend/platform`, which is the only package permitted
 to know Minecraft specifics.
 
 **3. No blocking work on the main thread.**
-No JDBC, no object storage, no filesystem walks, no HTTP (NFR-2, NFR-7). In
-tests and dev builds a JDBC call from the main thread throws. Use the executors
-in `core.obs`/`core.db` rather than creating your own.
+No JDBC, no object storage, no filesystem walks, no HTTP (NFR-2, NFR-7). A JDBC
+call from the main thread throws (`MainThread` / `Database`). Use the executors
+in `core.concurrent.PluginExecutors` rather than creating your own.
 
 **4. Never cache a `World` reference across an unload.**
 Resolve by name or UUID through `Bukkit.getWorld` at use time, every time

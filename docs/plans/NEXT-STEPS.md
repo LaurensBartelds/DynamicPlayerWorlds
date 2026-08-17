@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4 and F5 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3, F4, F5 and F6 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -120,8 +120,13 @@ in blocks `repo.papermc.io`. They compile now.
         platform default on this API line.
       - Unknown newer data version: warn and use the default layout. Older than
         `Platform.MIN_SUPPORTED_DATA_VERSION` (4903): refuse enable.
-- [ ] **F6** Threading: executors, main-thread guards, a test proving a JDBC
-      call from the main thread fails, ordered shutdown.
+- [x] **F6** Threading foundation. Done: `core.concurrent` holds `MainThread`,
+      `PluginExecutors` (main / db / io / sched), `BoundedOperations` and
+      `MainScheduler`. `Database` calls `MainThread.assertOff()` on every entry
+      point so JDBC on the tick thread fails the build (NFR-2). Ordered shutdown
+      drains sched → db → io under a budget (FR-28's executor half). The Paper
+      entry point marks the main thread at enable and opens the pools with
+      specification defaults until config load is wired.
 - [ ] **F7** Control plane: `node_command`, the `LISTEN` listener with its
       polling fallback, claim/complete/retry (spec §13).
 - [ ] **F8** Observability: JSON logging with MDC, Micrometer registry, the

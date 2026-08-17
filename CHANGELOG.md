@@ -42,6 +42,10 @@ the jar filename (`+mc<version>`), not part of the project version.
   data version through `Platform`. ADR 0008 records that item NBT uses Paper's
   `serializeAsBytes`/`deserializeBytes` while `format_version` tags only our
   profile envelope. Build data version pin is 4903 (Paper 26.2-112).
+- Threading foundation (F6): `MainThread` guards, `PluginExecutors` topology
+  (main / db / io / sched), bounded-operation helper, and ordered executor
+  shutdown. `Database` refuses the main thread so a JDBC call on the tick path
+  fails tests rather than stalling players (NFR-2).
 
 ### Changed
 

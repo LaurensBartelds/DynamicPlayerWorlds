@@ -9,6 +9,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import javax.sql.DataSource;
+import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -19,9 +20,9 @@ import org.slf4j.LoggerFactory;
  * from the same place and separating them would only invite somebody to
  * substitute a local clock for one of them.
  *
- * <p>Nothing here may be called from the main thread (NFR-2). That is not
- * enforced in this class: the guard belongs with the executors, so that it can
- * name the thread it is on, and it arrives with the threading foundation.
+ * <p>Nothing here may be called from the main thread (NFR-2). Every entry point
+ * calls {@link MainThread#assertOff()} so a JDBC call that reaches the tick
+ * thread fails the build rather than stalling players.
  */
 public final class Database implements DbClock, AutoCloseable {
 
@@ -73,6 +74,7 @@ public final class Database implements DbClock, AutoCloseable {
      * inspected the row count, and it signals "do not commit" by throwing.
      */
     public <T> T inTransaction(SqlFunction<Connection, T> work) throws SQLException {
+        MainThread.assertOff();
         try (Connection connection = dataSource.getConnection()) {
             try {
                 T result = work.apply(connection);
@@ -93,6 +95,7 @@ public final class Database implements DbClock, AutoCloseable {
      * {@link #inTransaction} instead. This exists for reads.
      */
     public <T> T withConnection(SqlFunction<Connection, T> work) throws SQLException {
+        MainThread.assertOff();
         try (Connection connection = dataSource.getConnection()) {
             T result = work.apply(connection);
             // A read-only connection is returned to the pool with an open
