@@ -24,6 +24,7 @@ public record ServerIdentity(String minecraftVersion, int dataVersion) {
      */
     @SuppressWarnings("deprecation")
     public static ServerIdentity detect() {
-        return new ServerIdentity(Bukkit.getMinecraftVersion(), Bukkit.getUnsafe().getDataVersion());
+        return new ServerIdentity(
+                Bukkit.getMinecraftVersion(), Bukkit.getUnsafe().getDataVersion());
     }
 }

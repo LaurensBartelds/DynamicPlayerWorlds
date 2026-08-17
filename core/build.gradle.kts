@@ -16,9 +16,36 @@ dependencies {
     implementation(libs.postgresql)
     implementation(libs.flyway.core)
     implementation(libs.flyway.postgresql)
-    implementation(libs.awssdk.s3)
+    // The S3 module drags in two HTTP transports it does not need here: a
+    // Netty-based async one and Apache HttpClient 5. Both are large, and Netty
+    // in particular is a classloader hazard inside a plugin jar because Paper
+    // and Velocity each ship their own. Every transfer in this system is
+    // synchronous work on the bounded `io` executor (NFR-7), so the JDK's own
+    // HttpURLConnection transport covers it, and the other two are removed
+    // rather than merely relocated. Selecting it explicitly at client
+    // construction is deliberate: classpath discovery would fail at the first
+    // upload rather than at startup.
+    implementation(libs.awssdk.s3) {
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+        exclude(group = "software.amazon.awssdk", module = "apache5-client")
+    }
+    implementation(libs.awssdk.urlconnection)
     implementation(libs.zstd)
     implementation(libs.micrometer.core)
 
     testImplementation(libs.archunit.junit5)
+
+    // Testcontainers is declared here rather than taken from :testing, because
+    // :testing depends on :core and the reverse would be a cycle. F9's fixtures
+    // serve :backend, :proxy and the e2e harness; :core owns the database and so
+    // tests it directly.
+    //
+    // Mocks are not an option for anything in core.db. The whole design rests on
+    // the exact semantics of conditional UPDATE row counts, advisory locks and
+    // database time (MN-3a, MN-8, FR-40), and a mock reproduces none of them —
+    // it only reproduces what the author already believed (CONTRIBUTING.md,
+    // "Tests").
+    testImplementation(platform(libs.testcontainers.bom))
+    testImplementation(libs.testcontainers.junit)
+    testImplementation(libs.testcontainers.postgresql)
 }

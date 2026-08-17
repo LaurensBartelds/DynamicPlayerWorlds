@@ -51,10 +51,17 @@ pattern matching, which cover most of the modelling win.
 
 ## Notes
 
-Virtual threads are deliberately not used for database work. On Java 21
-`synchronized` still pins carrier threads and the PostgreSQL driver
-synchronizes, so JDBC stays on a small platform-thread pool. At this scale that
-is not a compromise.
-
 The Gradle toolchain version lives in one property, so moving to a newer JDK
-when Paper requires it is a one-line change.
+when Paper requires it is a one-line change. That has already happened once: the
+build now targets **Java 25**, because Paper 26.x publishes `paper-api` with a
+Java 25 target and Gradle refuses to resolve it against an older toolchain. The
+title of this ADR says "Java 21" because that is the decision it recorded; the
+language choice is what was decided, not the JDK number.
+
+Virtual threads are deliberately not used for database work: JDBC stays on a
+small platform-thread pool. The original reason was that on Java 21
+`synchronized` pins carrier threads and the PostgreSQL driver synchronizes.
+JEP 491 removed that pinning in Java 24, so on the current toolchain the reason
+is weaker — what remains is that a connection pool already bounds concurrency to
+the pool size, so virtual threads would buy nothing at this scale. Revisit as
+part of F6 if it ever stops being true.

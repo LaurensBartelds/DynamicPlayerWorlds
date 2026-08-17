@@ -17,9 +17,13 @@ public final class GzmnWorldsPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         ServerIdentity identity = ServerIdentity.detect();
+        // Concatenation rather than a format string: %d formats through the
+        // default locale, which forbidden-apis bans and which would render the
+        // data version in non-ASCII digits on some hosts. The one number an
+        // operator reads out of this line has to be readable everywhere.
         getLogger()
-                .info(() -> "enabled: minecraft %s, data version %d"
-                        .formatted(identity.minecraftVersion(), identity.dataVersion()));
+                .info(() -> "enabled: minecraft " + identity.minecraftVersion() + ", data version "
+                        + identity.dataVersion());
     }
 
     @Override
