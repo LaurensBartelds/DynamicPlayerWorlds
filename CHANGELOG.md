@@ -29,6 +29,13 @@ the jar filename (`+mc<version>`), not part of the project version.
   FR-40 single-process election, `Schema` with a version guard that refuses to
   start against a schema newer than the build supports, and `Repository` +
   `RowMapper` as the seam later milestones write their statements into.
+- Config foundation (F4): typed `NodeConfig` / `ProxyConfig` /
+  `StorageClientSettings`, `NetworkPolicy` (network-wide caps and expiries with
+  specification defaults), `NetworkSettings` with a process-local cache and
+  invalidation hook, and `ConfigValidator` for the plan §8.2 startup checks.
+  ADR 0007 records the split and the three key reconciliations
+  (`worlds.storage-path` → `storage.local-scratch-path`; one S3 client with an
+  archive-bucket override; one retention count for manifests and profiles).
 
 ### Changed
 

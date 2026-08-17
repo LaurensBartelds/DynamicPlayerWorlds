@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2 and F3 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3 and F4 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -92,9 +92,19 @@ in blocks `repo.papermc.io`. They compile now.
         than via `:testing`, because `:testing` depends on `:core` and the
         reverse would be a cycle. F9's fixtures serve `:backend`, `:proxy` and
         e2e; `:core` owns the database and tests it itself.
-- [ ] **F4** Config: typed node config, `network_setting` accessor with cache
-      invalidation, and the startup validations in plan §8.2. Resolve the
-      duplicate config keys flagged in spec §7 while doing it.
+- [x] **F4** Config. Done: typed `NodeConfig` / `ProxyConfig` / `StorageClientSettings`,
+      `NetworkPolicy` with specification defaults, `NetworkSettings` (cache +
+      `invalidate` for the control-plane `INVALIDATE_CACHE` command), and
+      `ConfigValidator` for every §8.2 check. ADR 0007 records the three key
+      reconciliations and answers OQ-16.
+      - `worlds.storage-path` → `storage.local-scratch-path` (node-local).
+      - `archive.s3.*` credentials → one `storage.s3.*` client with optional
+        `archive-bucket` override.
+      - `profiles.retain-snapshots` and `storage.manifest-retention-count` → one
+        key, `storage.manifest-retention-count`; a leftover
+        `profiles.retain-snapshots` row is refused at policy load.
+      - Invalid config throws `ConfigException` so enable refuses rather than
+        running with a default that silently violates a safety property.
 - [ ] **F5** Minecraft version seam: the `platform` interfaces (`WorldLayout`,
       `ItemCodec`, `WorldRuntime`, `PortalRouting`), and an `ItemStack`
       round-trip test pinning `serializeAsBytes`/`deserializeBytes`.
@@ -135,7 +145,8 @@ Carried in the spec as OQ-13 to OQ-16 so they are not lost.
       without a migration. Now needed by the F40 maintenance sweep instead.
 - [ ] **OQ-15** Confirm the proxy owns the `/world` root and forwards `leave`
       and `report` to the backend. Needed by milestone 5.
-- [ ] **OQ-16** Move network-wide policy out of `config.yml` into a database
-      table read by both components? Needed by F4.
+- [x] **OQ-16** Answered by F4 / ADR 0007: network-wide policy lives in
+      `network_setting`, read by both components through `NetworkPolicy`.
+      Node-local facts stay in files.
 - [ ] **OQ-10, OQ-12** Deployment facts: how many nodes at launch, and does
       MinIO share a host with them?

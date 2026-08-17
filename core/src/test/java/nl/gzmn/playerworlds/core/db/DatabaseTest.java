@@ -96,59 +96,58 @@ class DatabaseTest {
         NetworkSettings settings = new NetworkSettings(database);
 
         assertThatThrownBy(() -> database.inTransaction(connection -> {
-                    settings.put(connection, "worlds.max-per-player", "3");
+                    settings.put(connection, "worlds.max-per-player", "3", "test");
                     throw new SQLException("deliberate");
                 }))
                 .isInstanceOf(SQLException.class)
                 .hasMessage("deliberate");
 
-        Optional<String> stored =
-                database.withConnection(connection -> settings.get(connection, "worlds.max-per-player"));
-        assertThat(stored).isEmpty();
+        settings.reload();
+        assertThat(settings.get("worlds.max-per-player")).isEmpty();
     }
 
     @Test
     @DisplayName("execute returns the affected row count, which is the answer not a diagnostic")
     void executeReturnsTheAffectedRowCount() throws Exception {
-        NetworkSettings settings = new NetworkSettings(database);
+        ExampleRepository example = new ExampleRepository(database);
 
-        int inserted = database.inTransaction(connection -> settings.put(connection, "invites.expiry-minutes", "60"));
+        int inserted = database.inTransaction(connection -> example.put(connection, "invites.expiry-minutes", "60"));
         assertThat(inserted).isEqualTo(1);
 
         // The conditional update every lease and commit predicate is built from:
         // a key that is not there affects zero rows, and that zero is the signal.
-        int missing = database.inTransaction(connection -> settings.touch(connection, "does.not.exist"));
+        int missing = database.inTransaction(connection -> example.touch(connection, "does.not.exist"));
         assertThat(missing).isZero();
 
-        int present = database.inTransaction(connection -> settings.touch(connection, "invites.expiry-minutes"));
+        int present = database.inTransaction(connection -> example.touch(connection, "invites.expiry-minutes"));
         assertThat(present).isEqualTo(1);
     }
 
     @Test
     @DisplayName("queryOne refuses to choose between two matching rows")
     void queryOneRefusesToChooseBetweenTwoRows() throws Exception {
-        NetworkSettings settings = new NetworkSettings(database);
+        ExampleRepository example = new ExampleRepository(database);
         database.inTransaction(connection -> {
-            settings.put(connection, "a", "1");
-            settings.put(connection, "b", "2");
+            example.put(connection, "a", "1");
+            example.put(connection, "b", "2");
             return null;
         });
 
-        assertThat(database.withConnection(settings::allKeys)).containsExactly("a", "b");
+        assertThat(database.withConnection(example::allKeys)).containsExactly("a", "b");
 
-        assertThatThrownBy(() -> database.withConnection(settings::theOnlySetting))
+        assertThatThrownBy(() -> database.withConnection(example::theOnlySetting))
                 .isInstanceOf(SQLException.class)
                 .hasMessageContaining("expected at most one row");
     }
 
     /**
-     * A concrete repository, written the way milestone-1 repositories will be: the
-     * SQL is visible, the predicate is readable and the row count is returned.
-     * F4 owns the real one, with caching and control-plane invalidation.
+     * A minimal repository used only to exercise the shared plumbing (bind,
+     * iterate, affected-row count). Production access to {@code network_setting}
+     * goes through {@link NetworkSettings}.
      */
-    private static final class NetworkSettings extends Repository {
+    private static final class ExampleRepository extends Repository {
 
-        NetworkSettings(Database database) {
+        ExampleRepository(Database database) {
             super(database);
         }
 
@@ -167,14 +166,6 @@ class DatabaseTest {
                     connection,
                     "UPDATE network_setting SET updated_at = now() WHERE key = ?",
                     statement -> statement.setString(1, key));
-        }
-
-        Optional<String> get(Connection connection, String key) throws SQLException {
-            return queryOne(
-                    connection,
-                    "SELECT value::text FROM network_setting WHERE key = ?",
-                    statement -> statement.setString(1, key),
-                    row -> row.getString(1));
         }
 
         List<String> allKeys(Connection connection) throws SQLException {
