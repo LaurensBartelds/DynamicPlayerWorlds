@@ -9,11 +9,13 @@ import nl.gzmn.playerworlds.backend.platform.PortalRouting;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityPortalEvent;
 import org.bukkit.event.player.PlayerPortalEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.event.player.PlayerTeleportEvent.TeleportCause;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -123,6 +125,65 @@ public final class PortalListener implements Listener {
 
         event.setTo(target);
         event.setCanCreatePortal(portalType == PortalRouting.PortalType.NETHER);
+    }
+
+    /**
+     * Player respawn. Runs at {@code HIGHEST} so a destination set here survives,
+     * but still before {@code MONITOR} observers.
+     *
+     * <p>Bukkit's default respawn search resolves against the server's primary
+     * world. Without explicit routing, a player dying in their own world (or its
+     * nether or end) respawns in the server lobby rather than in their world's
+     * overworld.
+     *
+     * <p>If the player has a valid bed or respawn anchor inside this player world,
+     * that spawn point is preserved. Otherwise, the player respawns at the world's
+     * overworld spawn point.
+     */
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onPlayerRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        World deathWorld = player.getWorld();
+        Optional<WorldFolders.PlayerWorldDimension> source = folders.resolve(deathWorld.getName());
+        if (source.isEmpty()) {
+            return;
+        }
+
+        WorldFolders.PlayerWorldDimension origin = source.get();
+        Optional<LoadedWorld> found = registry.find(origin.worldId());
+        if (found.isEmpty()) {
+            log.warn(
+                    "respawn for {} from {} but world {} is not registered on this node; leaving the event alone",
+                    player.getName(),
+                    deathWorld.getName(),
+                    origin.worldId());
+            return;
+        }
+        LoadedWorld world = found.get();
+
+        if (event.isBedSpawn() || event.isAnchorSpawn()) {
+            Location current = event.getRespawnLocation();
+            if (current.getWorld() != null) {
+                Optional<WorldFolders.PlayerWorldDimension> target =
+                        folders.resolve(current.getWorld().getName());
+                if (target.isPresent() && target.get().worldId().equals(origin.worldId())) {
+                    return;
+                }
+            }
+        }
+
+        World overworld = materialise(world, DimensionKind.OVERWORLD);
+        if (overworld == null) {
+            return;
+        }
+
+        Location target = overworld.getSpawnLocation();
+        event.setRespawnLocation(target);
+        log.debug(
+                "routed respawn for {} from {} to {} spawn",
+                player.getName(),
+                deathWorld.getName(),
+                overworld.getName());
     }
 
     /**
