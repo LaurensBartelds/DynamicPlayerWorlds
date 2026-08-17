@@ -9,7 +9,36 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
-## Milestone 1 — world lifecycle: code complete, unverified on a node
+## Milestone 1 — world lifecycle: done, verified on a real node
+
+Confirmed on the GZMN test instance (Paper 26.2-112, PostgreSQL 17.11): the
+plugin enables, migrates V0 → V1, passes the capability probe, and
+`/pworld create` generates a world whose **three dimensions all materialise** —
+the overworld eagerly and the nether and end on first transit (FR-2, FR-3a,
+FR-4). Portal linking resolving to the world's own dimensions is the part spec
+section 11 said to do first because it was most likely to surprise; it did not.
+
+Two things the first boot found, both now fixed and both invisible to any test
+that does not involve a real server:
+
+- The relocated JDBC driver never registered with `DriverManager`, so a node
+  refused to enable with "No suitable driver" for a driver sitting in its own
+  jar. Same trap existed a second time in the control-plane listener.
+- `/pworld` is `default: op` and a fresh server has an empty `ops.json`. Paper
+  hides commands the caller cannot use, so a permission denial is
+  indistinguishable from an unregistered command. Enable now logs the
+  registration and the permission it needs.
+
+Still open from milestone 1, and worth doing while a world is in front of you:
+
+- [ ] **OQ-17** — the end *generates*, but confirm a player arriving there lands
+      on the obsidian platform rather than falling into the void.
+- [ ] The `createWorld` stall number for `worlds.create-stall-budget-ms`. Every
+      generation now logs it at INFO, so the next create prints it.
+- [ ] Idle unload after ten minutes, and the FR-25a retry.
+- [ ] Dragon fight state across an unload and reload (FR-3b).
+
+## Milestone 1 — how it was built
 
 Plan [`01-world-lifecycle.md`](01-world-lifecycle.md). `./gradlew check build` is
 green: 168 tests across `:core`, `:backend` and `:testing`, none failing and
