@@ -531,6 +531,17 @@ public final class WorldLifecycleService {
 
         if (fresh) {
             metrics.createStall(stall);
+            // Logged on every generation, not only when it is over budget. FR-4
+            // calls this number release-gating and spec section 11 says to measure
+            // it in this milestone, so an operator has to be able to read it off a
+            // boot log without standing up a Prometheus scrape first. World
+            // generation is rare enough that this costs nothing in log volume.
+            log.info(
+                    "createWorld stalled the main thread for {} ms generating {} of {} (FR-4; budget {} ms)",
+                    stall.toMillis(),
+                    dimension,
+                    bukkitName,
+                    current.createStallBudget().toMillis());
             if (stall.compareTo(current.createStallBudget()) > 0) {
                 log.warn(
                         "createWorld stalled the main thread for {} ms creating {} of {}, over the "
