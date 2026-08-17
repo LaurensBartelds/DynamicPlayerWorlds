@@ -40,7 +40,7 @@ public final class WorldFixture {
      */
     public static final List<String> DEFAULT_EXCLUDE_NAMES = List.of("session.lock", "uid.dat");
 
-    private static final byte[] PLACEHOLDER_MCA = "synthetic-mca-v1\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] PLACEHOLDER_MCA = new byte[8192];
     private static final byte[] PLACEHOLDER_DAT = "synthetic-level-dat-v1\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] PLACEHOLDER_LOCK = "node-local\n".getBytes(StandardCharsets.UTF_8);
 
