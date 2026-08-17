@@ -11,6 +11,12 @@ dependencies {
     annotationProcessor(libs.velocity.api)
     implementation(project(":core"))
     implementation(libs.logstash.encoder)
+    // config.toml (specification section 7). Velocity ships toml4j for its own
+    // velocity.toml, but we relocate our copy rather than borrow the platform's:
+    // a plugin that breaks when the proxy reorganises its internals is the tax
+    // relocation exists to avoid.
+    implementation(libs.toml4j)
+    implementation(libs.gson)
 
     testImplementation(libs.velocity.api)
     testImplementation(project(":testing"))

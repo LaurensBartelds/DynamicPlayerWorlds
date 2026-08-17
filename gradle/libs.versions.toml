@@ -22,6 +22,12 @@ micrometer = "1.17.0"
 awsSdk = "2.53.1"
 zstd = "1.5.7-15"
 jspecify = "1.0.1"
+# Proxy config.toml (specification section 7). Velocity parses its own
+# velocity.toml with this, so an operator meets one TOML dialect, not two.
+toml4j = "0.7.2"
+# toml4j asks for gson 2.8.1; pinned forward to the version both platforms
+# already ship, so the relocated copy is current rather than seven years old.
+gson = "2.14.0"
 
 # Test
 junit = "6.1.3"
@@ -59,6 +65,8 @@ awssdk-s3 = { module = "software.amazon.awssdk:s3", version.ref = "awsSdk" }
 awssdk-urlconnection = { module = "software.amazon.awssdk:url-connection-client", version.ref = "awsSdk" }
 zstd = { module = "com.github.luben:zstd-jni", version.ref = "zstd" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
+toml4j = { module = "com.moandjiezana.toml:toml4j", version.ref = "toml4j" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
 
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }

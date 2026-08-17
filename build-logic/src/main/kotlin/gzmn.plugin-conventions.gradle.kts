@@ -90,6 +90,7 @@ tasks.named<ShadowJar>("shadowJar") {
     // its relocated class, not net.logstash.logback.encoder.LogstashEncoder.
     // See config/logback/ for the class names F8 documents.
     relocate("net.logstash.logback", "$shadePrefix.logstash")
+    relocate("com.moandjiezana.toml", "$shadePrefix.toml4j")
 
     // Transitives. These are the ones that actually bite: nothing here is
     // written in a build file anywhere, so each arrived through someone else's
@@ -103,6 +104,10 @@ tasks.named<ShadowJar>("shadowJar") {
     relocate("org.LatencyUtils", "$shadePrefix.latencyutils") // via micrometer
     // micrometer-registry-prometheus pulls the Prometheus client libraries.
     relocate("io.prometheus", "$shadePrefix.prometheus")
+    // via toml4j. Both platforms ship Gson, so this is relocated rather than
+    // excluded: borrowing the platform's copy would tie us to whichever version
+    // it happens to carry, and toml4j was compiled against a much older one.
+    relocate("com.google.gson", "$shadePrefix.gson")
 
     dependencies {
         // Both platforms provide SLF4J and bind it to their own logger. A
@@ -114,6 +119,8 @@ tasks.named<ShadowJar>("shadowJar") {
         // Annotations with no runtime behaviour, arriving transitively.
         exclude(dependency("org.checkerframework:checker-qual"))
         exclude(dependency("org.jspecify:jspecify"))
+        // via gson, which arrives via toml4j on the proxy.
+        exclude(dependency("com.google.errorprone:error_prone_annotations"))
     }
 
     mergeServiceFiles()

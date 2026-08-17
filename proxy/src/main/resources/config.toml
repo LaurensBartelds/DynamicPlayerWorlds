@@ -1,0 +1,24 @@
+# gzmn-worlds-proxy — node-local configuration.
+#
+# Only facts about this proxy: where its database is and which server players
+# return to. Network-wide policy — world caps, invite expiries, transfer
+# timeouts, lease timings — lives in the `network_setting` table so the proxy
+# and every backend node read one value and cannot silently disagree (ADR 0007).
+#
+# There is deliberately no `worlds` server name here. Nodes register themselves
+# with the proxy dynamically (MN-17) and are chosen by the placement service
+# (MN-14), so a fixed backend name in this file would defeat both.
+
+# The Velocity registered-server name players return to when they leave a world.
+# Must match a server declared in velocity.toml.
+lobby-server = "lobby"
+
+[database]
+url = "jdbc:postgresql://127.0.0.1:5432/gzmn_worlds"
+user = "gzmn"
+password = ""
+
+# Must be at least 4: schema migration holds one connection for the advisory
+# lock while Flyway takes two more.
+pool-size = 8
+connection-timeout-seconds = 5
