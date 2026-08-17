@@ -51,6 +51,12 @@ the jar filename (`+mc<version>`), not part of the project version.
   connection with poll fallback, conditional claim with timeout retry, generation
   staleness discard (CP-4), and unknown-kind completion (CP-6). No feature
   handlers yet; the plane only delivers the wire and the claim rules (ADR 0002).
+- Observability foundation (F8): `core.obs` MDC keys and scoped context, typed
+  `LogEvent` + `EventLogger` (NFR-6), Micrometer `WorldsMetrics` with the plan
+  §10.2 meter set, a loopback Prometheus scrape endpoint, and the startup
+  `CapabilityProbe` (filesystem type, reflink verdict, free space, optional
+  database/schema and storage round trips). Relocated Logstash encoder class
+  names are documented under `config/logback/`.
 
 ### Changed
 

@@ -55,7 +55,7 @@ tasks.named<ShadowJar>("shadowJar") {
     relocate("com.github.luben.zstd", "$shadePrefix.zstd")
     // Relocating this means a logback configuration must name the encoder by
     // its relocated class, not net.logstash.logback.encoder.LogstashEncoder.
-    // Whatever configures logging (F8) has to know that.
+    // See config/logback/ for the class names F8 documents.
     relocate("net.logstash.logback", "$shadePrefix.logstash")
 
     // Transitives. These are the ones that actually bite: nothing here is
@@ -68,6 +68,8 @@ tasks.named<ShadowJar>("shadowJar") {
     relocate("org.reactivestreams", "$shadePrefix.reactivestreams") // via awssdk
     relocate("org.HdrHistogram", "$shadePrefix.hdrhistogram") // via micrometer
     relocate("org.LatencyUtils", "$shadePrefix.latencyutils") // via micrometer
+    // micrometer-registry-prometheus pulls the Prometheus client libraries.
+    relocate("io.prometheus", "$shadePrefix.prometheus")
 
     dependencies {
         // Both platforms provide SLF4J and bind it to their own logger. A

@@ -114,6 +114,21 @@ public final class Schema {
     }
 
     /**
+     * Reads the applied schema version without migrating. Used by the startup
+     * capability probe (plan section 10.4) so enable can log the version and
+     * refuse a schema outside {@link #MIN_SUPPORTED}..{@link #MAX_SUPPORTED}.
+     *
+     * @return applied major version, or {@code 0} when no migration has run yet
+     */
+    public static int appliedVersion(Database database) {
+        Flyway flyway = Flyway.configure(Schema.class.getClassLoader())
+                .dataSource(database.dataSource())
+                .locations(MIGRATION_LOCATION)
+                .load();
+        return currentVersion(flyway);
+    }
+
+    /**
      * The applied schema version, or {@code 0} for a database with no migrations
      * yet. Only the major component is used: migrations here are numbered
      * {@code V1}, {@code V2}, ... and a dotted version would mean the numbering

@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4, F5, F6 and F7 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3, F4, F5, F6, F7 and F8 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -68,9 +68,10 @@ in blocks `repo.papermc.io`. They compile now.
       running a newer server is the safe direction, and pinning a SNAPSHOT would
       make the build non-reproducible, which §3 of the plan explicitly buys with
       the reproducible-jar work. Revisit only if 4.1.0 ships API the proxy needs.
-- [ ] **Relocating `net.logstash.logback` means a logback configuration must name
+- [x] **Relocating `net.logstash.logback` means a logback configuration must name
       the encoder by its relocated class**, not
-      `net.logstash.logback.encoder.LogstashEncoder`. F8 owns that.
+      `net.logstash.logback.encoder.LogstashEncoder`. Documented under
+      `config/logback/` (F8).
 
 ## Remaining foundation tasks
 
@@ -138,9 +139,13 @@ in blocks `repo.papermc.io`. They compile now.
       - Poll is the contract; killing the LISTEN connection still delivers via
         poll (CP-3). NOTIFY only shortens the wait.
       - No feature handlers yet — those arrive with the milestones that need them.
-- [ ] **F8** Observability: JSON logging with MDC, Micrometer registry, the
-      startup capability probe — including the reflink verdict, which decides
-      whether MN-5a's snapshot copy is cheap or a full copy.
+- [x] **F8** Observability. Done: `core.obs` holds MDC keys/`MdcContext`,
+      `EventLogger` over the typed `LogEvent` set (NFR-6), `WorldsMetrics` with
+      the §10.2 meter names on a Prometheus registry, `PrometheusEndpoint` on
+      loopback:9464 by default, and `CapabilityProbe` (filesystem type, reflink
+      verdict via `cp --reflink=always`, free space, optional DB/schema and
+      storage health). Paper enable runs the probe and opens the scrape socket.
+      Relocated Logstash encoder class names live in `config/logback/`.
 - [ ] **F9** Test harness: `:testing` fixtures, Testcontainers factories for
       PostgreSQL and MinIO, one smoke test per layer.
 - [ ] **F10** CI: build, nightly `paper-latest`, e2e, release; Renovate with

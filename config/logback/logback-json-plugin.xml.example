@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example only. Paper and Velocity do not load this file.
+
+  Use this shape when a process that has the *shaded* plugin jar on its
+  classpath configures Logback itself. The encoder class is the relocated
+  name (see config/logback/README.md). For an unshaded classpath, replace it
+  with net.logstash.logback.encoder.LogstashEncoder.
+-->
+<configuration>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="nl.gzmn.playerworlds.libs.logstash.encoder.LogstashEncoder">
+      <includeMdcKeyName>node_id</includeMdcKeyName>
+      <includeMdcKeyName>world_id</includeMdcKeyName>
+      <includeMdcKeyName>generation</includeMdcKeyName>
+      <includeMdcKeyName>player_uuid</includeMdcKeyName>
+      <includeMdcKeyName>op</includeMdcKeyName>
+      <includeMdcKeyName>trace_id</includeMdcKeyName>
+      <includeMdcKeyName>event</includeMdcKeyName>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="JSON"/>
+  </root>
+</configuration>

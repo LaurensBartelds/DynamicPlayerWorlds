@@ -32,6 +32,12 @@ dependencies {
     implementation(libs.awssdk.urlconnection)
     implementation(libs.zstd)
     implementation(libs.micrometer.core)
+    implementation(libs.micrometer.prometheus)
+
+    // SLF4J binding for unit tests (and compile for ListAppender-based tests).
+    // Production plugins use the platform's binding (Paper/Velocity); core must
+    // not ship logback into a plugin jar.
+    testImplementation(libs.logback.classic)
 
     testImplementation(libs.archunit.junit5)
 
