@@ -17,3 +17,4 @@ line. The history is the point.
 | [0005](0005-self-fence-at-lease-expiry.md) | A node self-fences at lease expiry, not after a fixed timeout | Accepted |
 | [0006](0006-snapshot-quiesce-verify.md) | Snapshot copies quiesce, snapshot and verify | Accepted |
 | [0007](0007-config-split-and-key-reconciliation.md) | Config split + three duplicate keys reconciled | Accepted |
+| [0008](0008-item-serialisation.md) | Item NBT via Paper bytes; format_version is our envelope | Accepted |

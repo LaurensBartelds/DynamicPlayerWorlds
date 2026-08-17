@@ -36,6 +36,12 @@ the jar filename (`+mc<version>`), not part of the project version.
   ADR 0007 records the split and the three key reconciliations
   (`worlds.storage-path` → `storage.local-scratch-path`; one S3 client with an
   archive-bucket override; one retention count for manifests and profiles).
+- Minecraft-version seam (F5): `backend.platform` interfaces and defaults for
+  world folder layout (MN-2a), item serialisation (FR-14), world runtime (border,
+  save, gamerules, dragon battle) and portal routing (FR-3a), selected by chunk
+  data version through `Platform`. ADR 0008 records that item NBT uses Paper's
+  `serializeAsBytes`/`deserializeBytes` while `format_version` tags only our
+  profile envelope. Build data version pin is 4903 (Paper 26.2-112).
 
 ### Changed
 

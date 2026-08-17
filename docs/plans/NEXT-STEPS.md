@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3 and F4 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3, F4 and F5 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -105,9 +105,21 @@ in blocks `repo.papermc.io`. They compile now.
         `profiles.retain-snapshots` row is refused at policy load.
       - Invalid config throws `ConfigException` so enable refuses rather than
         running with a default that silently violates a safety property.
-- [ ] **F5** Minecraft version seam: the `platform` interfaces (`WorldLayout`,
-      `ItemCodec`, `WorldRuntime`, `PortalRouting`), and an `ItemStack`
-      round-trip test pinning `serializeAsBytes`/`deserializeBytes`.
+- [x] **F5** Minecraft version seam. Done: `backend.platform` holds `WorldLayout`,
+      `ItemCodec`, `WorldRuntime`, `PortalRouting` and `ServerIdentity`, selected
+      by chunk data version through `Platform` at enable. ADR 0008 separates item
+      NBT from the profile envelope's `format_version`.
+      - `DefaultWorldLayout` encodes the Bukkit `DIM-1`/`DIM1` layout and the
+        MN-2a required set (`region/`, `entities/`, `poi/`, `data/`, `level.dat`).
+      - `PaperItemCodec` calls `serializeAsBytes` / `deserializeBytes` by name so
+        a Paper rename is a compile failure; unit tests pin the signatures. A
+        behavioural item byte round-trip still needs a running Paper node (the
+        methods bottom out in the server bridge).
+      - `PaperWorldRuntime.disableAlwaysLoadedSpawnChunks` is a documented no-op:
+        Minecraft 1.21.9+ dropped always-loaded spawn chunks, so FR-25c is the
+        platform default on this API line.
+      - Unknown newer data version: warn and use the default layout. Older than
+        `Platform.MIN_SUPPORTED_DATA_VERSION` (4903): refuse enable.
 - [ ] **F6** Threading: executors, main-thread guards, a test proving a JDBC
       call from the main thread fails, ordered shutdown.
 - [ ] **F7** Control plane: `node_command`, the `LISTEN` listener with its
