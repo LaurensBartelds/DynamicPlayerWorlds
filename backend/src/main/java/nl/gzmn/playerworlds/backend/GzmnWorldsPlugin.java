@@ -15,6 +15,7 @@ import nl.gzmn.playerworlds.backend.config.BackendConfig;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
+import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
@@ -88,6 +89,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable Database database;
     private @Nullable WorldRegistry registry;
     private @Nullable IdleUnloadTask idleUnload;
+    private @Nullable WorldCommitService commitService;
 
     /**
      * Last policy read from the database.
@@ -401,6 +403,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         return metrics;
     }
 
+    /** The snapshot commit engine (FR-15), or {@code null} when enable refused. */
+    public @Nullable WorldCommitService commits() {
+        return commitService;
+    }
+
     /** Worlds this node holds, or {@code null} when enable refused. */
     public @Nullable WorldRegistry registry() {
         return registry;
@@ -466,6 +473,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             pools.shutdown(PluginExecutors.DEFAULT_SHUTDOWN_TIMEOUT);
         }
         closeDatabase();
+        commitService = null;
         registry = null;
         platform = null;
         MainThread.clear();
