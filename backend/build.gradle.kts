@@ -11,8 +11,12 @@ dependencies {
     implementation(project(":core"))
     implementation(libs.logstash.encoder)
 
+    // MockBukkit before paper-api so the mock implementation wins on the test
+    // classpath (plan section 11 plugin-surface layer).
+    testImplementation(libs.mockbukkit)
     testImplementation(libs.paper.api)
     testImplementation(project(":testing"))
+    testRuntimeOnly(libs.logback.classic)
 }
 
 // plugin.yml's version and api-version are both expanded from the build, so

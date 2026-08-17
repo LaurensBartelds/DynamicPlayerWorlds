@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4, F5, F6, F7 and F8 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3, F4, F5, F6, F7, F8 and F9 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -146,8 +146,12 @@ in blocks `repo.papermc.io`. They compile now.
       verdict via `cp --reflink=always`, free space, optional DB/schema and
       storage health). Paper enable runs the probe and opens the scrape socket.
       Relocated Logstash encoder class names live in `config/logback/`.
-- [ ] **F9** Test harness: `:testing` fixtures, Testcontainers factories for
-      PostgreSQL and MinIO, one smoke test per layer.
+- [x] **F9** Test harness. Done: `:testing` holds `TestDatabase` (pinned
+      Postgres 18.3), `TestObjectStore` (pinned MinIO + path-style S3 client) and
+      `WorldFixture` (synthetic MN-2a Anvil layout). One smoke per CI layer:
+      unit (`WorldFixture`), database, object storage in `:testing`; architecture
+      remains in the owning modules; MockBukkit plugin-surface smoke in
+      `:backend`. `:core` keeps `TestPostgres` to avoid a dependency cycle.
 - [ ] **F10** CI: build, nightly `paper-latest`, e2e, release; Renovate with
       Paper and Velocity in their own `minecraft-update` group; SBOM and licence
       check. The nightly job is what makes a Minecraft upgrade cheap — it goes

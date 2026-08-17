@@ -57,6 +57,9 @@ the jar filename (`+mc<version>`), not part of the project version.
   `CapabilityProbe` (filesystem type, reflink verdict, free space, optional
   database/schema and storage round trips). Relocated Logstash encoder class
   names are documented under `config/logback/`.
+- Test harness (F9): `:testing` factories `TestDatabase`, `TestObjectStore` and
+  `WorldFixture`, with smoke tests for the unit, database and object-storage
+  layers; MockBukkit plugin-surface smoke on `:backend` against Paper 26.2.
 
 ### Changed
 

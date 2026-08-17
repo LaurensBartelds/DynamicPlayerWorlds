@@ -16,9 +16,10 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * <p>Not managed by the JUnit extension: the container outlives any single test
  * class, and Testcontainers' own reaper removes it when the JVM exits.
  *
- * <p>F9 will grow this into a shared fixture in {@code :testing}. It lives here
- * for now because {@code :testing} depends on {@code :core}, so {@code :core}
- * cannot depend on it back.
+ * <p>The shared factory for modules outside {@code :core} is
+ * {@code nl.gzmn.playerworlds.testing.TestDatabase}. This twin stays here
+ * because {@code :testing} depends on {@code :core}, so {@code :core} cannot
+ * depend on it back. Keep {@link #IMAGE} in lockstep with {@code TestDatabase}.
  */
 public final class TestPostgres {
 
@@ -26,9 +27,10 @@ public final class TestPostgres {
      * Pinned, not floating. A test suite whose database version changes under it
      * turns "the build broke" into an investigation, and the conditional
      * {@code UPDATE} and advisory-lock semantics this suite exists to pin are
-     * exactly the things a major version can change.
+     * exactly the things a major version can change. Public so it can stay
+     * asserted equal to {@code TestDatabase.IMAGE}.
      */
-    private static final String IMAGE = "postgres:18.3";
+    public static final String IMAGE = "postgres:18.3";
 
     private static PostgreSQLContainer container;
 

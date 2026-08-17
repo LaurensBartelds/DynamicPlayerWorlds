@@ -27,8 +27,12 @@ import org.jspecify.annotations.Nullable;
  * (plan section 9), runs the capability probe including the reflink verdict
  * (plan section 10.4), and opens the Prometheus scrape endpoint (plan section
  * 10.2).
+ *
+ * <p>Not {@code final}: MockBukkit's plugin loader subclasses the main class
+ * (plan section 11). Everything else that should stay sealed does so behind
+ * package-private helpers.
  */
-public final class GzmnWorldsPlugin extends JavaPlugin {
+public class GzmnWorldsPlugin extends JavaPlugin {
 
     private @Nullable Platform platform;
     private @Nullable PluginExecutors executors;
@@ -41,7 +45,7 @@ public final class GzmnWorldsPlugin extends JavaPlugin {
         // might touch JDBC so MainThread.assertOff can name the offender.
         MainThread.enter(Thread.currentThread());
 
-        ServerIdentity identity = ServerIdentity.detect();
+        ServerIdentity identity = detectIdentity();
         final Platform selected;
         try {
             selected = Platform.create(identity);
@@ -147,6 +151,16 @@ public final class GzmnWorldsPlugin extends JavaPlugin {
     /** In-process meters, or {@code null} when enable refused. */
     public @Nullable WorldsMetrics metrics() {
         return metrics;
+    }
+
+    /**
+     * Node identity for enable. Overridden in the MockBukkit smoke test because
+     * MockBukkit's {@code UnsafeValuesMock#getDataVersion()} is hardcoded to
+     * {@code 1}, which is below the D1 floor and would refuse every enable on the
+     * mock server. Production always uses {@link ServerIdentity#detect()}.
+     */
+    protected ServerIdentity detectIdentity() {
+        return ServerIdentity.detect();
     }
 
     @Override
