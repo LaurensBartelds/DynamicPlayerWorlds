@@ -1,0 +1,49 @@
+# Every push and pull request: the same gates a developer runs locally
+# (`./gradlew check`), plus packaging. Spotless, Error Prone/NullAway,
+# forbidden-apis, ArchUnit, unit tests and Testcontainers all live under check.
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: ./gradlew check build
+        run: ./gradlew check build --console=plain
+
+      - name: Upload plugin jars
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-jars
+          path: |
+            backend/build/libs/gzmn-worlds-*.jar
+            proxy/build/libs/gzmn-worlds-proxy-*.jar
+          if-no-files-found: error
+          retention-days: 14

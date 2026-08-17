@@ -1,0 +1,104 @@
+# Tag-triggered release: reproducible build, plugin jars with the +mc suffix,
+# CycloneDX SBOM and checksums (plan §12 / F10).
+#
+# Tag shape: v<semver> (e.g. v0.1.0). The leading v is stripped and passed as
+# -Pversion so the jar names match the tag rather than the SNAPSHOT pin in
+# gradle.properties.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (without leading v). Empty = gradle.properties."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: build and publish artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION=""
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${VERSION}" ]]; then
+            echo "Building release version ${VERSION}"
+          else
+            echo "Building version from gradle.properties"
+          fi
+
+      - name: Build, SBOM, checksums
+        run: |
+          ARGS=(check build cyclonedxBom --console=plain)
+          if [[ -n "${{ steps.ver.outputs.version }}" ]]; then
+            ARGS+=(-Pversion="${{ steps.ver.outputs.version }}")
+          fi
+          ./gradlew "${ARGS[@]}"
+
+          mkdir -p dist
+          cp backend/build/libs/gzmn-worlds-*.jar dist/
+          cp proxy/build/libs/gzmn-worlds-proxy-*.jar dist/
+          # CycloneDX output lands under each plugin module's build/reports/sbom.
+          find backend/build proxy/build -type f \( -name '*-bom.json' -o -name 'bom.json' -o -name '*cyclonedx*.json' \) \
+            -exec cp -t dist {} +
+
+          if ! compgen -G "dist/*-bom.json" > /dev/null && ! compgen -G "dist/bom.json" > /dev/null; then
+            echo "No CycloneDX SBOM JSON found under backend/build or proxy/build" >&2
+            find backend/build proxy/build -type f -name '*.json' | head -n 50 >&2 || true
+            exit 1
+          fi
+
+          (
+            cd dist
+            # Checksums cover the shipped artifacts only, not the sum files themselves.
+            sha256sum -- * > SHA256SUMS
+            sha512sum -- * > SHA512SUMS.tmp
+            # Drop the line for SHA256SUMS that snuck into the 512 list.
+            grep -v ' SHA256SUMS$' SHA512SUMS.tmp > SHA512SUMS
+            rm SHA512SUMS.tmp
+          )
+          ls -la dist
+          cat dist/SHA256SUMS
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

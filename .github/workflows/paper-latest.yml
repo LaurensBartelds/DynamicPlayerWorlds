@@ -1,0 +1,87 @@
+# Nightly early-warning against Paper's newest published API and server jar
+# (plan §5.6 / F10). Compiles with -PpaperApi=<latest>, then boots a real Paper
+# process with the shaded backend jar and requires the enable line.
+#
+# This is deliberately separate from the pinned release build: when Mojang or
+# Paper ships a breaking change, this job goes red weeks before an operator
+# upgrades a node. workflow_dispatch is available so a breakage can be re-run
+# without waiting for the cron.
+name: paper-latest
+
+on:
+  schedule:
+    # 05:17 UTC — off the hour to dodge the shared Actions rush.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: paper-latest
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  paper-latest:
+    name: compile and boot against Paper latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Resolve Paper latest
+        id: paper
+        run: |
+          chmod +x .github/scripts/resolve-paper-latest.sh
+          .github/scripts/resolve-paper-latest.sh "$GITHUB_WORKSPACE/paper-latest.env"
+          cat "$GITHUB_WORKSPACE/paper-latest.env" >> "$GITHUB_ENV"
+          # Summary for the Actions UI.
+          {
+            echo "### Paper latest"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| paper-api | \`$(grep ^PAPER_API= paper-latest.env | cut -d= -f2-)\` |"
+            echo "| server | \`$(grep ^PAPER_SERVER_NAME= paper-latest.env | cut -d= -f2-)\` |"
+            echo "| mc | \`$(grep ^PAPER_MC_VERSION= paper-latest.env | cut -d= -f2-)\` build \`$(grep ^PAPER_BUILD= paper-latest.env | cut -d= -f2-)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compile and package against latest paper-api
+        run: |
+          echo "Building with -PpaperApi=${PAPER_API}"
+          # Full check on the overridden API: compile, quality gates, tests,
+          # shaded jars. MockBukkit stays on the catalog pin and may lag a brand
+          # new MC line; a failure there is still a useful early signal.
+          ./gradlew check build -PpaperApi="${PAPER_API}" --console=plain
+
+      - name: Boot Paper with the shaded plugin
+        run: |
+          chmod +x .github/scripts/boot-paper.sh
+          PLUGIN_JAR="$(ls -1 backend/build/libs/gzmn-worlds-*.jar | head -n 1)"
+          echo "Using plugin jar: ${PLUGIN_JAR}"
+          PLUGIN_JAR="${PLUGIN_JAR}" \
+            PAPER_SERVER_URL="${PAPER_SERVER_URL}" \
+            PAPER_SERVER_SHA256="${PAPER_SERVER_SHA256}" \
+            BOOT_DIR="${GITHUB_WORKSPACE}/paper-boot" \
+            .github/scripts/boot-paper.sh
+
+      - name: Upload boot log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-latest-boot-log
+          path: |
+            paper-boot/boot.log
+            paper-latest.env
+          if-no-files-found: ignore
+          retention-days: 21

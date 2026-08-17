@@ -1,0 +1,69 @@
+# Pull-request dependency and licence review (plan §12 / F10).
+#
+# Fails the PR when a newly introduced dependency is known-vulnerable above the
+# threshold, or carries a licence outside the allow-list. Complements the
+# licensee Gradle gate on ./gradlew check, which covers the resolved runtime
+# graph on every push — this action covers the diff GitHub sees on the PR.
+name: dependency-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: review
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Dependency review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          # AGPL-3.0-or-later project. GPL family is fine; proprietary and
+          # network-copyleft traps (SSPL, BUSL, Commons Clause) are not.
+          allow-licenses: >-
+            Apache-2.0,
+            MIT,
+            BSD-2-Clause,
+            BSD-3-Clause,
+            BSD-3-Clause-Clear,
+            ISC,
+            0BSD,
+            CC0-1.0,
+            CC-BY-4.0,
+            Public Domain,
+            EPL-1.0,
+            EPL-2.0,
+            MPL-2.0,
+            LGPL-2.1,
+            LGPL-2.1-only,
+            LGPL-2.1-or-later,
+            LGPL-3.0,
+            LGPL-3.0-only,
+            LGPL-3.0-or-later,
+            GPL-2.0,
+            GPL-2.0-only,
+            GPL-2.0-or-later,
+            GPL-2.0-with-classpath-exception,
+            GPL-3.0,
+            GPL-3.0-only,
+            GPL-3.0-or-later,
+            AGPL-3.0,
+            AGPL-3.0-only,
+            AGPL-3.0-or-later,
+            Unlicense,
+            WTFPL
+          deny-licenses: >-
+            SSPL-1.0,
+            BUSL-1.1,
+            Commons-Clause,
+            Proprietary,
+            Commercial
+          comment-summary-in-pr: on-failure

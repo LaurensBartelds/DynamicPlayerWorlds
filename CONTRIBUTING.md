@@ -63,13 +63,21 @@ region file (MN-5c), typed confirmation before anything a player cannot undo.
 ./gradlew check           # static analysis and tests
 ```
 
-`check` runs Spotless, Error Prone with NullAway, forbidden-apis and the
-ArchUnit rules that enforce rules 1, 2, 3 and 5. It is the same set CI runs, so
-a green `check` locally means a green CI.
+`check` runs Spotless, Error Prone with NullAway, forbidden-apis, the ArchUnit
+rules that enforce rules 1, 2, 3 and 5, and the licensee licence gate. It is the
+same set the `build` workflow runs, so a green `check` locally means a green CI.
 
 ## Commits and branches
 
 - Work on a branch; `main` takes merges only.
+- Required status checks on `main` (configure under the GitHub branch-protection
+  UI — these cannot live in the repo):
+  - `build / check`
+  - `dependency-review / review` (pull requests)
+  - Prefer **linear history** and **dismiss stale reviews** on force-push.
+  - Do not require `paper-latest` or `e2e` on every PR: they are nightly early-
+    warning jobs, not merge gates. Treat a red nightly as a bug to fix before
+    the next Minecraft bump, not as a blocked merge.
 - Write commit subjects in the imperative mood, under 72 characters, with no
   trailing period.
 - Reference the requirement ID in the body where one applies. `Implements
@@ -103,3 +111,22 @@ conflict that surfaces weeks later on an operator's server rather than here.
 Watch for transitives in particular: they are what the gate exists to catch,
 because nobody writes them in a build file and so nobody thinks to relocate
 them.
+
+Also check the licence. `licensee` (and the PR `dependency-review` workflow)
+fail the build on a transitive whose licence is outside the allow-list in
+`gzmn.quality-conventions.gradle.kts`. The repository is AGPL-3.0-or-later;
+Apache-2.0 / MIT / BSD / GPL-3.0 family are fine, SSPL / BUSL / proprietary are
+not. Paper and Velocity stay `compileOnly` and are not shaded.
+
+## CI overview
+
+| Workflow | When | What |
+| --- | --- | --- |
+| `build` | every push / PR | `./gradlew check build` |
+| `dependency-review` | PRs | vulnerable / disallowed-licence deps |
+| `paper-latest` | nightly | compile + boot against newest Paper |
+| `e2e` | nightly | compose harness (F11; stub until then) |
+| `release` | `v*` tags | jars, CycloneDX SBOM, checksums |
+
+Renovate opens dependency PRs. Paper, Velocity and MockBukkit are grouped as
+`minecraft-update` so an MC bump is never mixed into a routine library PR.

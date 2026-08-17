@@ -1,0 +1,38 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommitTypeAll(chore)"],
+  "labels": ["dependencies"],
+  "dependencyDashboard": true,
+  "rangeStrategy": "pin",
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      "description": "Paper, Velocity and MockBukkit never ride along with a routine dep PR (plan §12 / F10).",
+      "groupName": "minecraft-update",
+      "matchManagers": ["gradle", "gradle-wrapper"],
+      "matchPackagePatterns": [
+        "^io\\.papermc\\.paper",
+        "^com\\.velocitypowered",
+        "^org\\.mockbukkit"
+      ],
+      "matchDepNames": ["paperApi", "velocityApi", "mockbukkit"],
+      "labels": ["minecraft-update", "dependencies"],
+      "commitMessageTopic": "Minecraft platform",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Gradle wrapper bumps stay alone so a broken wrapper is obvious.",
+      "matchPackageNames": ["gradle"],
+      "matchManagers": ["gradle-wrapper"],
+      "groupName": "gradle-wrapper",
+      "labels": ["dependencies"]
+    },
+    {
+      "description": "GitHub Actions — monthly digest.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "labels": ["dependencies"],
+      "schedule": ["before 6am on the first day of the month"]
+    }
+  ]
+}

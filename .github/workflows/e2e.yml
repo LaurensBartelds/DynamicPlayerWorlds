@@ -1,0 +1,38 @@
+# Nightly end-to-end compose harness (plan §11 / F10 workflow, F11 harness).
+#
+# The workflow is wired now so the schedule, permissions and branch-protection
+# check name exist before the harness does. The job stays an explicit skip until
+# F11 lands docker compose (Postgres + MinIO + Velocity + 2 Paper nodes).
+name: e2e
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: compose harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Harness deferred to F11
+        run: |
+          echo "::notice title=e2e deferred::The e2e compose harness lands in foundation task F11."
+          echo "This workflow exists so the nightly schedule and required-check"
+          echo "name are ready the day the harness is merged. No containers are"
+          echo "started yet."
+          if [[ -f e2e/docker-compose.yml || -f e2e/compose.yml ]]; then
+            echo "Found an e2e compose file but no runner yet — failing so F11 wires it."
+            exit 1
+          fi

@@ -60,6 +60,12 @@ the jar filename (`+mc<version>`), not part of the project version.
 - Test harness (F9): `:testing` factories `TestDatabase`, `TestObjectStore` and
   `WorldFixture`, with smoke tests for the unit, database and object-storage
   layers; MockBukkit plugin-surface smoke on `:backend` against Paper 26.2.
+- CI/CD (F10): GitHub Actions workflows for every-push `build`, nightly
+  `paper-latest` (compile + real Paper boot against newest API), deferred `e2e`
+  schedule, tag `release` with CycloneDX SBOM and checksums, and PR
+  `dependency-review`. Renovate groups Paper/Velocity/MockBukkit under
+  `minecraft-update`. `app.cash.licensee` fails `check` on a disallowed
+  transitive licence; `-PpaperApi=` overrides the catalog pin for the nightly.
 
 ### Changed
 

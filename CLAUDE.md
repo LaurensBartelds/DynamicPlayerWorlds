@@ -29,9 +29,12 @@ it usually means the change is larger than it looks.
 
 ```sh
 ./gradlew build           # everything
-./gradlew check           # static analysis and tests
+./gradlew check           # static analysis, licence gate and tests
 ./gradlew spotlessApply   # fix formatting
 ./gradlew :core:test      # fastest useful loop; :core needs no server
+# CI paper-latest override (does not rewrite libs.versions.toml).
+# Quote the property on PowerShell so the dots are not split into task names.
+./gradlew check build "-PpaperApi=26.2.build.112-stable"
 ```
 
 `:core` and `:testing` build from Maven Central. `:backend` and `:proxy` need

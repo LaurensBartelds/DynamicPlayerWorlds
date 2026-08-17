@@ -13,4 +13,6 @@ dependencies {
     implementation(marker(libs.plugins.errorprone))
     implementation(marker(libs.plugins.forbiddenapis))
     implementation(marker(libs.plugins.shadow))
+    implementation(marker(libs.plugins.cyclonedx))
+    implementation(marker(libs.plugins.licensee))
 }

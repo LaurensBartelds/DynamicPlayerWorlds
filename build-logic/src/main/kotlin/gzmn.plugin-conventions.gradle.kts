@@ -1,12 +1,30 @@
 import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
 import java.util.zip.ZipFile
+import org.cyclonedx.gradle.CycloneDxTask
 
 plugins {
     id("gzmn.quality-conventions")
     id("com.gradleup.shadow")
+    id("org.cyclonedx.bom")
 }
 
 val libs = versionCatalogs.named("libs")
+
+/**
+ * paper-api coordinate actually used for this build.
+ *
+ * Defaults to the pin in {@code gradle/libs.versions.toml}. CI's paper-latest
+ * job overrides it with {@code -PpaperApi=<maven version>} so a nightly can
+ * compile against Paper's newest API without rewriting the catalog (plan §5.6).
+ */
+val paperApiCoordinate: String =
+    providers
+        .gradleProperty("paperApi")
+        .orElse(
+            providers.provider {
+                libs.findVersion("paperApi").orElseThrow().requiredVersion
+            },
+        ).get()
 
 /**
  * The Minecraft version this artifact was built against, taken from the
@@ -24,9 +42,7 @@ val libs = versionCatalogs.named("libs")
  * it here would change the filename on every routine Paper bump.
  */
 val minecraftVersion: String =
-    libs.findVersion("paperApi")
-        .orElseThrow()
-        .requiredVersion
+    paperApiCoordinate
         .substringBefore("-")
         .replace(Regex("""\.build\.\d+$"""), "")
 
@@ -37,6 +53,23 @@ val minecraftVersion: String =
 // server to guess. Deriving it from the same value as the jar name is what stops
 // the two from drifting.
 extra["minecraftApiVersion"] = minecraftVersion
+extra["paperApiCoordinate"] = paperApiCoordinate
+
+// When -PpaperApi is set, force every paper-api dependency onto that coordinate
+// so compile classpath, tests and the jar name all agree. Without this the
+// catalog pin would still win resolution and the nightly would be a no-op.
+val paperApiOverride = providers.gradleProperty("paperApi")
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group == "io.papermc.paper" && requested.name == "paper-api") {
+            val override = paperApiOverride.orNull
+            if (override != null) {
+                useVersion(override)
+                because("overridden by -PpaperApi (CI paper-latest / local smoke)")
+            }
+        }
+    }
+}
 
 // Relocation is mandatory, not optional. A plugin jar shares a classloader with
 // every other plugin on the server, so an unrelocated HikariCP meeting a
@@ -170,4 +203,19 @@ tasks.named("jar") {
 
 tasks.named("assemble") {
     dependsOn(tasks.named("shadowJar"))
+}
+
+// CycloneDX SBOM for the runtime graph that actually ships inside the shaded
+// jar (F10 / release.yml). Generated on demand — release CI attaches it next to
+// the jar and checksums; day-to-day check does not need it. The plugin exposes
+// a task, not an extension, so configuration goes on cyclonedxBom directly.
+tasks.named<CycloneDxTask>("cyclonedxBom") {
+    includeConfigs.set(listOf("runtimeClasspath"))
+    skipConfigs.set(listOf("testRuntimeClasspath", "testCompileClasspath"))
+    projectType.set("application")
+    schemaVersion.set("1.5")
+    destination.set(layout.buildDirectory.dir("reports/sbom").map { it.asFile })
+    outputName.set("${project.name}-bom")
+    outputFormat.set("json")
+    includeBomSerialNumber.set(true)
 }
