@@ -142,6 +142,11 @@ the jar filename (`+mc<version>`), not part of the project version.
   a total and never identities, and a count that dropped when somebody entered a
   private world would itself leak that they had.
 
+- Milestone 5, in part: the `pending_transfer` handoff (FR-10, FR-11), node
+  heartbeat registration (MN-17, MN-18), `player_last_world` (FR-13),
+  `/world join` on the proxy, and dynamic Velocity server registration driven
+  from the heartbeat table rather than from `velocity.toml`.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper

@@ -9,6 +9,36 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
+## Milestone 5 — transfer handoff and node registration: partial
+
+`./gradlew check build` is green. Landed:
+
+- **FR-10 / FR-11** — the proxy writes `pending_transfer` and connects the
+  player; the node claims it with a single `DELETE ... RETURNING`, so a
+  reconnect racing the first join cannot consume the same route twice. Every
+  refusal branch FR-11 names is present, including the generation check (zero
+  against zero until milestone 7, written now because a comparison added later
+  is one nobody tests).
+- **MN-17 / MN-18** — nodes publish a heartbeat carrying their chunk
+  `DataVersion`, and the proxy mirrors the alive set into Velocity's server
+  list. `velocity.toml` is never edited to add capacity; the sweep only ever
+  unregisters names it registered itself.
+- **FR-13** — `player_last_world` for the resume prompt.
+- **`/world join <owner> [name]`** on the proxy, membership-checked, with a
+  non-member getting the same answer as a world that does not exist.
+
+### Still to do in milestone 5
+
+- **Control-plane handlers.** F7 built the transport; nothing subscribes yet.
+  `INVALIDATE_CACHE` closes milestone 2's stale-role gap, `KICK_MEMBER` closes
+  FR-8's ejection, and `UNLOAD_WORLD` backs `/world admin unload`.
+- **The return leg.** FR-11's refusals and FR-12's `/world leave` need the node
+  to send a player back to lobby, which needs the proxy to accept that request.
+  Refusals currently explain and leave the player where they are.
+- **MN-14 placement** is a stub that picks the least-loaded alive node after
+  MN-28's version filter. MN-15's scoring is milestone 8, where a second node
+  first exists to score against.
+
 ## Milestone 3 — visibility isolation: code complete, unverified
 
 Plan [`03-visibility-isolation.md`](03-visibility-isolation.md).

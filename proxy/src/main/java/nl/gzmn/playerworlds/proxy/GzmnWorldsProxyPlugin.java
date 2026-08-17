@@ -26,11 +26,14 @@ import nl.gzmn.playerworlds.core.config.ProxyConfig;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
+import nl.gzmn.playerworlds.core.db.NodeRepository;
+import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
+import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 
@@ -59,6 +62,9 @@ public final class GzmnWorldsProxyPlugin {
     /** How long enable waits for the schema check and the first policy read. */
     private static final Duration BOOTSTRAP_TIMEOUT = Duration.ofSeconds(90);
 
+    /** How often Velocity's server list is reconciled with the heartbeat table (MN-17). */
+    private static final Duration NODE_SYNC = Duration.ofSeconds(15);
+
     /** How often the cached network policy is refreshed from {@code network_setting}. */
     private static final Duration POLICY_REFRESH = Duration.ofMinutes(1);
 
@@ -69,6 +75,7 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable Database database;
     private @Nullable PluginExecutors executors;
     private @Nullable PlayerNameRepository playerNames;
+    private @Nullable NodeRegistry nodeRegistry;
 
     /**
      * Last policy read from the database.
@@ -130,12 +137,27 @@ public final class GzmnWorldsProxyPlugin {
         schedulePolicyRefresh(openedDatabase, pools);
         this.playerNames = new PlayerNameRepository(openedDatabase);
 
+        // MN-17: nodes register themselves; velocity.toml is never edited to add
+        // capacity. The sweep mirrors the heartbeat table into Velocity's server
+        // list and is idempotent, so running it on a timer is enough.
+        NodeRegistry registry = new NodeRegistry(proxy, new NodeRepository(openedDatabase));
+        this.nodeRegistry = registry;
+        registry.sync(loadedPolicy.deadAfter());
+        var _ = pools.sched()
+                .scheduleWithFixedDelay(
+                        () -> registry.sync(this.policy.deadAfter()),
+                        NODE_SYNC.toSeconds(),
+                        NODE_SYNC.toSeconds(),
+                        TimeUnit.SECONDS);
+
         WorldCommand command = new WorldCommand(
                 proxy,
                 pools,
                 new PlayerWorldRepository(openedDatabase),
                 new MembershipRepository(openedDatabase),
                 this.playerNames,
+                new PendingTransferRepository(openedDatabase),
+                registry,
                 this::policy);
         // metaBuilder rather than register(BrigadierCommand): the single-argument
         // form is deprecated, and naming the owning plugin is what lets Velocity
@@ -258,6 +280,11 @@ public final class GzmnWorldsProxyPlugin {
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        NodeRegistry registry = this.nodeRegistry;
+        this.nodeRegistry = null;
+        if (registry != null) {
+            registry.unregisterAll();
+        }
         PluginExecutors pools = this.executors;
         this.executors = null;
         if (pools != null) {

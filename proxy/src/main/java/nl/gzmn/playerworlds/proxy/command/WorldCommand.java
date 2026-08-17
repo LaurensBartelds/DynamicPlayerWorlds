@@ -49,7 +49,7 @@ public final class WorldCommand {
     private static final Logger log = LoggerFactory.getLogger(WorldCommand.class);
 
     /** Implemented here, for the enable log line and for tests. */
-    public static final List<String> SUBCOMMANDS = List.of("invite", "accept", "kick", "members", "promote");
+    public static final List<String> SUBCOMMANDS = List.of("join", "invite", "accept", "kick", "members", "promote");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -65,6 +65,8 @@ public final class WorldCommand {
     private final PlayerWorldRepository worlds;
     private final MembershipRepository membership;
     private final PlayerNameRepository names;
+    private final nl.gzmn.playerworlds.core.db.PendingTransferRepository transfers;
+    private final nl.gzmn.playerworlds.proxy.node.NodeRegistry registry;
     private final Supplier<NetworkPolicy> policy;
 
     public WorldCommand(
@@ -73,12 +75,16 @@ public final class WorldCommand {
             PlayerWorldRepository worlds,
             MembershipRepository membership,
             PlayerNameRepository names,
+            nl.gzmn.playerworlds.core.db.PendingTransferRepository transfers,
+            nl.gzmn.playerworlds.proxy.node.NodeRegistry registry,
             Supplier<NetworkPolicy> policy) {
         this.proxy = Objects.requireNonNull(proxy, "proxy");
         this.executors = Objects.requireNonNull(executors, "executors");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
         this.membership = Objects.requireNonNull(membership, "membership");
         this.names = Objects.requireNonNull(names, "names");
+        this.transfers = Objects.requireNonNull(transfers, "transfers");
+        this.registry = Objects.requireNonNull(registry, "registry");
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
@@ -114,6 +120,20 @@ public final class WorldCommand {
                                     promote(context, StringArgumentType.getString(context, "player"));
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
+                .then(BrigadierCommand.literalArgumentBuilder("join")
+                        .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
+                                .executes(context -> {
+                                    join(context, StringArgumentType.getString(context, "owner"), null);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
+                                        .executes(context -> {
+                                            join(
+                                                    context,
+                                                    StringArgumentType.getString(context, "owner"),
+                                                    StringArgumentType.getString(context, "name"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
                 .then(BrigadierCommand.literalArgumentBuilder("members").executes(context -> {
                     members(context);
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
@@ -124,6 +144,68 @@ public final class WorldCommand {
     // -----------------------------------------------------------------------
     // Subcommands
     // -----------------------------------------------------------------------
+
+    /**
+     * {@code /world join <owner> [name]} — FR-10.
+     *
+     * <p>Membership is validated here, on the proxy, because the proxy is the one
+     * component that can answer the question without the world being loaded — and
+     * by FR-25 a world is unloaded most of the time.
+     *
+     * <p>A player who is not a member gets the same answer as one asking about a
+     * world that does not exist. Confirming a private world exists to somebody who
+     * was never invited is the leak section 5.5 exists to prevent.
+     */
+    private void join(
+            CommandContext<CommandSource> context,
+            String ownerName,
+            @org.jspecify.annotations.Nullable String worldName) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<UUID> owner = resolvePlayer(ownerName);
+            if (owner.isEmpty()) {
+                error(caller, "no world you can join matches that");
+                return;
+            }
+            List<PlayerWorld> owned = worlds.listOwnedBy(owner.get());
+            Optional<PlayerWorld> target = owned.stream()
+                    .filter(world -> worldName == null || world.name().equalsIgnoreCase(worldName))
+                    .filter(world -> world.state() == nl.gzmn.playerworlds.core.model.WorldState.READY)
+                    .findFirst();
+            if (target.isEmpty()
+                    || membership
+                            .findMember(target.get().id(), caller.getUniqueId())
+                            .isEmpty()) {
+                error(caller, "no world you can join matches that");
+                return;
+            }
+
+            PlayerWorld world = target.get();
+            Optional<nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus> node =
+                    registry.selectNode(world.id(), world.dataVersion(), current.deadAfter());
+            if (node.isEmpty()) {
+                // MN-15 excludes nodes that cannot open the world before any other
+                // term, so "no node" and "no node new enough" arrive here together.
+                error(caller, "no server is available to host that world right now");
+                return;
+            }
+
+            transfers.route(caller.getUniqueId(), world.id(), node.get().nodeId(), world.generation());
+            var targetServer = registry.server(node.get().nodeId());
+            if (targetServer.isEmpty()) {
+                error(caller, "that server is not routable right now");
+                return;
+            }
+            info(caller, "sending you to '" + world.name() + "'...");
+            // fireAndForget: the node decides what happens on arrival by reading
+            // the pending_transfer written above, so there is nothing to await here.
+            caller.createConnectionRequest(targetServer.get()).fireAndForget();
+        });
+    }
 
     /** {@code /world invite <player>} — FR-6. */
     private void invite(CommandContext<CommandSource> context, String targetName) {
