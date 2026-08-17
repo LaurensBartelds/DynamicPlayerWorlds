@@ -1,9 +1,15 @@
 # The only place a dependency version is written. See CONTRIBUTING.md.
 [versions]
 # Platform APIs. An MC bump touches these two lines and nothing else.
-# paperApi doubles as the +mc<version> suffix on the plugin jars.
-paperApi = "1.21.4-R0.1-SNAPSHOT"
-velocityApi = "3.4.0-SNAPSHOT"
+# paperApi also supplies the +mc<version> suffix on the plugin jars, so it is
+# the one line that decides what an artifact claims to target.
+#
+# Paper follows Minecraft's versioning, which changed after 1.21.11: releases are
+# now year.season (26.1, 26.2) and the API coordinate carries the Paper build
+# number as `<mc>.build.<n>-stable`. gzmn.plugin-conventions reduces both that
+# and the older `1.21.4-R0.1-SNAPSHOT` shape to the Minecraft version alone.
+paperApi = "26.2.build.112-stable"
+velocityApi = "4.0.0"
 
 # Runtime
 hikari = "7.1.0"
@@ -45,6 +51,7 @@ micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "mic
 micrometer-prometheus = { module = "io.micrometer:micrometer-registry-prometheus", version.ref = "micrometer" }
 
 awssdk-s3 = { module = "software.amazon.awssdk:s3", version.ref = "awsSdk" }
+awssdk-urlconnection = { module = "software.amazon.awssdk:url-connection-client", version.ref = "awsSdk" }
 zstd = { module = "com.github.luben:zstd-jni", version.ref = "zstd" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 

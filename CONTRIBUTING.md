@@ -93,3 +93,13 @@ Add the version to `gradle/libs.versions.toml` and nowhere else. Prefer no
 dependency: everything added to `:backend` or `:proxy` gets shaded into a jar
 that shares a classloader with somebody else's plugin, and every one of them is
 a licence obligation under AGPL-3.0 and a thing to upgrade forever.
+
+Then say where its classes go. `verifyShadedJar` fails the build if any class in
+a plugin jar sits outside `nl/gzmn/playerworlds/`, so a new dependency needs
+either a `relocate(...)` line in `gzmn.plugin-conventions.gradle.kts` or an
+`exclude(...)` if the platform already provides it — Paper and Velocity both
+ship SLF4J, Netty and Gson, and a second copy of any of those is a classloader
+conflict that surfaces weeks later on an operator's server rather than here.
+Watch for transitives in particular: they are what the gate exists to catch,
+because nobody writes them in a build file and so nobody thinks to relocate
+them.

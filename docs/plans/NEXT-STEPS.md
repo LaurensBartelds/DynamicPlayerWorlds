@@ -4,34 +4,76 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1 and F2 are done. `./gradlew :core:build :testing:build` is green, and
-each quality gate has been verified by deliberately breaking it.
+F0, F1 and F2 are done. `./gradlew build` is green on all four modules against
+Paper 26.2 and Velocity 4.0.0, and each quality gate has been verified by
+deliberately breaking it.
 
-## First, in an environment that can reach repo.papermc.io
+## First, in an environment that can reach repo.papermc.io — done
 
-The sandbox this was built in blocks `repo.papermc.io` (403 on CONNECT), and
-Paper and Velocity are not on Maven Central. So `:backend` and `:proxy` are
-written but have never compiled. Before anything else:
+`:backend` and `:proxy` had never compiled, because the sandbox they were written
+in blocks `repo.papermc.io`. They compile now.
 
-- [ ] Set `paperApi` and `velocityApi` in `gradle/libs.versions.toml` to the
-      versions you actually run. `paperApi` also supplies the `+mc<version>`
-      suffix on the plugin jars, so it is the one line that decides what an
-      artifact claims to target.
-- [ ] `./gradlew build` and fix whatever the two plugin modules turn up. Likely
-      candidates: the `Bukkit.getMinecraftVersion()` and `Bukkit.getUnsafe()`
-      calls in `ServerIdentity`, and the Velocity `@Plugin` annotation
-      processor.
+- [x] `paperApi` and `velocityApi` set to Paper `26.2.build.112-stable` and
+      Velocity `4.0.0`. Minecraft's versioning changed after 1.21.11 — releases
+      are now year.season — so `paperApi` carries the Paper build number and the
+      jar-name derivation reduces both coordinate shapes to the Minecraft version
+      alone. Jars are `gzmn-worlds-0.1.0-SNAPSHOT+mc26.2.jar`.
+- [x] **Java toolchain 21 → 25.** `paper-api` 26.x is published with a Java 25
+      target and Gradle refuses to resolve it against a 21 toolchain, so this was
+      not optional. ADR 0003 has a note; its "Java 21" title records the
+      language decision, not the JDK number.
+- [x] `./gradlew build` green. What the two plugin modules turned up, in order:
+      `com.mojang:brigadier` (a `paper-api` transitive absent from Maven Central,
+      so the papermc content filter had to allow `com.mojang`);
+      `String#formatted` in `GzmnWorldsPlugin` (banned by forbidden-apis for
+      using the default locale); and the packaging defects below. `ServerIdentity`
+      and the Velocity `@Plugin` processor both compiled unchanged.
+- [x] **Relocation was broken, and is the reason this list gained a gate.** Both
+      jars shipped unrelocated Netty, Apache HttpClient 5, Jackson,
+      reactive-streams and HdrHistogram, plus a second `org.slf4j` colliding with
+      the one both platforms provide. The relocation list named only the direct
+      dependencies, so every transitive escaped. Fixed, and `verifyShadedJar` now
+      fails `check` if any class in a plugin jar sits outside
+      `nl/gzmn/playerworlds/`. Jars went 29 MB → 22 MB.
+- [x] `:backend:test` runs: `ArchitectureTest` 4/4, including the FR-25b rule
+      that no field may hold a `World`. 13 tests green across `:core` and
+      `:backend`.
 - [ ] Confirm both shaded jars load on a real Paper and Velocity and log
-      `enabled`. That is F1's actual acceptance criterion and the only part
-      still outstanding.
-- [ ] Run `:backend:test` — `ArchitectureTest` there has never executed,
-      including the FR-25b rule that no field may hold a `World`.
+      `enabled`. **Still outstanding** — this needs a server, and it is F1's
+      actual acceptance criterion. Everything else about F1 is verified.
+
+### Two things found while doing it
+
+- [ ] **zstd natives are 6.4 MB of the 22 MB jar**, covering eighteen
+      platform/arch pairs including `aix/ppc64`, `linux/mips64`, `linux/riscv64`
+      and `linux/loongarch64`. Trimming to the platforms nodes actually run on
+      saves about 5 MB per jar, but which those are is OQ-10/OQ-12, and the
+      failure mode if trimmed wrong is a node that dies at its first compression
+      rather than at startup. Left whole on purpose; decide with OQ-10.
+- [ ] **Relocating `net.logstash.logback` means a logback configuration must name
+      the encoder by its relocated class**, not
+      `net.logstash.logback.encoder.LogstashEncoder`. F8 owns that.
 
 ## Remaining foundation tasks
 
-- [ ] **F3** Database: Flyway, the V1 baseline migration (spec §4 plus
-      `data_version`, `node_command`, `player_world_report`, `network_setting`),
-      repository skeleton, `DbClock`, Hikari, Testcontainers schema test.
+- [x] **F3** Database. Done: `V1__baseline.sql` (spec §4 verbatim — the version
+      columns were already folded into v0.4 — plus `player_world_report` for
+      FR-39 and `network_setting` for plan §8.1), `Database` on Hikari with
+      autocommit off, `DbClock`, `AdvisoryLock` for the FR-40 election,
+      `Repository` + `RowMapper` as the seam, `Schema` with the version guard, and
+      13 Testcontainers tests against PostgreSQL 18.3. `:core:test` is 22 green.
+      - The guard refuses **before** migrating when the schema is newer than
+        `Schema.MAX_SUPPORTED`, which is the rolling-deploy case it exists for.
+        Adding a migration means bumping `MAX_SUPPORTED` in the same commit.
+      - Migrations run under `AdvisoryLock.MAINTENANCE_KEY`, bounded to 60s and
+        refusing rather than hanging, per plan §6.
+      - `Repository` takes a `Connection` per call rather than fetching its own,
+        so MN-3a can commit a manifest pointer and its profiles in one
+        transaction.
+      - Testcontainers is declared on `:core`'s test classpath directly rather
+        than via `:testing`, because `:testing` depends on `:core` and the
+        reverse would be a cycle. F9's fixtures serve `:backend`, `:proxy` and
+        e2e; `:core` owns the database and tests it itself.
 - [ ] **F4** Config: typed node config, `network_setting` accessor with cache
       invalidation, and the startup validations in plan §8.2. Resolve the
       duplicate config keys flagged in spec §7 while doing it.
@@ -69,7 +111,10 @@ Carried in the spec as OQ-13 to OQ-16 so they are not lost.
       against the last manifest? Same result, no coupling to server internals.
       Needed by F12 / milestone 6.
 - [ ] **OQ-14** Retention period for FR-39's captured chat log — 30 days, 90, or
-      until the report is marked handled? Needed by F3's baseline migration.
+      until the report is marked handled? No longer blocks the schema: V1 carries
+      `created_at` and `handled_at`, which is what any of the three answers sweeps
+      on, and the period itself belongs in `network_setting` so it can change
+      without a migration. Now needed by the F40 maintenance sweep instead.
 - [ ] **OQ-15** Confirm the proxy owns the `/world` root and forwards `leave`
       and `report` to the backend. Needed by milestone 5.
 - [ ] **OQ-16** Move network-wide policy out of `config.yml` into a database
