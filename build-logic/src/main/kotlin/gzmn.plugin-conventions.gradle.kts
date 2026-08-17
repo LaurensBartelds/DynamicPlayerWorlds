@@ -30,6 +30,14 @@ val minecraftVersion: String =
         .substringBefore("-")
         .replace(Regex("""\.build\.\d+$"""), "")
 
+// Exposed so a module's processResources can stamp it into a plugin descriptor.
+// plugin.yml's api-version has to be the version we actually compiled against:
+// it is what Paper reads to decide which compatibility behaviours to apply, and a
+// descriptor claiming an older API than the jar was built for is asking the
+// server to guess. Deriving it from the same value as the jar name is what stops
+// the two from drifting.
+extra["minecraftApiVersion"] = minecraftVersion
+
 // Relocation is mandatory, not optional. A plugin jar shares a classloader with
 // every other plugin on the server, so an unrelocated HikariCP meeting a
 // different unrelocated HikariCP is a startup failure discovered weeks later.

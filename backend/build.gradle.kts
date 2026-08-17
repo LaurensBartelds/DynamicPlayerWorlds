@@ -15,10 +15,15 @@ dependencies {
     testImplementation(project(":testing"))
 }
 
-// The plugin.yml version is expanded from the build, so the version in the jar
-// and the version the server reports can never drift.
+// plugin.yml's version and api-version are both expanded from the build, so
+// neither the version the server reports nor the API level it applies can drift
+// from what was actually compiled. api-version comes from paperApi via
+// gzmn.plugin-conventions, the same value that names the jar.
 tasks.processResources {
-    val tokens = mapOf("version" to project.version.toString())
+    val tokens = mapOf(
+        "version" to project.version.toString(),
+        "apiVersion" to project.extra["minecraftApiVersion"].toString(),
+    )
     inputs.properties(tokens)
     filesMatching("plugin.yml") { expand(tokens) }
 }

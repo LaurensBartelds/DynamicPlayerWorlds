@@ -50,3 +50,6 @@ the jar filename (`+mc<version>`), not part of the project version.
 - `com.mojang` is now included in the papermc repository's content filter;
   `paper-api` depends on `com.mojang:brigadier`, which Maven Central does not
   carry, so `:backend` could not resolve at all.
+- `plugin.yml` declared `api-version: '1.21'` regardless of what the jar was
+  built against. It is now expanded from `paperApi`, the same value that names the
+  jar, so the API level Paper applies cannot drift from the one we compiled to.
