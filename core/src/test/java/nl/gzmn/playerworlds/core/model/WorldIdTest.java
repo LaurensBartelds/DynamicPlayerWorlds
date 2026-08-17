@@ -40,4 +40,36 @@ class WorldIdTest {
 
         assertThat(WorldId.parse(raw.toString())).isEqualTo(new WorldId(raw));
     }
+
+    @Test
+    @DisplayName("a folder round-trips back to the id that produced it")
+    void folderRoundTripsBackToTheId() {
+        WorldId id = WorldId.random();
+
+        assertThat(WorldId.fromFolder(id.folder())).contains(id);
+    }
+
+    @Test
+    @DisplayName("a folder that is not ours is rejected rather than guessed at")
+    void foreignFoldersAreRejected() {
+        // The lobby, the server's own worlds, and anything another plugin made
+        // all reach this method on every portal transit and every join.
+        assertThat(WorldId.fromFolder("world")).isEmpty();
+        assertThat(WorldId.fromFolder("world_nether")).isEmpty();
+        assertThat(WorldId.fromFolder("lobby")).isEmpty();
+        assertThat(WorldId.fromFolder("pw_")).isEmpty();
+        assertThat(WorldId.fromFolder("pw_short")).isEmpty();
+        assertThat(WorldId.fromFolder("pw_" + "z".repeat(32))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a folder that parses to a different id is rejected, not silently accepted")
+    void nearlyValidFoldersDoNotRoundTrip() {
+        // UUID.fromString pads short groups, so a 32-character string of hex can
+        // parse to a UUID whose own folder is a different string. Comparing back
+        // is what makes this a parse rather than a guess.
+        String uppercase = WorldId.random().folder().toUpperCase(java.util.Locale.ROOT);
+
+        assertThat(WorldId.fromFolder(uppercase)).isEmpty();
+    }
 }

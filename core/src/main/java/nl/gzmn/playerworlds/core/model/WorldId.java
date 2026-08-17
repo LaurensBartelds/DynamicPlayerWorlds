@@ -1,5 +1,7 @@
 package nl.gzmn.playerworlds.core.model;
 
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -16,7 +18,7 @@ import java.util.UUID;
 public record WorldId(UUID value) {
 
     public WorldId {
-        java.util.Objects.requireNonNull(value, "value");
+        Objects.requireNonNull(value, "value");
     }
 
     public static WorldId random() {
@@ -27,9 +29,53 @@ public record WorldId(UUID value) {
         return new WorldId(UUID.fromString(text));
     }
 
+    /** Prefix that marks a world folder as one of ours (FR-2a). */
+    public static final String FOLDER_PREFIX = "pw_";
+
+    /** A UUID with its dashes stripped. */
+    private static final int UNDASHED_UUID_LENGTH = 32;
+
     /** The live world folder name for this world's overworld (FR-2a). */
     public String folder() {
-        return "pw_" + value.toString().replace("-", "");
+        return FOLDER_PREFIX + value.toString().replace("-", "");
+    }
+
+    /**
+     * Recovers the id from a folder name produced by {@link #folder()}.
+     *
+     * <p>Empty rather than throwing, because the caller's question is usually "is
+     * this one of ours at all" — a node has a lobby and possibly other worlds, and
+     * every one of them reaches this method through the portal and join paths.
+     */
+    public static Optional<WorldId> fromFolder(String folder) {
+        Objects.requireNonNull(folder, "folder");
+        if (!folder.startsWith(FOLDER_PREFIX)) {
+            return Optional.empty();
+        }
+        String undashed = folder.substring(FOLDER_PREFIX.length());
+        if (undashed.length() != UNDASHED_UUID_LENGTH) {
+            return Optional.empty();
+        }
+        StringBuilder dashed = new StringBuilder(36)
+                .append(undashed, 0, 8)
+                .append('-')
+                .append(undashed, 8, 12)
+                .append('-')
+                .append(undashed, 12, 16)
+                .append('-')
+                .append(undashed, 16, 20)
+                .append('-')
+                .append(undashed, 20, UNDASHED_UUID_LENGTH);
+        try {
+            UUID parsed = UUID.fromString(dashed.toString());
+            // UUID.fromString accepts short groups and pads them, so a folder that
+            // is 32 characters of nearly-hex can round-trip to a different id.
+            // Comparing back is what makes this a parse rather than a guess.
+            WorldId candidate = new WorldId(parsed);
+            return candidate.folder().equals(folder) ? Optional.of(candidate) : Optional.empty();
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
     }
 
     @Override
