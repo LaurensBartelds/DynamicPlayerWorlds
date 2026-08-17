@@ -343,6 +343,21 @@ public final class WorldLifecycleService {
     private CompletableFuture<LoadOutcome> materialiseExisting(PlayerWorld row, NetworkPolicy current) {
         Set<DimensionKind> onDisk = dimensionsOnDisk(row.id());
         if (onDisk.isEmpty()) {
+            if (row.state() == WorldState.CREATING) {
+                // A row the proxy inserted at /world create, arriving on the node
+                // it routed to. Generating here rather than on the proxy is the
+                // whole point: only a node can run createWorld, and FR-4's
+                // main-thread stall is its to pay.
+                return materialiseNewWorld(row, current).thenApply(outcome -> switch (outcome) {
+                    case CreateOutcome.Created created -> (LoadOutcome) new LoadOutcome.Loaded(created.world());
+                    case CreateOutcome.Failed failed -> new LoadOutcome.Failed(row.id(), failed.reason());
+                    case CreateOutcome.CapReached cap ->
+                        new LoadOutcome.Failed(row.id(), "owner is at their world limit (" + cap.cap() + ")");
+                    case CreateOutcome.NameTaken taken ->
+                        new LoadOutcome.Failed(row.id(), "a world called '" + taken.name() + "' already exists");
+                    case CreateOutcome.NodeFull full -> new LoadOutcome.NodeFull(full.loaded(), full.cap());
+                });
+            }
             // A READY row whose folders are gone. Milestone 6 downloads them from
             // object storage; until then this is a genuine inconsistency and
             // saying so beats silently generating a new world over the top.

@@ -23,6 +23,7 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,7 +50,8 @@ public final class WorldCommand {
     private static final Logger log = LoggerFactory.getLogger(WorldCommand.class);
 
     /** Implemented here, for the enable log line and for tests. */
-    public static final List<String> SUBCOMMANDS = List.of("join", "invite", "accept", "kick", "members", "promote");
+    public static final List<String> SUBCOMMANDS =
+            List.of("create", "join", "invite", "accept", "kick", "members", "promote");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -120,6 +122,20 @@ public final class WorldCommand {
                                     promote(context, StringArgumentType.getString(context, "player"));
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
+                .then(BrigadierCommand.literalArgumentBuilder("create")
+                        .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
+                                .executes(context -> {
+                                    create(context, StringArgumentType.getString(context, "name"), null);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder("seed", StringArgumentType.word())
+                                        .executes(context -> {
+                                            create(
+                                                    context,
+                                                    StringArgumentType.getString(context, "name"),
+                                                    StringArgumentType.getString(context, "seed"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
@@ -144,6 +160,76 @@ public final class WorldCommand {
     // -----------------------------------------------------------------------
     // Subcommands
     // -----------------------------------------------------------------------
+
+    /**
+     * {@code /world create <name> [seed]} - FR-1, FR-1a.
+     *
+     * <p>Creation is a network operation, not a backend-local one (FR-1a): the
+     * proxy resolves a node, and only then does generation begin. What the proxy
+     * writes is the row; the node it routes to sees a {@code CREATING} world with
+     * no folders on arrival and generates the overworld, because only a node can
+     * run {@code createWorld} and FR-4's main-thread stall is its to pay.
+     *
+     * <p>FR-1a also requires the lease be acquired before any folder is created.
+     * Leases are milestone 7, so the ordering here is right and the lease itself
+     * is absent - recorded in plan 01 section 5.3 rather than papered over.
+     */
+    private void create(
+            CommandContext<CommandSource> context, String name, @org.jspecify.annotations.Nullable String seedText) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            UUID owner = caller.getUniqueId();
+            int owned = worlds.countOwnedBy(owner);
+            if (owned >= current.maxWorldsPerPlayer()) {
+                error(caller, "you already own " + owned + " worlds (limit " + current.maxWorldsPerPlayer() + ")");
+                return;
+            }
+            if (worlds.findByOwnerAndName(owner, name).isPresent()) {
+                error(caller, "you already own a world called '" + name + "'");
+                return;
+            }
+
+            // A world with no committed snapshot has no data version, so every
+            // alive node is a candidate (MN-28).
+            Optional<nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus> node =
+                    registry.selectNode(WorldId.random(), null, current.deadAfter());
+            if (node.isEmpty()) {
+                error(caller, "no server is available to host a new world right now");
+                return;
+            }
+            var targetServer = registry.server(node.get().nodeId());
+            if (targetServer.isEmpty()) {
+                error(caller, "that server is not routable right now");
+                return;
+            }
+
+            long seed = seedText == null ? new java.security.SecureRandom().nextLong() : parseSeed(seedText);
+            PlayerWorld world = worlds.create(
+                    WorldId.random(),
+                    owner,
+                    name,
+                    seed,
+                    current.defaultBorderRadius(),
+                    nl.gzmn.playerworlds.core.model.Visibility.valueOf(current.defaultVisibility()));
+
+            transfers.route(owner, world.id(), node.get().nodeId(), world.generation());
+            info(caller, "creating '" + name + "' on " + node.get().nodeId() + "; this may take a few seconds...");
+            caller.createConnectionRequest(targetServer.get()).fireAndForget();
+        });
+    }
+
+    /** Vanilla treats a non-numeric seed as text and hashes it; matching that is least surprising. */
+    private static long parseSeed(String seedText) {
+        try {
+            return Long.parseLong(seedText);
+        } catch (NumberFormatException e) {
+            return seedText.hashCode();
+        }
+    }
 
     /**
      * {@code /world join <owner> [name]} — FR-10.
