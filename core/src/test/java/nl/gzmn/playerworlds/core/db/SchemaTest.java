@@ -75,6 +75,9 @@ class SchemaTest {
                         "node_command",
                         "pending_transfer",
                         "player_last_world",
+                        // V2: the username cache section 4 never defined, which every
+                        // section 6 command needs to turn its first argument into a UUID.
+                        "player_name",
                         "player_world",
                         "player_world_archive",
                         "player_world_ban",

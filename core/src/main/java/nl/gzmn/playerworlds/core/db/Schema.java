@@ -47,7 +47,7 @@ public final class Schema {
      * this in the same commit; a mismatch means every node refuses to start,
      * which is the loudest possible reminder.
      */
-    public static final int MAX_SUPPORTED = 1;
+    public static final int MAX_SUPPORTED = 2;
 
     /** How long a starting node waits for the migration lock before giving up. */
     private static final Duration LOCK_TIMEOUT = Duration.ofSeconds(60);
