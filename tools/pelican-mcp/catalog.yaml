@@ -1,0 +1,52 @@
+version: 3
+name: pelican-catalog
+displayName: Pelican Panel Tools
+registry:
+  pelican-panel:
+    description: Pelican Game Server Panel API tools for Paper backend and Velocity proxy servers (control, deployments, logs, console)
+    title: Pelican Panel
+    type: server
+    image: pelican-mcp-server:latest
+    tools:
+      - name: pelican_get_server_status
+        description: Get operational status, CPU, RAM, Disk usage, and uptime for Paper or Velocity
+      - name: pelican_send_power_action
+        description: Send power signals (start, stop, restart, kill) to Paper or Velocity
+      - name: pelican_send_command
+        description: Execute console commands on Paper or Velocity
+      - name: pelican_get_logs
+        description: Read latest server logs from Paper or Velocity
+      - name: pelican_list_files
+        description: List files and directories on Paper or Velocity
+      - name: pelican_read_file
+        description: Read file contents (config.yml, velocity.toml, server.properties)
+      - name: pelican_write_file
+        description: Write content to a remote file
+      - name: pelican_delete_files
+        description: Delete files or directories
+      - name: pelican_upload_file
+        description: Upload a file via signed upload URL
+      - name: pelican_deploy_plugin
+        description: Deploy plugin jar with old version cleanup to Paper or Velocity
+      - name: pelican_deploy_network
+        description: Deploy both Paper backend and Velocity proxy jars in one action with auto-restart
+    config:
+      - name: pelican-panel
+        description: Pelican Panel connection parameters
+        type: object
+        properties:
+          PELICAN_URL:
+            type: string
+            description: Base URL of your Pelican Panel (e.g. https://panel.example.com)
+          PELICAN_API_KEY:
+            type: string
+            description: Client API Key from Pelican Panel
+          PAPER_SERVER_ID:
+            type: string
+            description: Server ID/UUID for the Paper Backend server (alias 'paper')
+          PROXY_SERVER_ID:
+            type: string
+            description: Server ID/UUID for the Velocity Proxy server (alias 'proxy')
+          DEFAULT_SERVER_ID:
+            type: string
+            description: Fallback Server ID
