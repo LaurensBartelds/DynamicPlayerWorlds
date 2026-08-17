@@ -3,7 +3,9 @@ package nl.gzmn.playerworlds.core.config;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import nl.gzmn.playerworlds.core.db.DatabaseSettings;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Node-local configuration for a {@code worlds} backend node.
@@ -22,10 +24,20 @@ import nl.gzmn.playerworlds.core.db.DatabaseSettings;
  * @param heartbeatInterval how often this node writes its heartbeat row
  *     ({@code node.heartbeat-seconds})
  * @param database connection settings
- * @param storage object-storage client settings
+ * @param storage object-storage client settings, or {@code null} on a node with
+ *     no object storage configured. Optional because object storage arrives with
+ *     milestone 6: a node running earlier milestones has live folders and a
+ *     database and nothing to sync to, and requiring invented S3 credentials to
+ *     boot would make the configuration lie about what the node does
  * @param scratchPath live Anvil working copies ({@code storage.local-scratch-path};
  *     replaces the duplicate {@code worlds.storage-path} from specification
- *     section 7 — see ADR 0007)
+ *     section 7 — see ADR 0007).
+ *     <p>This is necessarily the server's own world container. Bukkit offers no
+ *     API to create a world outside {@code Bukkit.getWorldContainer()} —
+ *     {@code WorldCreator} takes a name, never a path — so the directory the
+ *     plugin materialises worlds into and the directory the server ticks from
+ *     are the same one. Specification section 12.8 describes the scratch path as
+ *     though the plugin chose it freely; it does not. See plan 01 section 5.1
  * @param cachePath content-addressed local object cache
  * @param quarantinePath crash-debris holding area (MN-13)
  * @param minFreeSpaceBytes refuse creation below this free space on the scratch
@@ -36,7 +48,7 @@ public record NodeConfig(
         String address,
         Duration heartbeatInterval,
         DatabaseSettings database,
-        StorageClientSettings storage,
+        @Nullable StorageClientSettings storage,
         Path scratchPath,
         Path cachePath,
         Path quarantinePath,
@@ -57,7 +69,6 @@ public record NodeConfig(
         Objects.requireNonNull(address, "address");
         Objects.requireNonNull(heartbeatInterval, "heartbeatInterval");
         Objects.requireNonNull(database, "database");
-        Objects.requireNonNull(storage, "storage");
         Objects.requireNonNull(scratchPath, "scratchPath");
         Objects.requireNonNull(cachePath, "cachePath");
         Objects.requireNonNull(quarantinePath, "quarantinePath");
@@ -74,5 +85,16 @@ public record NodeConfig(
         if (minFreeSpaceBytes < 0) {
             throw new ConfigException("storage.min-free-space-bytes must not be negative, was: " + minFreeSpaceBytes);
         }
+    }
+
+    /**
+     * Object-storage settings when this node has them.
+     *
+     * <p>Empty until milestone 6 configures a bucket. Every caller that needs
+     * object storage has to decide what to do without it, which is the point of
+     * making the absence visible in the type.
+     */
+    public Optional<StorageClientSettings> objectStorage() {
+        return Optional.ofNullable(storage);
     }
 }

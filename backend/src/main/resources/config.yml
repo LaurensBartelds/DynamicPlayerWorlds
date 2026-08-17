@@ -1,0 +1,74 @@
+# gzmn-worlds — node-local configuration.
+#
+# Only facts about THIS node belong here: who it is, where it writes, which
+# credentials it holds. Network-wide policy — world caps, invite expiries,
+# retention counts, lease timings — lives in the `network_setting` table so the
+# proxy and every node read one value and cannot silently disagree (ADR 0007).
+# Change those with SQL or, from milestone 9, an admin command; not here.
+
+node:
+  # Unique across the network. Also the Velocity server name a node registers
+  # itself under (MN-17), so it must be stable across restarts.
+  id: worlds-1
+
+  # host:port the proxy should route players to.
+  address: 127.0.0.1:25566
+
+  # How often this node writes its heartbeat row. Validated against
+  # nodes.lease-seconds at startup: three missed heartbeats must still fit
+  # inside the lease (MN-9).
+  heartbeat-seconds: 30
+
+database:
+  url: jdbc:postgresql://127.0.0.1:5432/gzmn_worlds
+  user: gzmn
+  password: ""
+
+  # Small on purpose. A node hosts at most nodes.max-worlds worlds and a few
+  # dozen players, every statement is short, and the slow work is object
+  # storage, which has its own bounded executor (NFR-7).
+  pool-size: 8
+  connection-timeout-seconds: 5
+
+storage:
+  # Where live Anvil folders sit. Blank means "the server's world container",
+  # which is the only correct answer: Bukkit has no API to create a world
+  # anywhere else, so the directory this plugin materialises worlds into and the
+  # one the server ticks from are necessarily the same. A non-blank value is
+  # accepted only if it names that same directory, and refused otherwise rather
+  # than ignored.
+  local-scratch-path: ""
+
+  # Content-addressed object cache and the MN-13 crash-debris holding area.
+  # Relative paths resolve against the plugin data folder. Both must be on the
+  # same filesystem as the scratch path, because reflink copies do not cross
+  # filesystems and would silently degrade to full copies (plan 00 section 10.4).
+  local-cache-path: cache
+  quarantine-path: quarantine
+
+  # Refuse world creation below this much free space on the scratch volume
+  # (NFR-3). 20 GiB leaves room for one more world plus a snapshot copy on a
+  # filesystem without reflink support.
+  min-free-space-bytes: 21474836480
+
+  # Object storage arrives with milestone 6. Until then a node has live folders
+  # and a database and nothing to sync to, so leaving this disabled is a real
+  # configuration rather than a placeholder.
+  s3:
+    enabled: false
+    endpoint: ""
+    region: us-east-1
+    access-key: ""
+    secret-key: ""
+    bucket: ""
+    # Blank means archives share the bucket above. One client configuration with
+    # a bucket override, never two credential sets (ADR 0007).
+    archive-bucket: ""
+    # MinIO requires path-style addressing.
+    path-style-access: true
+
+metrics:
+  # Prometheus scrape endpoint. Loopback by default so a public bind is opt-in;
+  # port 0 keeps the meters in-process and opens no socket.
+  bind: 127.0.0.1
+  port: 9464
