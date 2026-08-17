@@ -4,9 +4,9 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4, F5, F6, F7, F8, F9, F10 and F11 are done. `./gradlew build` is green on all
-modules against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
-deliberately breaking it, and both plugin jars have been loaded on real servers.
+F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 and
+Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
+and both plugin jars have been loaded on real servers.
 
 ## First, in an environment that can reach repo.papermc.io — done
 
@@ -166,14 +166,18 @@ in blocks `repo.papermc.io`. They compile now.
       through the proxy (handshake advertises protocol 776 with 26.1 packet
       schemas). Nightly workflow `e2e.yml` runs `e2e/scripts/run.sh`.
       Acceptance: one player joins a lobby in CI.
-- [ ] **F12** *(defer-ok, worth pulling forward)* Durability primitives: the
-      reflink copier with fallback detection and the region-file structural
-      validator (MN-5c). Pure `:core` code, no server needed, and the
-      highest-consequence correctness code in the system.
+- [x] **F12** Durability primitives. Done: `core.storage` holds the reflink
+      copier with plain fallback (`ReflinkFileCloner` / `PlainFileCloner`),
+      `SnapshotCopier` (post-copy re-stat and bounded retry, MN-5a steps 4–5),
+      `RegionStructure` (MN-5c Anvil header/sector/length checks), and
+      `ContentHasher` (SHA-256 fused with optional region validation on one
+      read, plan §9.1 step 7). Property tests flip every location-table byte on
+      a synthetic `.mca` and assert rejection; a mid-copy mutation is detected
+      and retried until settle or `UnstableFileException`.
 
-Then spec milestone 1 begins: create a world, materialise its nether and end on
-first transit, portal linking both ways, and measure the `createWorld` stall
-that sets `worlds.create-stall-budget-ms`.
+Foundation complete. Spec milestone 1 begins: create a world, materialise its
+nether and end on first transit, portal linking both ways, and measure the
+`createWorld` stall that sets `worlds.create-stall-budget-ms`.
 
 ## Open questions, none blocking
 
@@ -181,7 +185,7 @@ Carried in the spec as OQ-13 to OQ-16 so they are not lost.
 
 - [ ] **OQ-13** Replace MN-5b's chunk-save hook with a size and mtime stat walk
       against the last manifest? Same result, no coupling to server internals.
-      Needed by F12 / milestone 6.
+      Needed by milestone 6 (`FileFingerprint` from F12 is the comparison unit).
 - [ ] **OQ-14** Retention period for FR-39's captured chat log — 30 days, 90, or
       until the report is marked handled? No longer blocks the schema: V1 carries
       `created_at` and `handled_at`, which is what any of the three answers sweeps

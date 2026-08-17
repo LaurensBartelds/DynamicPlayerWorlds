@@ -71,6 +71,12 @@ the jar filename (`+mc<version>`), not part of the project version.
   RCON and join markers; minecraft-protocol offline bot joins the lobby through
   the proxy (handshake protocol 776 with 26.1 packet schemas). Entry point
   `e2e/scripts/run.sh` for CI and local runs.
+- Durability primitives (F12): `core.storage` — reflink file cloner with plain
+  fallback, `SnapshotCopier` with post-copy re-stat and bounded retry (MN-5a),
+  Anvil `RegionStructure` validator (MN-5c), and `ContentHasher` SHA-256 with
+  fused region validation on a single read (plan §9.1 step 7). Property tests
+  reject every single-byte location-table corruption on synthetic `.mca` files
+  and prove a mid-copy mutation is detected and retried.
 
 ### Changed
 
