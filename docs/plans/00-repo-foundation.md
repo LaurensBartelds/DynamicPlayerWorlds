@@ -2,7 +2,7 @@
 
 Status: draft for review
 Covers: everything before spec milestone 1 ("Suggested milestones", §11)
-Spec baseline: `gzmn-player-worlds-spec.md` v0.3
+Spec baseline: `docs/spec/v0.4.md` (D1, D2, D5 and D6 are folded in as of v0.4)
 
 ---
 
@@ -35,8 +35,8 @@ marked **[defer-ok]**.
 ## 1. Decisions taken
 
 All six were open before this plan and are now settled. Each gets an ADR in
-`docs/adr/` as part of task F0, and D1, D2, D5 and D6 are amendments to the spec
-that should fold into v0.4.
+`docs/adr/` as part of task F0. D1, D2, D5 and D6 were amendments to the spec
+and are folded into `docs/spec/v0.4.md`.
 
 | # | Decision | Rationale |
 | --- | --- | --- |
@@ -78,7 +78,7 @@ DynamicPlayerWorlds/
 ├── testing/                         # :testing — shared fixtures, Testcontainers factories
 ├── e2e/                             # docker compose harness + acceptance tests
 ├── docs/
-│   ├── spec/                        # gzmn-player-worlds-spec.md moves here
+│   ├── spec/                        # v0.4.md, the living specification
 │   ├── adr/                         # architecture decision records
 │   ├── plans/                       # this file
 │   └── runbooks/                    # minecraft-upgrade, fenced-node, restore, minio-dr
@@ -98,9 +98,9 @@ Minecraft server — and it is what keeps the MC-version-sensitive surface small
 enough to audit by eye. It is enforced by an ArchUnit test *and* by simply not
 declaring the dependency, so a violation cannot compile.
 
-Proposed move: `gzmn-player-worlds-spec.md` → `docs/spec/v0.3.md`, with the
-version in the filename so v0.4 lands alongside it rather than overwriting it.
-Not done yet — say the word.
+The spec now lives at `docs/spec/v0.4.md`, with the version in the filename so
+v0.5 lands alongside it. Superseded versions stay in git history rather than as
+duplicated 70 KB files; v0.3 is commit `157e3ff`.
 
 ---
 
@@ -282,7 +282,9 @@ over that is sub-millisecond and runs off the main thread.
 This gives the same incremental behaviour MN-5b wants, removes an entire
 category of version-fragile code, and is strictly easier to test.
 
-Suggested spec amendment for v0.4 — flagged, not assumed.
+Not folded into v0.4, because it was never put to you as a decision. It is
+carried in the spec as OQ-13 so it stays visible until milestone 6 needs an
+answer.
 
 ### 5.5 Item serialisation is a version-proofing decision, not a storage one
 
@@ -729,7 +731,7 @@ Ordered. Each task states what "done" means. Rough sizes assume one developer.
 
 | ID | Task | Done when | Size |
 | --- | --- | --- | --- |
-| F0 | Repo hygiene: `.gitignore`, `.editorconfig`, `.gitattributes`, README rewrite, CONTRIBUTING, CLAUDE.md, spec moved to `docs/spec/v0.3.md`, four ADRs from §1 | A newcomer can read the repo and know the rules | S |
+| F0 | Repo hygiene: `.gitignore`, `.editorconfig`, `.gitattributes`, README rewrite, CONTRIBUTING, CLAUDE.md, six ADRs from §1 (spec move already done) | A newcomer can read the repo and know the rules | S |
 | F1 | Gradle skeleton: settings, version catalog, `build-logic` conventions, five empty modules, shadow + relocation + reproducible jars | `./gradlew build` produces two correctly-named, correctly-relocated plugin jars that load on a real Paper/Velocity and log "enabled" | M |
 | F2 | Quality gates: Spotless, Error Prone + NullAway + JSpecify, forbidden-apis, ArchUnit rules from §4 | A deliberate NMS import and a `:core` → Bukkit import each fail the build | S |
 | F3 | Database foundation: Flyway, V1 baseline (spec §4 + §5.3 + §6 additions), repository skeleton, `DbClock`, Hikari, Testcontainers schema test | Migrations apply to an empty DB in CI; schema-version guard refuses an out-of-range node | M |
@@ -757,8 +759,11 @@ in isolation than inside a running sync.
 
 Resolved since the first draft, now recorded as decisions rather than
 questions: the database-outage bound (D5, §9.2), the snapshot copy procedure
-(D6, §9.1), and the package root `nl.gzmn.playerworlds`. All three should fold
-into spec v0.4.
+(D6, §9.1), and the package root `nl.gzmn.playerworlds`. The first two are in
+spec v0.4 as MN-10b and MN-5a/MN-5c.
+
+The four below are also carried in spec v0.4 as OQ-13 to OQ-16, so they are not
+lost if this plan is archived.
 
 Of what remains, none is blocking for F0–F12; Q1 and Q2 become blocking at
 milestones 5 and 9 respectively.
