@@ -44,6 +44,25 @@ public final class Database implements DbClock, AutoCloseable {
         config.setConnectionTimeout(settings.connectionTimeout().toMillis());
         config.setPoolName("gzmn-worlds-db");
 
+        // Name the driver rather than letting Hikari resolve it through
+        // DriverManager, because inside a plugin jar DriverManager cannot find it.
+        //
+        // DriverManager builds its registry once, by running a ServiceLoader scan
+        // against whichever classloader got there first. On a Paper server that
+        // happens long before a plugin is loaded, from a classloader that cannot
+        // see inside our jar, so our META-INF/services/java.sql.Driver entry is
+        // never read and DriverManager.getDriver reports "No suitable driver" for
+        // a driver that is demonstrably present. Naming the class instead sends
+        // Hikari down its direct-instantiation path, which loads through its own
+        // classloader — and its own classloader, after relocation, is the plugin
+        // classloader that does contain the driver.
+        //
+        // The name is taken from the class rather than written as a string so that
+        // relocation rewrites it automatically and a driver rename is a compile
+        // error. Unshaded (tests, :testing) it resolves to org.postgresql.Driver;
+        // shaded it resolves to the relocated name.
+        config.setDriverClassName(org.postgresql.Driver.class.getName());
+
         // Autocommit off by default. Every multi-statement operation in this
         // system is a transaction whose atomicity is the correctness argument
         // (MN-3a commits a manifest pointer and its profiles together, or not at

@@ -36,11 +36,14 @@ rcon_b() {
 echo "==> Waiting for Paper nodes (plugins + Done)"
 # World gen on first boot can take a few minutes on a cold CI runner.
 wait_for_log "${PAPER_A}" "e2e-harness enabled" 360
-wait_for_log "${PAPER_A}" "enabled: minecraft" 120
+# gzmn-worlds only reaches this line after it has migrated the schema and
+# read network policy from PostgreSQL, so waiting on it is what makes this
+# harness a real test of the shaded jar against a real database.
+wait_for_log "${PAPER_A}" "enabled: node " 180
 wait_for_log "${PAPER_A}" "Done (" 360
 
 wait_for_log "${PAPER_B}" "e2e-harness enabled" 360
-wait_for_log "${PAPER_B}" "enabled: minecraft" 120
+wait_for_log "${PAPER_B}" "enabled: node " 180
 wait_for_log "${PAPER_B}" "Done (" 360
 
 echo "==> Waiting for Velocity"

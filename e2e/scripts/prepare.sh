@@ -78,6 +78,43 @@ stage_paper_node() {
   cp "${BACKEND_JAR}" "${dest}/plugins/"
   cp "${HARNESS_JAR}" "${dest}/plugins/"
 
+  # gzmn-worlds node config. From milestone 1 the plugin refuses to enable
+  # without a reachable database, which is what makes this harness the only
+  # place that exercises the shaded jar against a real PostgreSQL — the exact
+  # combination that hid the relocated JDBC driver not registering with
+  # DriverManager. Leaving this out means the plugin quietly fails to enable and
+  # the harness proves nothing about it.
+  mkdir -p "${dest}/plugins/gzmn-worlds"
+  cat > "${dest}/plugins/gzmn-worlds/config.yml" <<EOF
+node:
+  id: ${node}
+  address: ${node}:25565
+  heartbeat-seconds: 30
+
+database:
+  url: jdbc:postgresql://postgres:5432/gzmn_worlds
+  user: gzmn
+  password: "${E2E_POSTGRES_PASSWORD}"
+  pool-size: 8
+  connection-timeout-seconds: 10
+
+storage:
+  # Blank follows the server's world container, which is the only directory
+  # Bukkit will create a world in.
+  local-scratch-path: ""
+  local-cache-path: cache
+  quarantine-path: quarantine
+  # A CI runner has no 20 GiB to spare, and the NFR-3 floor is covered by
+  # ConfigValidatorTest rather than here.
+  min-free-space-bytes: 0
+  s3:
+    enabled: false
+
+metrics:
+  bind: 0.0.0.0
+  port: 9464
+EOF
+
   # Empty JSON lists so Paper skips first-run prompts.
   printf '[]\n' > "${dest}/ops.json"
   printf '[]\n' > "${dest}/whitelist.json"
