@@ -4,7 +4,7 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1, F2, F3, F4, F5 and F6 are done. `./gradlew build` is green on all four modules
+F0, F1, F2, F3, F4, F5, F6 and F7 are done. `./gradlew build` is green on all four modules
 against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
 deliberately breaking it, and both plugin jars have been loaded on real servers.
 
@@ -127,8 +127,17 @@ in blocks `repo.papermc.io`. They compile now.
       drains sched → db → io under a budget (FR-28's executor half). The Paper
       entry point marks the main thread at enable and opens the pools with
       specification defaults until config load is wired.
-- [ ] **F7** Control plane: `node_command`, the `LISTEN` listener with its
-      polling fallback, claim/complete/retry (spec §13).
+- [x] **F7** Control plane. Done: `core.control` protocol types (`CommandKind`,
+      `NodeCommand`, `CommandHandler`, `CommandResult`, `ControlChannels`) and
+      `ControlPlane` (poll + LISTEN, claim/complete, generation discard, unknown
+      kind completes with error). `NodeCommandRepository` and
+      `PgNotificationListener` stay in `core.db` so JDBC remains confined.
+      - Insert and `pg_notify` share one transaction (CP-2 / ADR 0002).
+      - Claim is a conditional `UPDATE` with claim-timeout reclaim (CP-5); two
+        concurrent claimers never both run the handler.
+      - Poll is the contract; killing the LISTEN connection still delivers via
+        poll (CP-3). NOTIFY only shortens the wait.
+      - No feature handlers yet — those arrive with the milestones that need them.
 - [ ] **F8** Observability: JSON logging with MDC, Micrometer registry, the
       startup capability probe — including the reflink verdict, which decides
       whether MN-5a's snapshot copy is cheap or a full copy.

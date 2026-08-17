@@ -46,6 +46,11 @@ the jar filename (`+mc<version>`), not part of the project version.
   (main / db / io / sched), bounded-operation helper, and ordered executor
   shutdown. `Database` refuses the main thread so a JDBC call on the tick path
   fails tests rather than stalling players (NFR-2).
+- Control plane (F7): durable `node_command` producer/consumer in `core.control`
+  and `core.db` — insert+`NOTIFY` in one transaction, dedicated `LISTEN`
+  connection with poll fallback, conditional claim with timeout retry, generation
+  staleness discard (CP-4), and unknown-kind completion (CP-6). No feature
+  handlers yet; the plane only delivers the wire and the claim rules (ADR 0002).
 
 ### Changed
 

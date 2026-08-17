@@ -20,7 +20,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * for now because {@code :testing} depends on {@code :core}, so {@code :core}
  * cannot depend on it back.
  */
-final class TestPostgres {
+public final class TestPostgres {
 
     /**
      * Pinned, not floating. A test suite whose database version changes under it
@@ -34,7 +34,7 @@ final class TestPostgres {
 
     private TestPostgres() {}
 
-    static synchronized PostgreSQLContainer container() {
+    public static synchronized PostgreSQLContainer container() {
         if (container == null) {
             PostgreSQLContainer started = new PostgreSQLContainer(IMAGE);
             started.start();
@@ -48,7 +48,7 @@ final class TestPostgres {
      *
      * <p>The caller owns the returned pool and must close it.
      */
-    static Database freshDatabase() throws SQLException {
+    public static Database freshDatabase() throws SQLException {
         PostgreSQLContainer postgres = container();
         Database database = Database.open(new DatabaseSettings(
                 postgres.getJdbcUrl(),

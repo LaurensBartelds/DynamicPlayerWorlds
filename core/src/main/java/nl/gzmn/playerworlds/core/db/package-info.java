@@ -17,6 +17,11 @@
  *
  * <p>Nothing here reads a local clock. See {@link
  * nl.gzmn.playerworlds.core.db.DbClock}.
+ *
+ * <p>The control plane's SQL and LISTEN connection live here
+ * ({@link nl.gzmn.playerworlds.core.db.NodeCommandRepository},
+ * {@link nl.gzmn.playerworlds.core.db.PgNotificationListener}); protocol types
+ * and orchestration are in {@code core.control}.
  */
 @NullMarked
 package nl.gzmn.playerworlds.core.db;
