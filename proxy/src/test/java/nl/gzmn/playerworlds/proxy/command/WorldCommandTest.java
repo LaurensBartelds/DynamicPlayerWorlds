@@ -363,6 +363,42 @@ class WorldCommandTest {
         assertThat(n2c.generation()).isEqualTo(created.generation());
     }
 
+    @Test
+    void deleteConfirmRemovesCreatingWorld() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld created = worlds.create(
+                worldId, ownerUuid, "incomplete", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        assertThat(created.state()).isEqualTo(WorldState.CREATING);
+
+        dispatcher.execute("world delete incomplete confirm", player);
+
+        awaitCondition(() -> worlds.findById(worldId).isEmpty());
+        assertThat(worlds.findById(worldId)).isEmpty();
+    }
+
+    @Test
+    void joinAllowsCreatingWorld() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld created = worlds.create(
+                worldId, ownerUuid, "incompleteworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        assertThat(created.state()).isEqualTo(WorldState.CREATING);
+
+        dispatcher.execute("world join Alice incompleteworld", player);
+
+        awaitCondition(() -> transfers.claim(ownerUuid, policy.transferExpiry()).isPresent());
+    }
+
     private Player registerPlayer(UUID uuid, String username) {
         List<Component> messages = Collections.synchronizedList(new ArrayList<>());
         Player player = mockPlayer(uuid, username, messages);

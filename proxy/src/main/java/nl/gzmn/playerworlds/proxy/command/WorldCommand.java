@@ -290,15 +290,33 @@ public final class WorldCommand {
                 info(caller, "'" + name + "' is already archived; use /world restore " + name + " to bring it back");
                 return;
             }
-            if (world.state() != WorldState.READY) {
+            if (world.state() != WorldState.READY && world.state() != WorldState.CREATING) {
                 error(caller, "'" + name + "' is " + world.state() + " and cannot be deleted right now");
                 return;
             }
             if (!confirmed) {
-                // FR-27 requires typed confirmation, and this is the whole of it:
-                // the player has to type the world's name a second time.
-                error(caller, "this archives '" + name + "' and frees a world slot.");
+                if (world.state() == WorldState.CREATING) {
+                    error(
+                            caller,
+                            "'" + name
+                                    + "' was never completed. This removes the incomplete world and frees your slot.");
+                } else {
+                    // FR-27 requires typed confirmation, and this is the whole of it:
+                    // the player has to type the world's name a second time.
+                    error(caller, "this archives '" + name + "' and frees a world slot.");
+                }
                 info(caller, "type /world delete " + name + " confirm to go ahead");
+                return;
+            }
+
+            if (world.state() == WorldState.CREATING) {
+                if (!worlds.deleteIfCreating(world.id())) {
+                    error(caller, "'" + name + "' changed while you were confirming; try again");
+                    return;
+                }
+                enqueueToWorldOrAliveNodes(world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+                success(caller, "removed incomplete world '" + name + "'; you have a world slot free");
+                log.info("world {} removed while in CREATING state by its owner", world.id());
                 return;
             }
 
@@ -390,7 +408,8 @@ public final class WorldCommand {
             List<PlayerWorld> owned = worlds.listOwnedBy(owner.get());
             Optional<PlayerWorld> target = owned.stream()
                     .filter(world -> worldName == null || world.name().equalsIgnoreCase(worldName))
-                    .filter(world -> world.state() == nl.gzmn.playerworlds.core.model.WorldState.READY)
+                    .filter(world -> world.state() == nl.gzmn.playerworlds.core.model.WorldState.READY
+                            || world.state() == nl.gzmn.playerworlds.core.model.WorldState.CREATING)
                     .findFirst();
             if (target.isEmpty()
                     || membership
