@@ -182,6 +182,7 @@ public final class GzmnWorldsProxyPlugin {
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
+                nodeCommands,
                 this::policy);
         // metaBuilder rather than register(BrigadierCommand): the single-argument
         // form is deprecated, and naming the owning plugin is what lets Velocity

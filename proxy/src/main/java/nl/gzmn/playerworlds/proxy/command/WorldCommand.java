@@ -18,7 +18,13 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -26,6 +32,7 @@ import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -57,19 +64,20 @@ public final class WorldCommand {
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
      *
-     * <p>Empty on purpose. {@code /world leave} is milestone 5 and
-     * {@code /world report} is milestone 9; naming the list now is what stops
-     * either from being silently unreachable when it arrives.
+     * <p>{@code /world leave} is milestone 5 and {@code /world report} is
+     * milestone 9; naming the list is what stops either from being silently
+     * unreachable when it arrives.
      */
-    public static final List<String> BACKEND_SUBCOMMANDS = List.of();
+    public static final List<String> BACKEND_SUBCOMMANDS = List.of("leave");
 
     private final ProxyServer proxy;
     private final PluginExecutors executors;
     private final PlayerWorldRepository worlds;
     private final MembershipRepository membership;
     private final PlayerNameRepository names;
-    private final nl.gzmn.playerworlds.core.db.PendingTransferRepository transfers;
-    private final nl.gzmn.playerworlds.proxy.node.NodeRegistry registry;
+    private final PendingTransferRepository transfers;
+    private final NodeRegistry registry;
+    private final NodeCommandRepository nodeCommands;
     private final Supplier<NetworkPolicy> policy;
 
     public WorldCommand(
@@ -78,8 +86,9 @@ public final class WorldCommand {
             PlayerWorldRepository worlds,
             MembershipRepository membership,
             PlayerNameRepository names,
-            nl.gzmn.playerworlds.core.db.PendingTransferRepository transfers,
-            nl.gzmn.playerworlds.proxy.node.NodeRegistry registry,
+            PendingTransferRepository transfers,
+            NodeRegistry registry,
+            NodeCommandRepository nodeCommands,
             Supplier<NetworkPolicy> policy) {
         this.proxy = Objects.requireNonNull(proxy, "proxy");
         this.executors = Objects.requireNonNull(executors, "executors");
@@ -88,6 +97,7 @@ public final class WorldCommand {
         this.names = Objects.requireNonNull(names, "names");
         this.transfers = Objects.requireNonNull(transfers, "transfers");
         this.registry = Objects.requireNonNull(registry, "registry");
+        this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
@@ -268,6 +278,7 @@ public final class WorldCommand {
         if (caller == null) {
             return;
         }
+        NetworkPolicy current = policy.get();
         run(caller, () -> {
             Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), name);
             if (found.isEmpty()) {
@@ -295,6 +306,7 @@ public final class WorldCommand {
                 error(caller, "'" + name + "' changed while you were confirming; try again");
                 return;
             }
+            enqueueToWorldOrAliveNodes(world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
             success(caller, "archived '" + name + "'; you have a world slot free");
             info(
                     caller,
@@ -304,10 +316,6 @@ public final class WorldCommand {
                     "world {} archived by its owner (FR-27, state transition only; FR-35's pack to object storage "
                             + "arrives with milestone 11, so the folders are retained)",
                     world.id());
-
-            // A world loaded on a node right now keeps ticking until its idle
-            // sweep drops it (FR-25). Telling the node to unload immediately is
-            // the control plane's UNLOAD_WORLD, which is the rest of milestone 5.
         });
     }
 
@@ -503,6 +511,7 @@ public final class WorldCommand {
         if (caller == null) {
             return;
         }
+        NetworkPolicy current = policy.get();
         run(caller, () -> {
             Optional<PlayerWorld> world = soleOwnedWorld(caller);
             if (world.isEmpty()) {
@@ -524,10 +533,14 @@ public final class WorldCommand {
                 error(caller, targetName + " is not a member of '" + world.get().name() + "'");
                 return;
             }
+            enqueueToWorldOrAliveNodes(world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+            enqueueToWorldOrAliveNodes(
+                    world.get(),
+                    CommandKind.KICK_MEMBER,
+                    EjectPayload.format(target.get(), "You were removed from this world"),
+                    current);
             success(caller, "removed " + targetName + " from '" + world.get().name() + "'");
             // FR-8 also requires an online member be ejected to lobby immediately.
-            // That is the control plane's KICK_MEMBER, whose handler lands with
-            // the transfer path in milestone 5.
             info(caller, "if they are inside the world right now they will be removed on their next join");
         });
     }
@@ -538,6 +551,7 @@ public final class WorldCommand {
         if (caller == null) {
             return;
         }
+        NetworkPolicy current = policy.get();
         run(caller, () -> {
             Optional<PlayerWorld> world = soleOwnedWorld(caller);
             if (world.isEmpty()) {
@@ -549,6 +563,8 @@ public final class WorldCommand {
                 return;
             }
             if (membership.setRole(world.get().id(), target.get(), Role.BUILDER)) {
+                enqueueToWorldOrAliveNodes(
+                        world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
                 success(
                         caller,
                         targetName + " is now a BUILDER of '" + world.get().name() + "'");
@@ -679,6 +695,31 @@ public final class WorldCommand {
 
     private static void error(CommandSource source, String message) {
         source.sendMessage(Component.text(message, NamedTextColor.RED));
+    }
+
+    private void enqueueToWorldOrAliveNodes(
+            PlayerWorld world, CommandKind kind, String payloadJson, NetworkPolicy current) throws SQLException {
+        if (world.assignedNode() != null) {
+            nodeCommands.enqueue(
+                    world.assignedNode(),
+                    world.id(),
+                    world.generation(),
+                    kind.name(),
+                    payloadJson,
+                    current.holdingTimeout(),
+                    ControlChannels.forNode(world.assignedNode()));
+        } else {
+            for (var alive : registry.aliveNodes(current.deadAfter())) {
+                nodeCommands.enqueue(
+                        alive.nodeId(),
+                        world.id(),
+                        world.generation(),
+                        kind.name(),
+                        payloadJson,
+                        current.holdingTimeout(),
+                        ControlChannels.forNode(alive.nodeId()));
+            }
+        }
     }
 
     /** A body that may throw {@link SQLException}, which {@code Runnable} cannot. */

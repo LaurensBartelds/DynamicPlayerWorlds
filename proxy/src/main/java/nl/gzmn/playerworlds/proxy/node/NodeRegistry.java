@@ -145,6 +145,12 @@ public final class NodeRegistry {
         }
     }
 
+    /** Nodes currently considered alive (MN-14). */
+    public List<NodeStatus> aliveNodes(Duration deadAfter) throws SQLException {
+        Objects.requireNonNull(deadAfter, "deadAfter");
+        return nodes.aliveNodes(deadAfter);
+    }
+
     /** Unregisters everything this class registered, on proxy shutdown. */
     public synchronized void unregisterAll() {
         for (String registered : Set.copyOf(ours)) {
