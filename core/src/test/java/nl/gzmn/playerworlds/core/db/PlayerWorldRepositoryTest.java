@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -240,6 +241,135 @@ class PlayerWorldRepositoryTest {
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(4903)).isTrue();
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(4902)).isFalse();
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(5000)).isTrue();
+    }
+
+    @Test
+    @DisplayName("commitSnapshot updates manifest, version info, last_played, and profiles atomically")
+    void commitsSnapshotAndProfilesInOneTransaction() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "commit-world", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot snap = new ProfileRepository.Snapshot(0L, 1);
+        UUID player1 = UUID.randomUUID();
+        byte[] payload = new byte[] {1, 2, 3};
+
+        boolean committed = worlds.commitSnapshot(
+                id,
+                0L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/0-1.json",
+                4903,
+                "26.2",
+                snap,
+                1,
+                Map.of(player1, payload),
+                profiles);
+
+        assertThat(committed).isTrue();
+
+        PlayerWorld updated = worlds.findById(id).orElseThrow();
+        assertThat(updated.manifestKey()).isEqualTo("worlds/" + id.value() + "/manifest/0-1.json");
+        assertThat(updated.dataVersion()).isEqualTo(4903);
+        assertThat(updated.mcVersion()).isEqualTo("26.2");
+        assertThat(updated.lastPlayed()).isNotNull();
+
+        assertThat(profiles.load(id, player1, snap)).isPresent();
+        assertThat(profiles.load(id, player1, snap).orElseThrow().data()).containsExactly(1, 2, 3);
+    }
+
+    @Test
+    @DisplayName("commitSnapshot returns false and writes no profiles on generation mismatch")
+    void commitSnapshotRefusesGenerationMismatch() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "fenced-world", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot snap = new ProfileRepository.Snapshot(1L, 1);
+        UUID player1 = UUID.randomUUID();
+        byte[] payload = new byte[] {1, 2, 3};
+
+        boolean committed = worlds.commitSnapshot(
+                id,
+                1L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/1-1.json",
+                4903,
+                "26.2",
+                snap,
+                1,
+                Map.of(player1, payload),
+                profiles);
+
+        assertThat(committed).isFalse();
+
+        PlayerWorld unchanged = worlds.findById(id).orElseThrow();
+        assertThat(unchanged.manifestKey()).isNull();
+        assertThat(unchanged.dataVersion()).isNull();
+
+        assertThat(profiles.load(id, player1, snap)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("commitSnapshot returns false and writes no profiles on node mismatch")
+    void commitSnapshotRefusesNodeMismatch() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "node-fenced", 1234L);
+        updateColumn("UPDATE player_world SET assigned_node = ? WHERE id = ?", "node-b", id);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot snap = new ProfileRepository.Snapshot(0L, 1);
+        UUID player1 = UUID.randomUUID();
+        byte[] payload = new byte[] {1, 2, 3};
+
+        boolean committed = worlds.commitSnapshot(
+                id,
+                0L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/0-1.json",
+                4903,
+                "26.2",
+                snap,
+                1,
+                Map.of(player1, payload),
+                profiles);
+
+        assertThat(committed).isFalse();
+
+        PlayerWorld unchanged = worlds.findById(id).orElseThrow();
+        assertThat(unchanged.manifestKey()).isNull();
+        assertThat(profiles.load(id, player1, snap)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("commitSnapshot succeeds with empty profiles map")
+    void commitSnapshotSucceedsWithEmptyProfiles() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "empty-profiles", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot snap = new ProfileRepository.Snapshot(0L, 0);
+
+        boolean committed = worlds.commitSnapshot(
+                id,
+                0L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/0-0.json",
+                4903,
+                "26.2",
+                snap,
+                1,
+                Map.of(),
+                profiles);
+
+        assertThat(committed).isTrue();
+
+        PlayerWorld updated = worlds.findById(id).orElseThrow();
+        assertThat(updated.manifestKey()).isEqualTo("worlds/" + id.value() + "/manifest/0-0.json");
     }
 
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {

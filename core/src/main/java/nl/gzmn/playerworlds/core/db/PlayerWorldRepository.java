@@ -6,6 +6,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -184,6 +185,65 @@ public final class PlayerWorldRepository extends Repository {
     public boolean deleteIfCreating(WorldId id) throws SQLException {
         Objects.requireNonNull(id, "id");
         return database.inTransaction(connection -> deleteIfCreating(connection, id));
+    }
+
+    /**
+     * Commits a world snapshot and its player profiles in a single transaction (FR-15, FR-16, MN-3a).
+     *
+     * <p>Updates the manifest pointer, version tags, and {@code last_played} timestamp
+     * conditionally on the lease generation and assigned node matching. If the fencing
+     * check passes and profiles are non-empty, saves all profile rows within the same
+     * database transaction.
+     *
+     * @return true if the commit succeeded, false if fenced by lease expiration or generation bump
+     */
+    public boolean commitSnapshot(
+            WorldId id,
+            long generation,
+            @Nullable String nodeId,
+            String manifestKey,
+            int dataVersion,
+            String mcVersion,
+            ProfileRepository.Snapshot snapshot,
+            int profileFormatVersion,
+            Map<UUID, byte[]> profiles,
+            ProfileRepository profileRepository)
+            throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(manifestKey, "manifestKey");
+        Objects.requireNonNull(mcVersion, "mcVersion");
+        Objects.requireNonNull(snapshot, "snapshot");
+        Objects.requireNonNull(profiles, "profiles");
+        Objects.requireNonNull(profileRepository, "profileRepository");
+
+        return database.inTransaction(connection -> {
+            int updated = execute(connection, """
+                    UPDATE player_world
+                       SET manifest_key = ?,
+                           last_played  = now(),
+                           data_version = ?,
+                           mc_version   = ?
+                     WHERE id = ?
+                       AND (assigned_node IS NULL OR assigned_node = ?)
+                       AND generation = ?
+                    """, statement -> {
+                statement.setString(1, manifestKey);
+                statement.setInt(2, dataVersion);
+                statement.setString(3, mcVersion);
+                statement.setObject(4, id.value());
+                statement.setString(5, nodeId);
+                statement.setLong(6, generation);
+            });
+
+            if (updated != 1) {
+                return false;
+            }
+
+            if (!profiles.isEmpty()) {
+                profileRepository.saveAll(connection, id, snapshot, profileFormatVersion, profiles);
+            }
+            return true;
+        });
     }
 
     /** One world by id, in any state. */
