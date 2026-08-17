@@ -34,6 +34,19 @@ public record DatabaseSettings(
 
     public static final Duration DEFAULT_CONNECTION_TIMEOUT = Duration.ofSeconds(5);
 
+    /**
+     * Below this, a node deadlocks itself at startup.
+     *
+     * <p>{@link Schema#migrate} holds one pooled connection for the FR-40 advisory
+     * lock across the whole migration, and Flyway independently takes two — one
+     * for its schema-history table and one to run migrations on. A pool of three
+     * or fewer therefore hands out every connection and then waits for one that
+     * cannot arrive, until {@link #connectionTimeout} expires and the enable
+     * fails. Refusing the value up front turns a silent startup hang into a
+     * message naming the key.
+     */
+    public static final int MIN_POOL_SIZE = 4;
+
     public DatabaseSettings {
         Objects.requireNonNull(jdbcUrl, "jdbcUrl");
         Objects.requireNonNull(username, "username");
@@ -43,8 +56,9 @@ public record DatabaseSettings(
         if (!jdbcUrl.startsWith("jdbc:postgresql:")) {
             throw new IllegalArgumentException("jdbcUrl must be a jdbc:postgresql: URL, was: " + jdbcUrl);
         }
-        if (poolSize < 1) {
-            throw new IllegalArgumentException("poolSize must be at least 1, was: " + poolSize);
+        if (poolSize < MIN_POOL_SIZE) {
+            throw new IllegalArgumentException("database.pool-size must be at least " + MIN_POOL_SIZE
+                    + " (the migration advisory lock holds one connection while Flyway takes two), was: " + poolSize);
         }
         if (connectionTimeout.isNegative() || connectionTimeout.isZero()) {
             throw new IllegalArgumentException("connectionTimeout must be positive, was: " + connectionTimeout);
