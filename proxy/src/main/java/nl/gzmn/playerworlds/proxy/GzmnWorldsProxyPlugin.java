@@ -23,9 +23,12 @@ import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.ProxyConfig;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlPlane;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
@@ -33,6 +36,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
+import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -76,6 +80,8 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable PluginExecutors executors;
     private @Nullable PlayerNameRepository playerNames;
     private @Nullable NodeRegistry nodeRegistry;
+    private @Nullable ControlPlane controlPlane;
+    private @Nullable ExecutorService listenExecutor;
 
     /**
      * Last policy read from the database.
@@ -149,6 +155,24 @@ public final class GzmnWorldsProxyPlugin {
                         NODE_SYNC.toSeconds(),
                         NODE_SYNC.toSeconds(),
                         TimeUnit.SECONDS);
+
+        ExecutorService listen = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "gzmn-proxy-listen");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.listenExecutor = listen;
+
+        NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
+        ControlPlane proxyPlane = ControlPlane.forProxy(
+                "proxy",
+                config.database(),
+                nodeCommands,
+                loadedPolicy.controlPollInterval(),
+                loadedPolicy.controlClaimTimeout());
+        proxyPlane.register(CommandKind.EJECT_PLAYER, new ProxyEjectHandler(proxy, config::lobbyServer));
+        proxyPlane.start(pools.sched(), listen);
+        this.controlPlane = proxyPlane;
 
         WorldCommand command = new WorldCommand(
                 proxy,
@@ -278,8 +302,22 @@ public final class GzmnWorldsProxyPlugin {
         return policy;
     }
 
+    public @Nullable ControlPlane controlPlane() {
+        return controlPlane;
+    }
+
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        ControlPlane plane = this.controlPlane;
+        this.controlPlane = null;
+        if (plane != null) {
+            plane.close();
+        }
+        ExecutorService listen = this.listenExecutor;
+        this.listenExecutor = null;
+        if (listen != null) {
+            listen.shutdownNow();
+        }
         NodeRegistry registry = this.nodeRegistry;
         this.nodeRegistry = null;
         if (registry != null) {
