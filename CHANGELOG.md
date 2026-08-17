@@ -78,16 +78,69 @@ the jar filename (`+mc<version>`), not part of the project version.
   reject every single-byte location-table corruption on synthetic `.mca` files
   and prove a mid-copy mutation is detected and retried.
 
+- Milestone-1 plan `docs/plans/01-world-lifecycle.md`, and the world lifecycle it
+  covers — the first gameplay behaviour in the repository.
+- World lifecycle (M1): `/pworld create` writes a `player_world` row and
+  generates the overworld only (FR-4); the nether and end are materialised on
+  first portal transit with the world's stored seed (FR-2). Borders (FR-3),
+  spawn-chunk radius (FR-25c) and the safe PVP default (FR-9e) are re-asserted on
+  every load, because all three live in `level.dat` and the database value has to
+  win. Idle worlds unload end-then-nether-then-overworld after
+  `worlds.idle-unload-minutes`, and a dimension that refuses to unload abandons
+  the rest and retries the whole world (FR-25, FR-25a). Disable unloads
+  everything with save (FR-28's unload half).
+- Explicit portal routing (FR-3a) in `PlayerPortalEvent` and `EntityPortalEvent`.
+  Bukkit's default search resolves against the server's primary world, so without
+  this a nether portal in a player world lands in the lobby's nether or in
+  somebody else's world.
+- `create_stall_ms` is now fed by every world generation (FR-4), measured
+  continuously rather than benchmarked once, and logged at WARN above
+  `worlds.create-stall-budget-ms`.
+- `backend.platform.WorldLifecycle`: creating, loading, unloading and async
+  spawn pre-generation behind the Minecraft-version seam, alongside
+  `WorldRuntime`. Also `unloadBlockers`, which names what is holding a world open
+  so FR-25a's log line says something actionable.
+- `core.model` gains `PlayerWorld`, `WorldState` and `Visibility`;
+  `PlayerWorldRepository` holds the `player_world` statements.
+  `WorldId.fromFolder` inverts FR-2a's derivation and refuses anything that does
+  not round-trip.
+- Backend `config.yml`, read into the typed `NodeConfig` that F4 built and left
+  unwired. Enable now loads config, migrates the schema, reads network policy,
+  validates the two against each other, and refuses rather than running with a
+  default that violates a safety property.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper
   1.21.4 and Velocity 3.4.0-SNAPSHOT. No source changes were needed.
+- `NodeConfig.storage` is optional. Object storage arrives with milestone 6, and
+  requiring invented S3 credentials to boot a node that has nothing to sync would
+  make the configuration lie about what the node does.
+- `PlayerWorldRepository` exposes transaction-owning overloads so callers outside
+  `:core` never hold a `java.sql.Connection`. The `Connection`-taking versions
+  remain for MN-3a's composition inside `:core`. The backend ArchUnit rule now
+  bans all of `java.sql` and `javax.sql` except `SQLException`, which `:core`'s
+  repositories declare and every caller must name.
+- `GzmnWorldsPlugin.worldContainer()` is `protected`, like `detectIdentity()`.
+  MockBukkit's `ServerMock` throws on `getWorldContainer()` and reports that as a
+  *skipped* test rather than a failed one, so the plugin smoke test had silently
+  stopped asserting anything.
 - Java toolchain 21 → 25, because `paper-api` 26.x is published with a Java 25
   target and Gradle refuses to resolve it against an older toolchain. See the
   note added to ADR 0003.
 
 ### Fixed
 
+- A `database.pool-size` below 4 deadlocked node startup. `Schema.migrate` holds
+  one pooled connection for the FR-40 advisory lock across the whole migration
+  while Flyway independently takes two, so a smaller pool handed out every
+  connection and then waited for one that could not arrive — failing the enable
+  with a connection-timeout message that named the wrong cause.
+  `DatabaseSettings.MIN_POOL_SIZE` refuses it up front. The default of 8 hid it.
+- The startup capability probe ran on the main thread. It does a database round
+  trip, a free-space stat and a reflink trial copy, all of which NFR-2 keeps off
+  the tick thread; `MainThread` caught it and it now runs on the io pool under a
+  bounded wait.
 - Both plugin jars shipped unrelocated Netty, Apache HttpClient 5, Jackson,
   reactive-streams and HdrHistogram, and a second copy of `org.slf4j` that
   collides with the one Paper and Velocity provide. All transitives are now

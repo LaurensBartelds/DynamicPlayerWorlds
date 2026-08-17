@@ -1,12 +1,77 @@
 # Next steps
 
 Short working list. Full detail and acceptance criteria live in
-[`00-repo-foundation.md`](00-repo-foundation.md); the specification is
+[`00-repo-foundation.md`](00-repo-foundation.md) and
+[`01-world-lifecycle.md`](01-world-lifecycle.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
 F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 and
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
+
+## Milestone 1 — world lifecycle: code complete, unverified on a node
+
+Plan [`01-world-lifecycle.md`](01-world-lifecycle.md). `./gradlew check build` is
+green: 168 tests across `:core`, `:backend` and `:testing`, none failing and
+none skipped.
+
+Taken as decisions before writing code, both recorded in plan 01 §1:
+
+- **D7** — milestone 1 is database-backed, not the spec's "hardcoded owner, no
+  database" staging. F3 already delivered `player_world` and its harness, so the
+  in-memory version would have been a throwaway implementation of a tested table.
+- **D8** — the backend command root is `/pworld`, not `/world`. The proxy claims
+  `/world` in milestone 5 (OQ-15), and a registration here would have to be torn
+  back to two subcommands.
+
+### What must happen on a real node before this milestone is believed
+
+These are the acceptance criteria, and none can be checked off a server. Spec §11
+says to measure the stall *here*, which is the same point.
+
+- [ ] **`/pworld create` end to end**, and the `createWorld` stall it reports.
+      That number sets `worlds.create-stall-budget-ms` and is release-gating
+      (FR-4). It is measured continuously into `create_stall_ms`, so a scrape
+      after a few creates is the answer.
+- [ ] **Portal linking both ways** (FR-3a) — overworld to nether and back with
+      8:1 scaling, and the end in both directions. The routing maths is
+      unit-tested; what is untested is the event surface.
+- [ ] **The end arrival platform (OQ-17).** Vanilla generates it as part of its
+      own end-portal handling. If it does not do so for a plugin-supplied
+      destination world, a player entering the end falls into the void. **Check
+      this one first** — it is the only item here that is unsafe rather than
+      merely unmeasured.
+- [ ] **Dragon fight state across unload and reload** (FR-3b). MockBukkit has no
+      `DragonBattle`, so this has never been exercised.
+- [ ] **Idle unload** after `worlds.idle-unload-minutes` (FR-25), and the FR-25a
+      retry against a world held open by a force-loaded chunk.
+
+### Found while building, and fixed
+
+- **A `database.pool-size` below 4 deadlocked startup.** The migration advisory
+  lock holds one connection while Flyway takes two; a pool of three or fewer
+  waited for a connection that could not arrive, then failed the enable with a
+  timeout message that named the wrong cause. `DatabaseSettings.MIN_POOL_SIZE`
+  now refuses it up front. The default of 8 had hidden it.
+- **The capability probe ran on the main thread.** Plan 00 §10.4's probe does a
+  database round trip, a free-space stat and a reflink trial copy. `MainThread`
+  caught it on the first real caller and turned an invisible startup stall into a
+  refused enable; it now runs on the io pool under a budget.
+- **A MockBukkit test can vanish into a skip.** `ServerMock.getWorldContainer()`
+  throws `UnimplementedOperationException`, which MockBukkit reports as *skipped*
+  rather than failed — the plugin smoke test silently stopped testing anything.
+  `worldContainer()` is now a `protected` hook like `detectIdentity()`. The
+  general caution is the point: anything load-bearing needs a real node or a
+  `:core` test.
+- **The backend was holding `java.sql.Connection`.** ArchUnit caught the
+  orchestration composing transactions with `Connection`-taking lambdas.
+  `PlayerWorldRepository` gained transaction-owning overloads; the rule now
+  permits `SQLException` alone, since `:core`'s repositories declare it.
+
+Not fixed, and deliberate: `assigned_node`, `lease_expires` and `generation` stay
+at their defaults. MN-8's conditional `UPDATE` is the whole of the lease
+guarantee, and a milestone-1 statement that set those columns without it would
+read like a lease while providing none of one (plan 01 §5.3).
 
 ## First, in an environment that can reach repo.papermc.io — done
 
@@ -175,9 +240,8 @@ in blocks `repo.papermc.io`. They compile now.
       a synthetic `.mca` and assert rejection; a mid-copy mutation is detected
       and retried until settle or `UnstableFileException`.
 
-Foundation complete. Spec milestone 1 begins: create a world, materialise its
-nether and end on first transit, portal linking both ways, and measure the
-`createWorld` stall that sets `worlds.create-stall-budget-ms`.
+Foundation complete. Spec milestone 1 followed; see the top of this file and
+plan [`01-world-lifecycle.md`](01-world-lifecycle.md).
 
 ## Open questions, none blocking
 
@@ -192,7 +256,19 @@ Carried in the spec as OQ-13 to OQ-16 so they are not lost.
       on, and the period itself belongs in `network_setting` so it can change
       without a migration. Now needed by the F40 maintenance sweep instead.
 - [ ] **OQ-15** Confirm the proxy owns the `/world` root and forwards `leave`
-      and `report` to the backend. Needed by milestone 5.
+      and `report` to the backend. Needed by milestone 5. Milestone 1 kept the
+      backend off that root entirely by using `/pworld` (plan 01, D8), so the
+      answer is still free.
+- [ ] **OQ-17** Does Paper generate the end arrival platform when the
+      destination world comes from a plugin rather than from its own portal
+      search? Blocking for milestone 1's acceptance; see the checklist above.
+- [ ] **OQ-18** Does an ARCHIVED world count against FR-1's per-player cap?
+      Implemented as "no", because `/world delete` *is* the archival flow and
+      would otherwise never free a slot. Confirm.
+- [ ] **OQ-19** `storage.local-scratch-path` is necessarily the server's world
+      container — Bukkit cannot create a world anywhere else. Matters beyond
+      naming, because MN-13's quarantine and MN-5a's snapshot directory are
+      specified relative to it and must share its filesystem.
 - [x] **OQ-16** Answered by F4 / ADR 0007: network-wide policy lives in
       `network_setting`, read by both components through `NetworkPolicy`.
       Node-local facts stay in files.
