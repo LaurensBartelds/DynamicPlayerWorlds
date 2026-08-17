@@ -9,7 +9,7 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
-## Milestone 5 — transfer handoff and node registration: partial
+## Milestone 5 — transfer handoff, node registration and control plane: code complete, unverified
 
 `./gradlew check build` is green. Landed:
 
@@ -26,15 +26,18 @@ and both plugin jars have been loaded on real servers.
 - **FR-13** — `player_last_world` for the resume prompt.
 - **`/world join <owner> [name]`** on the proxy, membership-checked, with a
   non-member getting the same answer as a world that does not exist.
+- **Control-plane runtime & handlers (CP-1–7)** — `ControlPlane.forNode` and
+  `ControlPlane.forProxy` wired and started. `UNLOAD_WORLD` unloads dimensions
+  and ejects players; `INVALIDATE_CACHE` refreshes network policy and drops
+  cached roles; `KICK_MEMBER` and `EJECT_PLAYER` eject players on member
+  revocation. Emitted on `/world delete confirm`, `/world kick` and `/world promote`.
+- **The return leg & `/world leave` (FR-11, FR-12, OQ-15)** — `/world leave`
+  forwarded by proxy, moves player to holding area, and enqueues `EJECT_PLAYER`
+  on `gzmn_proxy` for the proxy to transfer them back to lobby. FR-11 refusal
+  branches safely bounce players back to lobby.
 
 ### Still to do in milestone 5
 
-- **Control-plane handlers.** F7 built the transport; nothing subscribes yet.
-  `INVALIDATE_CACHE` closes milestone 2's stale-role gap, `KICK_MEMBER` closes
-  FR-8's ejection, and `UNLOAD_WORLD` backs `/world admin unload`.
-- **The return leg.** FR-11's refusals and FR-12's `/world leave` need the node
-  to send a player back to lobby, which needs the proxy to accept that request.
-  Refusals currently explain and leave the player where they are.
 - **MN-14 placement** is a stub that picks the least-loaded alive node after
   MN-28's version filter. MN-15's scoring is milestone 8, where a second node
   first exists to score against.
