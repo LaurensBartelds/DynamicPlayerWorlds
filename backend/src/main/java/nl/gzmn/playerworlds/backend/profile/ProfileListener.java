@@ -7,9 +7,11 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository.Snapshot;
 import nl.gzmn.playerworlds.core.db.ProfileRepository.StoredProfile;
+import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
@@ -20,6 +22,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerChangedWorldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -45,6 +48,7 @@ public final class ProfileListener implements Listener {
     private final WorldFolders folders;
     private final ProfileService profiles;
     private final ProfileRepository repository;
+    private final @Nullable PlayerWorldRepository playerWorlds;
     private final WorldCommitService commits;
     private final PluginExecutors executors;
 
@@ -52,13 +56,24 @@ public final class ProfileListener implements Listener {
             WorldFolders folders,
             ProfileService profiles,
             ProfileRepository repository,
+            @Nullable PlayerWorldRepository playerWorlds,
             WorldCommitService commits,
             PluginExecutors executors) {
         this.folders = Objects.requireNonNull(folders, "folders");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.repository = Objects.requireNonNull(repository, "repository");
+        this.playerWorlds = playerWorlds;
         this.commits = Objects.requireNonNull(commits, "commits");
         this.executors = Objects.requireNonNull(executors, "executors");
+    }
+
+    public ProfileListener(
+            WorldFolders folders,
+            ProfileService profiles,
+            ProfileRepository repository,
+            WorldCommitService commits,
+            PluginExecutors executors) {
+        this(folders, profiles, repository, null, commits, executors);
     }
 
     /**
@@ -107,9 +122,18 @@ public final class ProfileListener implements Listener {
         profiles.applyFresh(player);
 
         executors.db().execute(() -> {
+            Optional<Snapshot> snapshot = Optional.empty();
             final Optional<StoredProfile> stored;
             try {
-                Optional<Snapshot> snapshot = repository.latestSnapshot(worldId);
+                if (playerWorlds != null) {
+                    Optional<PlayerWorld> pw = playerWorlds.findById(worldId);
+                    if (pw.isPresent() && pw.get().manifestKey() != null) {
+                        snapshot = parseSnapshotFromManifestKey(pw.get().manifestKey());
+                    }
+                }
+                if (snapshot.isEmpty()) {
+                    snapshot = repository.latestSnapshot(worldId);
+                }
                 stored = snapshot.isEmpty()
                         ? Optional.empty()
                         : repository.load(worldId, player.getUniqueId(), snapshot.get());
@@ -149,6 +173,32 @@ public final class ProfileListener implements Listener {
                 }
             });
         });
+    }
+
+    /**
+     * Parses snapshot generation and sequence from a standard manifest key.
+     * Manifest key format: {@code worlds/<worldId>/manifest/<gen>-<seq>.json}
+     */
+    static Optional<Snapshot> parseSnapshotFromManifestKey(String manifestKey) {
+        if (manifestKey == null || manifestKey.isBlank()) {
+            return Optional.empty();
+        }
+        int lastSlash = manifestKey.lastIndexOf('/');
+        String filename = lastSlash >= 0 ? manifestKey.substring(lastSlash + 1) : manifestKey;
+        if (filename.endsWith(".json")) {
+            filename = filename.substring(0, filename.length() - 5);
+        }
+        int dash = filename.lastIndexOf('-');
+        if (dash <= 0 || dash >= filename.length() - 1) {
+            return Optional.empty();
+        }
+        try {
+            long gen = Long.parseLong(filename.substring(0, dash));
+            int seq = Integer.parseInt(filename.substring(dash + 1));
+            return Optional.of(new Snapshot(gen, seq));
+        } catch (NumberFormatException e) {
+            return Optional.empty();
+        }
     }
 
     /**

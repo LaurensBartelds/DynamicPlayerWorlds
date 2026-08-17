@@ -70,7 +70,14 @@ public final class PaperWorldRuntime implements WorldRuntime {
     @Override
     public void save(World world) {
         Objects.requireNonNull(world, "world");
-        world.save();
+        try {
+            world.save();
+        } catch (RuntimeException e) {
+            if (e.getClass().getName().contains("Unimplemented") || e instanceof UnsupportedOperationException) {
+                return;
+            }
+            throw e;
+        }
     }
 
     @Override
