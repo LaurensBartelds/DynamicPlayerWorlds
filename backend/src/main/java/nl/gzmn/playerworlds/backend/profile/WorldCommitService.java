@@ -394,15 +394,19 @@ public final class WorldCommitService {
             wf.cancel(false);
         }
         if (runtime != null && !worlds.isEmpty()) {
-            executors.main().execute(() -> {
-                for (World world : worlds) {
-                    try {
-                        runtime.setAutoSave(world, true);
-                    } catch (Exception e) {
-                        log.warn("Failed to restore auto-save for world {}", world.getName(), e);
+            try {
+                executors.main().execute(() -> {
+                    for (World world : worlds) {
+                        try {
+                            runtime.setAutoSave(world, true);
+                        } catch (Exception e) {
+                            log.warn("Failed to restore auto-save for world {}", world.getName(), e);
+                        }
                     }
-                }
-            });
+                });
+            } catch (Exception e) {
+                log.debug("Could not schedule auto-save restore on main thread: {}", e.getMessage());
+            }
         }
     }
 

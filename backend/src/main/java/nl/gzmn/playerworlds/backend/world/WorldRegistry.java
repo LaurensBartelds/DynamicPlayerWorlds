@@ -67,6 +67,13 @@ public final class WorldRegistry {
         return List.copyOf(values);
     }
 
+    /**
+     * Every loaded world, as a snapshot. Alias for {@link #all()}.
+     */
+    public List<LoadedWorld> loadedWorlds() {
+        return all();
+    }
+
     /** Worlds held here, for {@code worlds_loaded} and the FR-26 cap. */
     public int size() {
         return worlds.size();

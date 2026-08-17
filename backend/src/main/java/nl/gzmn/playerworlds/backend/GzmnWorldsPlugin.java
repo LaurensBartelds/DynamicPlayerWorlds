@@ -3,6 +3,8 @@ package nl.gzmn.playerworlds.backend;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -20,8 +22,12 @@ import nl.gzmn.playerworlds.backend.node.TransferJoinListener;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
+import nl.gzmn.playerworlds.backend.profile.ProfileListener;
+import nl.gzmn.playerworlds.backend.profile.ProfileService;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
+import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
+import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
@@ -44,12 +50,21 @@ import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
 import nl.gzmn.playerworlds.core.obs.PrometheusEndpoint;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
+import nl.gzmn.playerworlds.core.storage.FileCloner;
+import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
+import nl.gzmn.playerworlds.core.storage.ObjectStore;
+import nl.gzmn.playerworlds.core.storage.ReflinkFileCloner;
+import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
+import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
+import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
+import nl.gzmn.playerworlds.core.storage.WorldDownloader;
 import org.bukkit.command.PluginCommand;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jspecify.annotations.Nullable;
@@ -97,6 +112,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable WorldsMetrics metrics;
     private @Nullable PrometheusEndpoint metricsEndpoint;
     private @Nullable Database database;
+    private @Nullable ObjectStore objectStore;
     private @Nullable WorldRegistry registry;
     private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
@@ -169,10 +185,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             return;
         }
 
-        PluginExecutors pools = PluginExecutors.create(
-                node.database().poolSize(),
-                loadedPolicy.parallelTransfers(),
-                task -> getServer().getScheduler().runTask(this, task));
+        PluginExecutors pools =
+                PluginExecutors.create(node.database().poolSize(), loadedPolicy.parallelTransfers(), task -> {
+                    if (getServer().isPrimaryThread()) {
+                        task.run();
+                    } else {
+                        getServer().getScheduler().runTask(this, task);
+                    }
+                });
         this.executors = pools;
 
         WorldsMetrics worldsMetrics = WorldsMetrics.create();
@@ -224,7 +244,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + "); meters remain in-process only");
         }
 
-        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node);
+        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report);
         schedulePolicyRefresh(openedDatabase, pools);
 
         // Concatenation rather than a format string: %d formats through the
@@ -305,18 +325,46 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         }
     }
 
-    /** Wires the milestone-1 world lifecycle and registers its listener, command and sweep. */
+    /** Wires the world lifecycle, storage, and registers listeners, commands and sweeps. */
     private void startWorldLifecycle(
             Platform selected,
             Database openedDatabase,
             PluginExecutors pools,
             WorldsMetrics worldsMetrics,
-            NodeConfig node) {
+            NodeConfig node,
+            CapabilityReport report) {
+        FileCloner cloner = new ReflinkFileCloner(report.reflink());
+        LocalObjectCache objectCache = new LocalObjectCache(node.cachePath(), cloner);
+
+        ObjectStore store = node.objectStorage().map(S3ObjectStore::open).orElse(null);
+        this.objectStore = store;
+
+        SnapshotEngine snapshotEngine = store != null
+                ? new SnapshotEngine(store, objectCache, new SnapshotCopier(cloner, this.policy.snapshotCopyRetries()))
+                : null;
+        WorldDownloader worldDownloader = store != null ? new WorldDownloader(store, objectCache, cloner) : null;
+
         WorldFolders worldFolders = new WorldFolders(selected.worldLayout());
         WorldRegistry worldRegistry = new WorldRegistry();
         this.registry = worldRegistry;
         PlayerWorldRepository worldRepository = new PlayerWorldRepository(openedDatabase);
         MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
+        ProfileRepository profileRepository = new ProfileRepository(openedDatabase);
+        ProfileService profileService = new ProfileService(selected.itemCodec());
+
+        WorldCommitService worldCommitService = new WorldCommitService(
+                profileRepository,
+                worldRepository,
+                profileService,
+                worldFolders,
+                selected,
+                pools,
+                snapshotEngine,
+                this::policy,
+                node.scratchPath(),
+                node.nodeId());
+        this.commitService = worldCommitService;
+
         MembershipCache membershipCache = new MembershipCache();
         PendingTransferRepository transferRepository = new PendingTransferRepository(openedDatabase);
         NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
@@ -331,7 +379,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldRegistry,
                 worldsMetrics,
                 this::policy,
-                node.scratchPath());
+                node.scratchPath(),
+                worldDownloader,
+                store,
+                worldCommitService,
+                objectCache);
 
         getServer()
                 .getPluginManager()
@@ -345,6 +397,18 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .registerEvents(
                         new TransferJoinListener(
                                 node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy),
+                        this);
+        // FR-15: profile commit triggers & manifest snapshot restores
+        getServer()
+                .getPluginManager()
+                .registerEvents(
+                        new ProfileListener(
+                                worldFolders,
+                                profileService,
+                                profileRepository,
+                                worldRepository,
+                                worldCommitService,
+                                pools),
                         this);
 
         PluginCommand command = getCommand("pworld");
@@ -378,6 +442,12 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         this.idleUnload = sweep;
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
+
+        // MN-6: schedule periodic incremental snapshot commits
+        PeriodicSyncTask syncTask = new PeriodicSyncTask(worldRegistry, worldCommitService, this::policy);
+        long syncIntervalSeconds = Math.max(1, this.policy.syncInterval().toSeconds());
+        var _ = pools.sched()
+                .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
 
         startControlPlane(
                 worldRegistry,
@@ -504,6 +574,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         return commitService;
     }
 
+    /** Object store instance, or {@code null} when not configured. */
+    public @Nullable ObjectStore objectStore() {
+        return objectStore;
+    }
+
     /** Worlds this node holds, or {@code null} when enable refused. */
     public @Nullable WorldRegistry registry() {
         return registry;
@@ -551,13 +626,37 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // Order matters and is FR-28's shape: finish world work while the pools
         // still accept it, then drain the pools, then close the database, then
         // drop the main-thread mark so a late callback cannot look like main.
+
+        // FR-28: commit a final snapshot for all loaded worlds synchronously under bounded timeout
+        WorldRegistry reg = this.registry;
+        WorldCommitService commits = this.commitService;
+        if (commits != null && reg != null) {
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (LoadedWorld loaded : reg.loadedWorlds()) {
+                try {
+                    futures.add(commits.requestCommit(loaded.id()));
+                } catch (Exception e) {
+                    getLogger()
+                            .warning(() -> "could not request shutdown commit for world " + loaded.id() + ": "
+                                    + e.getMessage());
+                }
+            }
+            if (!futures.isEmpty()) {
+                Duration commitTimeout = policy.commitTimeout();
+                try {
+                    CompletableFuture.allOf(futures.toArray(CompletableFuture<?>[]::new))
+                            .get(commitTimeout.toMillis(), TimeUnit.MILLISECONDS);
+                } catch (TimeoutException e) {
+                    getLogger().warning(() -> "shutdown commits timed out after " + commitTimeout);
+                } catch (Exception e) {
+                    getLogger().warning(() -> "shutdown commit failed: " + e.getMessage());
+                }
+            }
+        }
+
         IdleUnloadTask sweep = this.idleUnload;
         this.idleUnload = null;
         if (sweep != null && MainThread.isMain()) {
-            // The snapshot-commit half of FR-28 arrives with milestone 6. What
-            // this does today is unload every world with save=true, so a planned
-            // restart leaves the folders as a clean shutdown would rather than as
-            // a crash would.
             sweep.unloadAllForShutdown();
         }
 
@@ -598,6 +697,17 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         if (worldsMetrics != null) {
             worldsMetrics.close();
         }
+
+        ObjectStore store = this.objectStore;
+        this.objectStore = null;
+        if (store != null) {
+            try {
+                store.close();
+            } catch (Exception e) {
+                getLogger().warning(() -> "could not close object store cleanly: " + e.getMessage());
+            }
+        }
+
         this.executors = null;
         if (pools != null) {
             pools.shutdown(PluginExecutors.DEFAULT_SHUTDOWN_TIMEOUT);
