@@ -4,9 +4,9 @@ Short working list. Full detail and acceptance criteria live in
 [`00-repo-foundation.md`](00-repo-foundation.md); the specification is
 [`../spec/v0.4.md`](../spec/v0.4.md).
 
-F0, F1 and F2 are done. `./gradlew build` is green on all four modules against
-Paper 26.2 and Velocity 4.0.0, and each quality gate has been verified by
-deliberately breaking it.
+F0, F1, F2 and F3 are done. `./gradlew build` is green on all four modules
+against Paper 26.2 and Velocity 4.0.0, each quality gate has been verified by
+deliberately breaking it, and both plugin jars have been loaded on real servers.
 
 ## First, in an environment that can reach repo.papermc.io — done
 
@@ -38,18 +38,36 @@ in blocks `repo.papermc.io`. They compile now.
 - [x] `:backend:test` runs: `ArchitectureTest` 4/4, including the FR-25b rule
       that no field may hold a `World`. 13 tests green across `:core` and
       `:backend`.
-- [ ] Confirm both shaded jars load on a real Paper and Velocity and log
-      `enabled`. **Still outstanding** — this needs a server, and it is F1's
-      actual acceptance criterion. Everything else about F1 is verified.
+- [x] **Both shaded jars load on a real Paper and Velocity and log `enabled`.**
+      F1's acceptance criterion is met. Verified on the GZMN test instances
+      (Pterodactyl on Unraid, Linux x86_64, Temurin 25.0.3): Paper
+      `26.2-112-main`, implementing API version `26.2.build.112-stable` — exactly
+      the pin — and Velocity `4.1.0-SNAPSHOT`. A player connected through the
+      proxy to the backend and joined.
+      - **This node's chunk `DataVersion` is 4903.** That is the number every
+        decision in spec §12.9 is taken against (ADR 0001), and the first time it
+        has been observed rather than assumed.
+      - No duplicate-binding SLF4J warning and no Netty or Jackson complaint from
+        either server, which is the relocation fix holding up in the one place
+        that can actually prove it.
+      - `plugin.yml` now expands `api-version` from the `paperApi` pin, so the
+        descriptor cannot claim an older API than the jar was built for.
 
-### Two things found while doing it
+### Things found while doing it
 
 - [ ] **zstd natives are 6.4 MB of the 22 MB jar**, covering eighteen
       platform/arch pairs including `aix/ppc64`, `linux/mips64`, `linux/riscv64`
-      and `linux/loongarch64`. Trimming to the platforms nodes actually run on
-      saves about 5 MB per jar, but which those are is OQ-10/OQ-12, and the
-      failure mode if trimmed wrong is a node that dies at its first compression
-      rather than at startup. Left whole on purpose; decide with OQ-10.
+      and `linux/loongarch64`. The F1 boot confirms nodes run **Linux x86_64**
+      under Pterodactyl, so trimming to `linux/amd64` plus `linux/aarch64` is now
+      a decision that can actually be taken, saving about 5 MB per jar. The one
+      thing it would break is a developer running a Paper node on Windows or
+      macOS, since the failure is at first compression rather than at startup.
+      Decide alongside OQ-10.
+- [ ] **The proxy runs Velocity `4.1.0-SNAPSHOT` while `velocityApi` pins
+      `4.0.0`.** Deliberately left as is: compiling against a stable release and
+      running a newer server is the safe direction, and pinning a SNAPSHOT would
+      make the build non-reproducible, which §3 of the plan explicitly buys with
+      the reproducible-jar work. Revisit only if 4.1.0 ships API the proxy needs.
 - [ ] **Relocating `net.logstash.logback` means a logback configuration must name
       the encoder by its relocated class**, not
       `net.logstash.logback.encoder.LogstashEncoder`. F8 owns that.
