@@ -9,6 +9,63 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
+## Milestone 3 — visibility isolation: code complete, unverified
+
+Plan [`03-visibility-isolation.md`](03-visibility-isolation.md).
+`./gradlew check build` is green: 202 tests, none failing and none skipped.
+
+- **FR-18** — hide/show recomputed in both directions on join and on every
+  `PlayerChangedWorldEvent`. Both directions, because `hidePlayer` is one-way.
+- **FR-19** — join, quit, death and advancement messages are suppressed
+  globally and re-emitted to the group. Suppress-then-re-emit rather than
+  filter-in-place, so a broadcast nobody remembered to route reaches *nobody*
+  rather than everybody.
+- **FR-20** — chat scoped by mutating `AsyncChatEvent`'s viewer set, never by
+  cancelling and rebroadcasting, so other chat plugins keep their formatting.
+- **FR-21 / FR-22** — command allow-list inside a player world, with
+  `plugin:` prefixes stripped so `/minecraft:list` cannot walk around it.
+
+The group rule and the case the spec leaves implicit: a player **not** in a
+player world is a group of one. FR-11 answers it in passing — the holding area
+"is not a world they can interact with or see anyone else from" — and it is the
+safe direction, since grouping everyone outside a world together would put two
+mid-join strangers in each other's tab list.
+
+### Decisions taken (plan 03)
+
+- **D11** — the allow-list always permits `/world` and `/pworld`.
+  `worlds.allowed-commands` defaults to empty, which taken literally denies the
+  command a player would use to *leave*, trapping them until they disconnect.
+- **D12** — **FR-24d answered**: the network MOTD counts player-world players. A
+  total reveals no identities, and a count that visibly dropped when somebody
+  entered a private world would itself leak that they had.
+
+### Deferred, with reasons rather than silence
+
+- **FR-23** (player-count placeholders) needs PlaceholderAPI, a soft dependency
+  on a plugin that may not be installed. `VisibilityGroups.groupCount` computes
+  the number; the expansion waits for a scoreboard that wants it.
+- **FR-24** (Discord bridge) is an integration with a plugin this repo does not
+  have. The hook it needs — FR-19's group filter — now exists.
+- **FR-24a** is a deployment rule: *do not install a network-wide tab list
+  plugin*, because it overrides backend `hidePlayer` and breaks FR-18. Nothing
+  in this plugin can prevent one being installed; belongs in a runbook.
+- **FR-24b / FR-24c** cover third-party proxy commands that enumerate players.
+  Our own `/world` completion is already scoped to the caller; `/glist` and
+  friend/party plugins cannot be policed from inside our plugin.
+
+### What must happen on a node
+
+Spec §11.3 says it: **three accounts across two worlds and the lobby.**
+
+- [ ] Two players in different worlds see neither each other's tab list entry,
+      entity, chat, join/quit, nor death messages.
+- [ ] Two players in the *same* world see all of it, and keep seeing it after
+      one walks into the nether.
+- [ ] A player in the holding area sees nobody.
+- [ ] `/list`, `/msg` and `/minecraft:list` are denied inside a world; `/world`
+      and `/pworld` still work; a `gzmn.worlds.admin` holder is exempt.
+
 ## Milestone 2 — membership, invites and roles: code complete, unverified
 
 Plan [`02-membership-and-invites.md`](02-membership-and-invites.md).

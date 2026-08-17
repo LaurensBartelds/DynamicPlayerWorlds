@@ -126,6 +126,22 @@ the jar filename (`+mc<version>`), not part of the project version.
 - `/pworld tp <owner> <name>` lets a member enter a world they do not own, which
   is what makes the roles exercisable on a single server.
 
+- Milestone-3 plan `docs/plans/03-visibility-isolation.md`, and visibility
+  isolation between player worlds on one node (FR-18 to FR-22).
+- `VisibilityGroups`: one player world — all three dimensions — is one group, and
+  a player outside a player world is a group of one. The second case is implicit
+  in the specification and answered by FR-11's description of the holding area.
+- Server-wide broadcasts are suppressed and re-emitted to the group (FR-19):
+  join, quit, death and advancement. The rule, not the list, is what the code
+  states, because the specification is explicit that its list is "the known cases
+  rather than the complete one".
+- Chat scoped through `AsyncChatEvent`'s viewer set (FR-20), and a command
+  allow-list inside player worlds that strips `plugin:` prefixes so
+  `/minecraft:list` cannot walk around it (FR-21, FR-22).
+- **FR-24d answered**: the network MOTD counts player-world players. It reveals
+  a total and never identities, and a count that dropped when somebody entered a
+  private world would itself leak that they had.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper
