@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!build-logic/src/
+out/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+nbproject/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local run artefacts. A node's scratch, cache and quarantine directories are
+# disposable working copies (MN-1) and must never be committed.
+run/
+scratch/
+quarantine/
+*.log
+logs/
+
+# Local overrides
+*.local.properties
+.env
+.env.*
+!.env.example

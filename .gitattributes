@@ -1,0 +1,17 @@
+# Normalise line endings so a build on Windows produces the same bytes as a
+# build on Linux. Reproducible jars (see gzmn.plugin-conventions) depend on it.
+* text=auto eol=lf
+
+*.bat        text eol=crlf
+gradlew      text eol=lf
+gradlew.bat  text eol=crlf
+
+*.jar        binary
+*.mca        binary
+*.dat        binary
+*.png        binary
+*.zip        binary
+*.zst        binary
+
+# Keep the spec and plans out of language statistics; this is a Java project.
+docs/**      linguist-documentation
