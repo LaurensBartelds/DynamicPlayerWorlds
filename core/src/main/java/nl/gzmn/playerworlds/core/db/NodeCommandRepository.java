@@ -90,7 +90,7 @@ public final class NodeCommandRepository extends Repository {
                 """)) {
             statement.setString(1, targetNode);
             if (worldId == null) {
-                statement.setObject(2, null);
+                statement.setNull(2, Types.OTHER);
             } else {
                 statement.setObject(2, worldId.value());
             }

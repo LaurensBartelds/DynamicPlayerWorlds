@@ -7,6 +7,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
@@ -17,10 +18,16 @@ import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.Command;
@@ -54,7 +61,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
 
     private static final Logger log = LoggerFactory.getLogger(PworldCommand.class);
 
-    private static final List<String> SUBCOMMANDS = List.of("create", "list", "tp", "unload", "info");
+    private static final List<String> SUBCOMMANDS = List.of("create", "list", "tp", "unload", "info", "leave");
 
     private final WorldLifecycleService lifecycle;
     private final WorldRegistry registry;
@@ -63,6 +70,8 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
     private final MembershipRepository membership;
     private final PlayerNameRepository names;
     private final PluginExecutors executors;
+    private final NodeCommandRepository nodeCommands;
+    private final Supplier<NetworkPolicy> policy;
 
     public PworldCommand(
             WorldLifecycleService lifecycle,
@@ -71,7 +80,9 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             PlayerWorldRepository worlds,
             MembershipRepository membership,
             PlayerNameRepository names,
-            PluginExecutors executors) {
+            PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy) {
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.folders = Objects.requireNonNull(folders, "folders");
@@ -79,6 +90,8 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
         this.membership = Objects.requireNonNull(membership, "membership");
         this.names = Objects.requireNonNull(names, "names");
         this.executors = Objects.requireNonNull(executors, "executors");
+        this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
+        this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     @Override
@@ -95,6 +108,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             case "tp" -> teleport(sender, args);
             case "unload" -> unload(sender, args);
             case "info" -> info(sender);
+            case "leave" -> leave(sender);
             default -> usage(sender);
         }
         return true;
@@ -405,6 +419,49 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
         info(sender, "  idle sweeps " + world.idleSweeps() + ", retry wait " + world.retryWaitSweeps());
     }
 
+    /**
+     * {@code /pworld leave} — return leg to lobby (FR-11, FR-12).
+     */
+    private void leave(CommandSender sender) {
+        Player player = asPlayer(sender);
+        if (player == null) {
+            return;
+        }
+
+        World currentWorld = player.getWorld();
+        Optional<WorldFolders.PlayerWorldDimension> resolved = folders.resolve(currentWorld.getName());
+        WorldId worldId =
+                resolved.map(WorldFolders.PlayerWorldDimension::worldId).orElse(null);
+
+        info(sender, "Returning to lobby...");
+
+        World fallbackWorld = null;
+        for (World w : Bukkit.getWorlds()) {
+            if (!folders.isPlayerWorld(w.getName())) {
+                fallbackWorld = w;
+                break;
+            }
+        }
+        if (currentWorld != null && folders.isPlayerWorld(currentWorld.getName()) && fallbackWorld != null) {
+            player.teleport(fallbackWorld.getSpawnLocation());
+        }
+
+        executors.db().execute(() -> {
+            try {
+                nodeCommands.enqueue(
+                        "proxy",
+                        worldId,
+                        null,
+                        CommandKind.EJECT_PLAYER.name(),
+                        EjectPayload.format(player.getUniqueId(), "Left world"),
+                        policy.get().holdingTimeout(),
+                        ControlChannels.PROXY);
+            } catch (SQLException e) {
+                log.warn("could not enqueue EJECT_PLAYER for {}", player.getUniqueId(), e);
+            }
+        });
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -417,11 +474,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             error(player, "the world loaded but its overworld is not available");
             return;
         }
-        var _ = player.teleportAsync(overworld.getSpawnLocation()).whenComplete((moved, failure) -> {
-            if (failure != null) {
-                log.warn("teleport into world {} failed", world.id(), failure);
-            }
-        });
+        player.teleport(overworld.getSpawnLocation());
     }
 
     private @Nullable Player asPlayer(CommandSender sender) {
@@ -437,7 +490,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
     }
 
     private static void usage(CommandSender sender) {
-        sender.sendMessage(Component.text("/pworld <create|list|tp|unload|info>", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("/pworld <create|list|tp|unload|info|leave>", NamedTextColor.YELLOW));
     }
 
     private static void info(CommandSender sender, String message) {

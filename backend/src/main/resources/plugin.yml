@@ -10,7 +10,7 @@ folia-supported: false
 commands:
   pworld:
     description: Operator surface for player worlds on this node
-    usage: /pworld <create|list|tp|unload|info>  (tp takes <name> or <owner> <name>)
+    usage: /pworld <create|list|tp|unload|info|leave>  (tp takes <name> or <owner> <name>)
     permission: gzmn.worlds.dev
 
 permissions:

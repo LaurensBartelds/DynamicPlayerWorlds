@@ -16,6 +16,7 @@ import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
+import nl.gzmn.playerworlds.backend.node.TransferJoinListener;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
@@ -40,6 +41,7 @@ import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
@@ -315,6 +317,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         PlayerWorldRepository worldRepository = new PlayerWorldRepository(openedDatabase);
         MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
         MembershipCache membershipCache = new MembershipCache();
+        PendingTransferRepository transferRepository = new PendingTransferRepository(openedDatabase);
+        NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
 
         WorldLifecycleService lifecycle = new WorldLifecycleService(
                 worldRepository,
@@ -334,6 +338,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                         new PortalListener(selected, worldFolders, worldRegistry, lifecycle, this::policy), this);
         // FR-9 in world: OWNER and BUILDER build, VISITOR does not.
         getServer().getPluginManager().registerEvents(new RoleEnforcementListener(worldFolders, membershipCache), this);
+        // FR-11: routed join listener
+        getServer()
+                .getPluginManager()
+                .registerEvents(
+                        new TransferJoinListener(
+                                node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy),
+                        this);
 
         PluginCommand command = getCommand("pworld");
         if (command == null) {
@@ -346,7 +357,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                     worldRepository,
                     membershipRepository,
                     new nl.gzmn.playerworlds.core.db.PlayerNameRepository(openedDatabase),
-                    pools);
+                    pools,
+                    nodeCommands,
+                    this::policy);
             command.setExecutor(handler);
             command.setTabCompleter(handler);
             // Say so positively. A command gated behind a permission is tested for
@@ -366,7 +379,15 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
 
         startControlPlane(
-                worldRegistry, lifecycle, worldFolders, membershipCache, openedDatabase, pools, node, this.policy);
+                worldRegistry,
+                lifecycle,
+                worldFolders,
+                membershipCache,
+                openedDatabase,
+                nodeCommands,
+                pools,
+                node,
+                this.policy);
     }
 
     /** Starts the control plane listener and command dispatcher (milestone 5). */
@@ -376,6 +397,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldFolders worldFolders,
             MembershipCache membershipCache,
             Database openedDatabase,
+            NodeCommandRepository nodeCommands,
             PluginExecutors pools,
             NodeConfig node,
             NetworkPolicy loadedPolicy) {
@@ -386,7 +408,6 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         });
         this.listenExecutor = listen;
 
-        NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
         ControlPlane plane = ControlPlane.forNode(
                 node.nodeId(),
                 node.database(),

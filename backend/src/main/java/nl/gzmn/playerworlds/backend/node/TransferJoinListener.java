@@ -14,8 +14,13 @@ import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository.PendingTransfer;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
@@ -23,6 +28,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,10 +43,8 @@ import org.slf4j.LoggerFactory;
  * <p>Every refusal branch FR-11 lists is here: a missing or expired transfer, a
  * transfer routed to a different node, and a generation that no longer matches
  * the lease. Each means the same thing from the player's side — the world is not
- * where they were told it would be — and each currently leaves them in the
- * holding area with an explanation rather than sending them to lobby, because
- * the return leg needs the proxy to accept a send and that is the other half of
- * this milestone.
+ * where they were told it would be — and each sends them an explanation and
+ * enqueues {@code EJECT_PLAYER} to the proxy to return them to the lobby.
  */
 public final class TransferJoinListener implements Listener {
 
@@ -51,6 +55,7 @@ public final class TransferJoinListener implements Listener {
     private final WorldLifecycleService lifecycle;
     private final WorldFolders folders;
     private final PluginExecutors executors;
+    private final NodeCommandRepository nodeCommands;
     private final Supplier<NetworkPolicy> policy;
 
     public TransferJoinListener(
@@ -59,12 +64,14 @@ public final class TransferJoinListener implements Listener {
             WorldLifecycleService lifecycle,
             WorldFolders folders,
             PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
             Supplier<NetworkPolicy> policy) {
         this.config = Objects.requireNonNull(config, "config");
         this.transfers = Objects.requireNonNull(transfers, "transfers");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.folders = Objects.requireNonNull(folders, "folders");
         this.executors = Objects.requireNonNull(executors, "executors");
+        this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
@@ -104,7 +111,11 @@ public final class TransferJoinListener implements Listener {
                         player.getUniqueId(),
                         transfer.nodeId(),
                         config.nodeId());
-                tell(player, "that world moved to another server while you were connecting");
+                refuse(
+                        player,
+                        transfer.worldId(),
+                        "that world moved to another server while you were connecting",
+                        "World moved to another server");
                 return;
             }
 
@@ -114,7 +125,11 @@ public final class TransferJoinListener implements Listener {
                             (outcome, failure) -> {
                                 if (failure != null) {
                                     log.error("load failed for a routed join into {}", transfer.worldId(), failure);
-                                    tell(player, "that world could not be loaded");
+                                    refuse(
+                                            player,
+                                            transfer.worldId(),
+                                            "that world could not be loaded",
+                                            "World load failed");
                                     return;
                                 }
                                 switch (outcome) {
@@ -122,37 +137,52 @@ public final class TransferJoinListener implements Listener {
                                         if (loaded.world().generation() != transfer.generation()) {
                                             // FR-11's generation check. Zero on both sides
                                             // until milestone 7 makes leases real, but the
-                                            // comparison is the point: a route resolved
-                                            // against a lease that has since moved must not
-                                            // be honoured.
+                                            // comparison is live so an unexpected generation
+                                            // drops the player to safety immediately.
                                             log.warn(
-                                                    "transfer for {} was routed against generation {} but world {} is at {}",
+                                                    "transfer generation mismatch for player {}: transfer had generation {}, loaded world {} has generation {}",
                                                     player.getUniqueId(),
                                                     transfer.generation(),
                                                     transfer.worldId(),
                                                     loaded.world().generation());
-                                            tell(player, "that world moved while you were connecting");
+                                            refuse(
+                                                    player,
+                                                    transfer.worldId(),
+                                                    "that world moved while you were connecting",
+                                                    "World moved to another server");
                                             return;
                                         }
                                         sendIn(player, loaded.world());
                                     }
                                     case LoadOutcome.TooNew tooNew ->
-                                        tell(
+                                        refuse(
                                                 player,
+                                                transfer.worldId(),
                                                 "that world needs a newer server version (world "
                                                         + tooNew.worldDataVersion() + ", this node "
-                                                        + tooNew.nodeDataVersion() + ")");
+                                                        + tooNew.nodeDataVersion() + ")",
+                                                "World requires newer server version");
                                     case LoadOutcome.NodeFull full ->
-                                        tell(
+                                        refuse(
                                                 player,
+                                                transfer.worldId(),
                                                 "this server is holding " + full.loaded()
-                                                        + " worlds and cannot take more");
-                                    case LoadOutcome.NotFound ignored -> tell(player, "that world no longer exists");
+                                                        + " worlds and cannot take more",
+                                                "Node is full");
+                                    case LoadOutcome.NotFound ignored ->
+                                        refuse(player, null, "that world no longer exists", "World no longer exists");
                                     case LoadOutcome.WrongState state ->
-                                        tell(
+                                        refuse(
                                                 player,
-                                                "that world is " + state.state() + " and cannot be entered right now");
-                                    case LoadOutcome.Failed reason -> tell(player, reason.reason());
+                                                transfer.worldId(),
+                                                "that world is " + state.state() + " and cannot be entered right now",
+                                                "World is " + state.state());
+                                    case LoadOutcome.Failed reason ->
+                                        refuse(
+                                                player,
+                                                transfer.worldId(),
+                                                "world generation failed",
+                                                "Generation failed: " + reason.reason());
                                 }
                             },
                             executors.main());
@@ -171,12 +201,27 @@ public final class TransferJoinListener implements Listener {
         World overworld = Bukkit.getWorld(bukkitName);
         if (overworld == null) {
             log.error("world {} loaded but its overworld {} is not available", world.id(), bukkitName);
-            tell(player, "that world loaded but could not be entered");
+            refuse(player, world.id(), "that world loaded but could not be entered", "Overworld not available");
             return;
         }
-        var _ = player.teleportAsync(overworld.getSpawnLocation()).whenComplete((moved, failure) -> {
-            if (failure != null) {
-                log.warn("could not teleport {} into world {}", player.getUniqueId(), world.id(), failure);
+        player.teleport(overworld.getSpawnLocation());
+    }
+
+    /** Informs the player and enqueues an EJECT_PLAYER command to route them to the lobby (FR-11). */
+    private void refuse(Player player, @Nullable WorldId worldId, String message, String ejectReason) {
+        tell(player, message);
+        executors.db().execute(() -> {
+            try {
+                nodeCommands.enqueue(
+                        "proxy",
+                        worldId,
+                        null,
+                        CommandKind.EJECT_PLAYER.name(),
+                        EjectPayload.format(player.getUniqueId(), ejectReason),
+                        policy.get().holdingTimeout(),
+                        ControlChannels.PROXY);
+            } catch (SQLException e) {
+                log.warn("could not enqueue EJECT_PLAYER for {}", player.getUniqueId(), e);
             }
         });
     }
