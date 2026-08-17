@@ -22,6 +22,7 @@ import nl.gzmn.playerworlds.backend.platform.WorldRuntime;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
@@ -65,6 +66,8 @@ public final class WorldLifecycleService {
             List.of(DimensionKind.END, DimensionKind.NETHER, DimensionKind.OVERWORLD);
 
     private final PlayerWorldRepository worlds;
+    private final MembershipRepository membership;
+    private final MembershipCache membershipCache;
     private final PluginExecutors executors;
     private final Platform platform;
     private final WorldFolders folders;
@@ -76,6 +79,8 @@ public final class WorldLifecycleService {
 
     public WorldLifecycleService(
             PlayerWorldRepository worlds,
+            MembershipRepository membership,
+            MembershipCache membershipCache,
             PluginExecutors executors,
             Platform platform,
             WorldFolders folders,
@@ -84,6 +89,8 @@ public final class WorldLifecycleService {
             Supplier<NetworkPolicy> policy,
             Path worldContainer) {
         this.worlds = Objects.requireNonNull(worlds, "worlds");
+        this.membership = Objects.requireNonNull(membership, "membership");
+        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
         this.executors = Objects.requireNonNull(executors, "executors");
         this.platform = Objects.requireNonNull(platform, "platform");
         this.folders = Objects.requireNonNull(folders, "folders");
@@ -222,6 +229,7 @@ public final class WorldLifecycleService {
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
+                    cacheMembership(row);
                     metrics.setWorldsLoaded(registry.size());
                     events.info(LogEvent.WORLD_CREATE, "world created: " + row.name(), row.id());
                     PlayerWorld ready = new PlayerWorld(
@@ -370,6 +378,7 @@ public final class WorldLifecycleService {
                             } catch (SQLException e) {
                                 log.warn("could not record last_played for world {}", row.id(), e);
                             }
+                            cacheMembership(row);
                             metrics.setWorldsLoaded(registry.size());
                             // Warm by definition on a single node: the folders were
                             // already here. Milestone 6 introduces the cold path.
@@ -485,6 +494,7 @@ public final class WorldLifecycleService {
     public void afterUnload(LoadedWorld loaded) {
         Objects.requireNonNull(loaded, "loaded");
         registry.unregister(loaded.id());
+        membershipCache.invalidate(loaded.id());
         metrics.setWorldsLoaded(registry.size());
         events.info(LogEvent.WORLD_UNLOAD, "world unloaded: " + loaded.name(), loaded.id());
         executors.db().execute(() -> {
@@ -494,6 +504,25 @@ public final class WorldLifecycleService {
                 log.warn("could not record last_played after unloading world {}", loaded.id(), e);
             }
         });
+    }
+
+    /**
+     * Loads this world's membership into the cache role enforcement reads (FR-9).
+     *
+     * <p>Failure is not fatal to the load, but it is not silent either: an empty
+     * cache makes every player a visitor, which is the safe direction and a very
+     * visible one.
+     */
+    private void cacheMembership(PlayerWorld row) {
+        try {
+            membershipCache.put(row.id(), row.ownerUuid(), membership.rolesIn(row.id()));
+        } catch (SQLException e) {
+            log.error(
+                    "could not load membership for world {}; every player there will be treated as a "
+                            + "visitor until it reloads (FR-9)",
+                    row.id(),
+                    e);
+        }
     }
 
     /**

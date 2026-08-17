@@ -12,6 +12,7 @@ import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
@@ -70,6 +71,8 @@ class PortalListenerTest {
 
         WorldLifecycleService lifecycle = new WorldLifecycleService(
                 new PlayerWorldRepository(database),
+                new MembershipRepository(database),
+                new MembershipCache(),
                 executors,
                 platform,
                 folders,

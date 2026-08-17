@@ -16,7 +16,9 @@ import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
+import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
+import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
@@ -28,6 +30,7 @@ import nl.gzmn.playerworlds.core.config.ConfigValidator;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
@@ -298,9 +301,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         WorldRegistry worldRegistry = new WorldRegistry();
         this.registry = worldRegistry;
         PlayerWorldRepository worldRepository = new PlayerWorldRepository(openedDatabase);
+        MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
+        MembershipCache membershipCache = new MembershipCache();
 
         WorldLifecycleService lifecycle = new WorldLifecycleService(
                 worldRepository,
+                membershipRepository,
+                membershipCache,
                 pools,
                 selected,
                 worldFolders,
@@ -313,6 +320,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .getPluginManager()
                 .registerEvents(
                         new PortalListener(selected, worldFolders, worldRegistry, lifecycle, this::policy), this);
+        // FR-9 in world: OWNER and BUILDER build, VISITOR does not.
+        getServer().getPluginManager().registerEvents(new RoleEnforcementListener(worldFolders, membershipCache), this);
 
         PluginCommand command = getCommand("pworld");
         if (command == null) {
