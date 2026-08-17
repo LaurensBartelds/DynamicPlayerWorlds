@@ -321,6 +321,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             PworldCommand handler = new PworldCommand(lifecycle, worldRegistry, worldFolders, worldRepository, pools);
             command.setExecutor(handler);
             command.setTabCompleter(handler);
+            // Say so positively. A command gated behind a permission is tested for
+            // that permission before the handler is ever called, and Paper hides
+            // commands the caller cannot use — so "nothing happens" looks identical
+            // whether the command failed to register or the caller simply lacks
+            // the permission. Naming both here tells an operator which it is.
+            getLogger()
+                    .info(() -> "/" + command.getName() + " registered; requires permission " + command.getPermission()
+                            + " (default: op, so grant it or /op yourself)");
         }
 
         IdleUnloadTask sweep =
