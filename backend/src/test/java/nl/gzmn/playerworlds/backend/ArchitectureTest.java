@@ -3,6 +3,8 @@ package nl.gzmn.playerworlds.backend;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noFields;
 
+import com.tngtech.archunit.base.DescribedPredicate;
+import com.tngtech.archunit.core.domain.JavaClass;
 import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
@@ -75,11 +77,30 @@ class ArchitectureTest {
     void databaseAccessGoesThroughCore() {
         ArchRule rule = noClasses()
                 .should()
-                .dependOnClassesThat()
-                .resideInAnyPackage("java.sql..", "javax.sql..", "com.zaxxer.hikari..")
+                .dependOnClassesThat(new DescribedPredicate<JavaClass>("are JDBC types other than SQLException") {
+                    @Override
+                    public boolean test(JavaClass type) {
+                        if (type.getPackageName().startsWith("com.zaxxer.hikari")) {
+                            return true;
+                        }
+                        if (!type.getPackageName().startsWith("java.sql")
+                                && !type.getPackageName().startsWith("javax.sql")) {
+                            return false;
+                        }
+                        // SQLException is the one JDBC type that legitimately
+                        // crosses the module boundary: :core's repositories declare
+                        // it, so any caller must name it to handle a failure. What
+                        // the rule is protecting against is a backend class holding
+                        // a Connection, Statement, ResultSet or DataSource — that
+                        // is what "doing JDBC" means, and all of it stays banned.
+                        return !type.getName().equals("java.sql.SQLException");
+                    }
+                })
                 .because("every database call is asynchronous and lives behind a repository in :core, "
                         + "which is what keeps NFR-2 a property of the structure rather than of each "
-                        + "caller remembering");
+                        + "caller remembering. A repository method that needs to compose several "
+                        + "statements into one transaction exposes a Connection-free overload rather "
+                        + "than handing the Connection out of the module");
 
         rule.check(backend);
     }

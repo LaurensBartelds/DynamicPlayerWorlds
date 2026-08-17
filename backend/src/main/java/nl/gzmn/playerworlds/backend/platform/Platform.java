@@ -44,6 +44,7 @@ public final class Platform {
     private final WorldLayout worldLayout;
     private final ItemCodec itemCodec;
     private final WorldRuntime worldRuntime;
+    private final WorldLifecycle worldLifecycle;
     private final PortalRouting portalRouting;
     private final boolean unknownNewerVersion;
 
@@ -52,12 +53,14 @@ public final class Platform {
             WorldLayout worldLayout,
             ItemCodec itemCodec,
             WorldRuntime worldRuntime,
+            WorldLifecycle worldLifecycle,
             PortalRouting portalRouting,
             boolean unknownNewerVersion) {
         this.identity = identity;
         this.worldLayout = worldLayout;
         this.itemCodec = itemCodec;
         this.worldRuntime = worldRuntime;
+        this.worldLifecycle = worldLifecycle;
         this.portalRouting = portalRouting;
         this.unknownNewerVersion = unknownNewerVersion;
     }
@@ -85,6 +88,7 @@ public final class Platform {
                 layout,
                 PaperItemCodec.INSTANCE,
                 PaperWorldRuntime.INSTANCE,
+                PaperWorldLifecycle.INSTANCE,
                 DefaultPortalRouting.INSTANCE,
                 unknownNewer);
     }
@@ -110,6 +114,10 @@ public final class Platform {
 
     public WorldRuntime worldRuntime() {
         return worldRuntime;
+    }
+
+    public WorldLifecycle worldLifecycle() {
+        return worldLifecycle;
     }
 
     public PortalRouting portalRouting() {
