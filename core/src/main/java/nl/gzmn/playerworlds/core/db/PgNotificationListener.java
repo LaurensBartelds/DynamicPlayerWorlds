@@ -1,7 +1,6 @@
 package nl.gzmn.playerworlds.core.db;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -140,7 +139,17 @@ public final class PgNotificationListener implements AutoCloseable {
         props.setProperty("password", settings.password());
         // Fail fast on a dead database rather than parking the listen thread.
         props.setProperty("connectTimeout", "5");
-        Connection opened = DriverManager.getConnection(settings.jdbcUrl(), props);
+        // Driver#connect rather than DriverManager.getConnection, for the reason
+        // Database.open names: DriverManager builds its registry from whichever
+        // classloader scans first, which inside a Paper plugin is never the one
+        // holding our relocated driver, so it reports "No suitable driver" for a
+        // driver that is present. This connection cannot come from the pool —
+        // LISTEN needs a dedicated one held open — so it instantiates the driver
+        // itself, which is what the pool does internally anyway.
+        Connection opened = new org.postgresql.Driver().connect(settings.jdbcUrl(), props);
+        if (opened == null) {
+            throw new SQLException("postgresql driver refused the url: " + settings.jdbcUrl());
+        }
         try {
             opened.setAutoCommit(true);
             try (Statement statement = opened.createStatement()) {
