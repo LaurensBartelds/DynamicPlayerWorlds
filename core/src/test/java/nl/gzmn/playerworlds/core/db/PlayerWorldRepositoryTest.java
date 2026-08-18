@@ -5,11 +5,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
@@ -722,6 +724,110 @@ class PlayerWorldRepositoryTest {
 
         PlayerWorld world = worlds.findById(id).orElseThrow();
         assertThat(world.settingsJson()).contains("\"pvp\": true");
+    }
+
+    @Test
+    @DisplayName("transfers ownership atomically with member roles, audit log and request cleanup (FR-31, FR-31a)")
+    void transfersOwnershipAtomically() throws Exception {
+        UUID oldOwner = UUID.randomUUID();
+        UUID newOwner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+
+        worlds.create(worldId, oldOwner, "my-world", 42L, 5000, Visibility.PRIVATE);
+        MembershipRepository membership = new MembershipRepository(database);
+        TransferRequestRepository transferRequests = new TransferRequestRepository(database);
+
+        database.inTransaction(connection -> membership.insertMember(connection, worldId, newOwner, Role.BUILDER, oldOwner));
+        transferRequests.requestTransfer(worldId, newOwner, oldOwner, Duration.ofDays(7));
+
+        assertThat(transferRequests.findLiveRequest(worldId, newOwner)).isPresent();
+
+        boolean transferred = worlds.transferOwnership(worldId, oldOwner, newOwner, "MANUAL");
+        assertThat(transferred).isTrue();
+
+        PlayerWorld updated = worlds.findById(worldId).orElseThrow();
+        assertThat(updated.ownerUuid()).isEqualTo(newOwner);
+
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+
+        assertThat(worlds.countOwnedBy(oldOwner)).isZero();
+        assertThat(worlds.countOwnedBy(newOwner)).isEqualTo(1);
+
+        assertThat(transferRequests.findLiveRequest(worldId, newOwner)).isEmpty();
+
+        database.withConnection(connection -> {
+            try (var statement = connection.prepareStatement(
+                    "SELECT from_uuid, to_uuid, reason FROM player_world_ownership_log WHERE world_id = ?")) {
+                statement.setObject(1, worldId.value());
+                try (var rs = statement.executeQuery()) {
+                    assertThat(rs.next()).isTrue();
+                    assertThat(rs.getObject("from_uuid", UUID.class)).isEqualTo(oldOwner);
+                    assertThat(rs.getObject("to_uuid", UUID.class)).isEqualTo(newOwner);
+                    assertThat(rs.getString("reason")).isEqualTo("MANUAL");
+                    assertThat(rs.next()).isFalse();
+                }
+            }
+            return null;
+        });
+    }
+
+    @Test
+    @DisplayName("transfers ownership when new owner is not yet a member in player_world_member")
+    void transfersOwnershipWhenNewOwnerNotYetMember() throws Exception {
+        UUID oldOwner = UUID.randomUUID();
+        UUID newOwner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+
+        worlds.create(worldId, oldOwner, "fresh-world", 42L, 5000, Visibility.PRIVATE);
+        MembershipRepository membership = new MembershipRepository(database);
+
+        boolean transferred = worlds.transferOwnership(worldId, oldOwner, newOwner, "ADMIN");
+        assertThat(transferred).isTrue();
+
+        PlayerWorld updated = worlds.findById(worldId).orElseThrow();
+        assertThat(updated.ownerUuid()).isEqualTo(newOwner);
+
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+    }
+
+    @Test
+    @DisplayName("transferOwnership fails when old owner uuid does not match current owner")
+    void transferOwnershipFailsOnOldOwnerMismatch() throws Exception {
+        UUID oldOwner = UUID.randomUUID();
+        UUID wrongOwner = UUID.randomUUID();
+        UUID newOwner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+
+        worlds.create(worldId, oldOwner, "my-world", 42L, 5000, Visibility.PRIVATE);
+        MembershipRepository membership = new MembershipRepository(database);
+
+        boolean transferred = worlds.transferOwnership(worldId, wrongOwner, newOwner, "MANUAL");
+        assertThat(transferred).isFalse();
+
+        PlayerWorld current = worlds.findById(worldId).orElseThrow();
+        assertThat(current.ownerUuid()).isEqualTo(oldOwner);
+
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+        assertThat(membership.findMember(worldId, newOwner)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("transferOwnership validates non-null arguments")
+    void transferOwnershipValidatesArguments() {
+        WorldId worldId = WorldId.random();
+        UUID uuid1 = UUID.randomUUID();
+        UUID uuid2 = UUID.randomUUID();
+
+        assertThatThrownBy(() -> worlds.transferOwnership(null, uuid1, uuid2, "MANUAL"))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> worlds.transferOwnership(worldId, null, uuid2, "MANUAL"))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> worlds.transferOwnership(worldId, uuid1, null, "MANUAL"))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> worlds.transferOwnership(worldId, uuid1, uuid2, null))
+                .isInstanceOf(NullPointerException.class);
     }
 
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {

@@ -514,6 +514,90 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Atomically transfers world ownership to a new owner (FR-31, FR-31a).
+     *
+     * <p>In a single transaction:
+     * <ol>
+     *   <li>Updates {@code player_world.owner_uuid} to {@code newOwnerUuid} conditionally on {@code oldOwnerUuid}</li>
+     *   <li>Ensures {@code newOwnerUuid} exists in {@code player_world_member} and sets role to {@link Role#OWNER}</li>
+     *   <li>Demotes {@code oldOwnerUuid} in {@code player_world_member} to {@link Role#BUILDER}</li>
+     *   <li>Inserts a row into {@code player_world_ownership_log}</li>
+     *   <li>Removes any pending {@code player_world_transfer_request} for this world and target</li>
+     * </ol>
+     *
+     * @return true if the transfer succeeded, false if the old owner did not match
+     */
+    public boolean transferOwnership(WorldId worldId, UUID oldOwnerUuid, UUID newOwnerUuid, String reason)
+            throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(oldOwnerUuid, "oldOwnerUuid");
+        Objects.requireNonNull(newOwnerUuid, "newOwnerUuid");
+        Objects.requireNonNull(reason, "reason");
+
+        return database.inTransaction(connection -> {
+            int updated = execute(
+                    connection,
+                    "UPDATE player_world SET owner_uuid = ? WHERE id = ? AND owner_uuid = ?",
+                    statement -> {
+                        statement.setObject(1, newOwnerUuid);
+                        statement.setObject(2, worldId.value());
+                        statement.setObject(3, oldOwnerUuid);
+                    });
+
+            if (updated != 1) {
+                return false;
+            }
+
+            // 1. Ensure target member is OWNER
+            execute(
+                    connection,
+                    """
+                    INSERT INTO player_world_member (world_id, uuid, role)
+                    VALUES (?, ?, 'OWNER')
+                    ON CONFLICT (world_id, uuid) DO UPDATE SET role = 'OWNER'
+                    """,
+                    statement -> {
+                        statement.setObject(1, worldId.value());
+                        statement.setObject(2, newOwnerUuid);
+                    });
+
+            // 2. Demote old owner to BUILDER
+            execute(
+                    connection,
+                    "UPDATE player_world_member SET role = 'BUILDER' WHERE world_id = ? AND uuid = ?",
+                    statement -> {
+                        statement.setObject(1, worldId.value());
+                        statement.setObject(2, oldOwnerUuid);
+                    });
+
+            // 3. Insert audit log
+            execute(
+                    connection,
+                    """
+                    INSERT INTO player_world_ownership_log (world_id, from_uuid, to_uuid, reason)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    statement -> {
+                        statement.setObject(1, worldId.value());
+                        statement.setObject(2, oldOwnerUuid);
+                        statement.setObject(3, newOwnerUuid);
+                        statement.setString(4, reason);
+                    });
+
+            // 4. Delete any pending transfer requests
+            execute(
+                    connection,
+                    "DELETE FROM player_world_transfer_request WHERE world_id = ? AND to_uuid = ?",
+                    statement -> {
+                        statement.setObject(1, worldId.value());
+                        statement.setObject(2, newOwnerUuid);
+                    });
+
+            return true;
+        });
+    }
+
+    /**
      * Worlds counting against {@code worlds.max-per-player} (FR-1).
      *
      * <p>{@code ARCHIVED} worlds are excluded, and that follows from FR-27 rather
