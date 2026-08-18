@@ -737,7 +737,8 @@ class PlayerWorldRepositoryTest {
         MembershipRepository membership = new MembershipRepository(database);
         TransferRequestRepository transferRequests = new TransferRequestRepository(database);
 
-        database.inTransaction(connection -> membership.insertMember(connection, worldId, newOwner, Role.BUILDER, oldOwner));
+        database.inTransaction(
+                connection -> membership.insertMember(connection, worldId, newOwner, Role.BUILDER, oldOwner));
         transferRequests.requestTransfer(worldId, newOwner, oldOwner, Duration.ofDays(7));
 
         assertThat(transferRequests.findLiveRequest(worldId, newOwner)).isPresent();
@@ -748,8 +749,10 @@ class PlayerWorldRepositoryTest {
         PlayerWorld updated = worlds.findById(worldId).orElseThrow();
         assertThat(updated.ownerUuid()).isEqualTo(newOwner);
 
-        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.BUILDER);
-        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role())
+                .isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
 
         assertThat(worlds.countOwnedBy(oldOwner)).isZero();
         assertThat(worlds.countOwnedBy(newOwner)).isEqualTo(1);
@@ -788,8 +791,10 @@ class PlayerWorldRepositoryTest {
         PlayerWorld updated = worlds.findById(worldId).orElseThrow();
         assertThat(updated.ownerUuid()).isEqualTo(newOwner);
 
-        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.BUILDER);
-        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role())
+                .isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, newOwner).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
     }
 
     @Test
@@ -809,7 +814,8 @@ class PlayerWorldRepositoryTest {
         PlayerWorld current = worlds.findById(worldId).orElseThrow();
         assertThat(current.ownerUuid()).isEqualTo(oldOwner);
 
-        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role()).isEqualTo(Role.OWNER);
+        assertThat(membership.findMember(worldId, oldOwner).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
         assertThat(membership.findMember(worldId, newOwner)).isEmpty();
     }
 

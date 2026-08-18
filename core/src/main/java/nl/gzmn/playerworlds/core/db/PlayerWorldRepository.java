@@ -536,9 +536,7 @@ public final class PlayerWorldRepository extends Repository {
 
         return database.inTransaction(connection -> {
             int updated = execute(
-                    connection,
-                    "UPDATE player_world SET owner_uuid = ? WHERE id = ? AND owner_uuid = ?",
-                    statement -> {
+                    connection, "UPDATE player_world SET owner_uuid = ? WHERE id = ? AND owner_uuid = ?", statement -> {
                         statement.setObject(1, newOwnerUuid);
                         statement.setObject(2, worldId.value());
                         statement.setObject(3, oldOwnerUuid);
@@ -549,17 +547,14 @@ public final class PlayerWorldRepository extends Repository {
             }
 
             // 1. Ensure target member is OWNER
-            execute(
-                    connection,
-                    """
+            execute(connection, """
                     INSERT INTO player_world_member (world_id, uuid, role)
                     VALUES (?, ?, 'OWNER')
                     ON CONFLICT (world_id, uuid) DO UPDATE SET role = 'OWNER'
-                    """,
-                    statement -> {
-                        statement.setObject(1, worldId.value());
-                        statement.setObject(2, newOwnerUuid);
-                    });
+                    """, statement -> {
+                statement.setObject(1, worldId.value());
+                statement.setObject(2, newOwnerUuid);
+            });
 
             // 2. Demote old owner to BUILDER
             execute(
@@ -571,18 +566,15 @@ public final class PlayerWorldRepository extends Repository {
                     });
 
             // 3. Insert audit log
-            execute(
-                    connection,
-                    """
+            execute(connection, """
                     INSERT INTO player_world_ownership_log (world_id, from_uuid, to_uuid, reason)
                     VALUES (?, ?, ?, ?)
-                    """,
-                    statement -> {
-                        statement.setObject(1, worldId.value());
-                        statement.setObject(2, oldOwnerUuid);
-                        statement.setObject(3, newOwnerUuid);
-                        statement.setString(4, reason);
-                    });
+                    """, statement -> {
+                statement.setObject(1, worldId.value());
+                statement.setObject(2, oldOwnerUuid);
+                statement.setObject(3, newOwnerUuid);
+                statement.setString(4, reason);
+            });
 
             // 4. Delete any pending transfer requests
             execute(
