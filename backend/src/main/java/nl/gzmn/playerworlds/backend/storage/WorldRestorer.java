@@ -22,7 +22,6 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.storage.DirtyScanner;
 import nl.gzmn.playerworlds.core.storage.Manifest;
-import nl.gzmn.playerworlds.core.storage.ManifestEntry;
 import nl.gzmn.playerworlds.core.storage.ObjectStore;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
 import org.jspecify.annotations.Nullable;
@@ -206,9 +205,7 @@ public final class WorldRestorer {
                         currentPolicy.verifyRegionStructure());
                 Manifest manifest = snapResult.manifest();
                 manifestKey = manifest.manifestKey();
-                liveStorageBytes = manifest.entries().values().stream()
-                        .mapToLong(ManifestEntry::sizeBytes)
-                        .sum();
+                liveStorageBytes = manifest.totalBytes();
             } catch (Exception e) {
                 deleteDirectoryRecursively(tempExtractDir);
                 deleteQuietly(tempArchive);

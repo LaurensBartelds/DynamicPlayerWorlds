@@ -10,6 +10,9 @@
 # and the older `1.21.4-R0.1-SNAPSHOT` shape to the Minecraft version alone.
 paperApi = "26.2.build.112-stable"
 velocityApi = "4.0.0"
+# Optional at runtime: the proxy uses it to enumerate storage tiers when it is
+# installed, and falls back to probing configured nodes when it is not (§4).
+luckperms = "5.5"
 
 # Runtime
 hikari = "7.1.0"
@@ -50,6 +53,7 @@ licensee = "1.14.1"
 [libraries]
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paperApi" }
 velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocityApi" }
+luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms" }
 
 hikari = { module = "com.zaxxer:HikariCP", version.ref = "hikari" }
 postgresql = { module = "org.postgresql:postgresql", version.ref = "postgresql" }

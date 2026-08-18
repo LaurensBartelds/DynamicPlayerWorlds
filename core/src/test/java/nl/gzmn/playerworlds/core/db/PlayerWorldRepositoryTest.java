@@ -262,6 +262,7 @@ class PlayerWorldRepositoryTest {
                 0L,
                 "node-a",
                 "worlds/" + id.value() + "/manifest/0-1.json",
+                1024L,
                 4903,
                 "26.2",
                 snap,
@@ -276,9 +277,55 @@ class PlayerWorldRepositoryTest {
         assertThat(updated.dataVersion()).isEqualTo(4903);
         assertThat(updated.mcVersion()).isEqualTo("26.2");
         assertThat(updated.lastPlayed()).isNotNull();
+        // The footprint moves with the manifest it describes, so the owner's quota is measured
+        // against the snapshot that is actually current (§4).
+        assertThat(updated.storageBytes()).isEqualTo(1024L);
+        assertThat(worlds.totalStorageUsedBy(owner)).isEqualTo(1024L);
 
         assertThat(profiles.load(id, player1, snap)).isPresent();
         assertThat(profiles.load(id, player1, snap).orElseThrow().data()).containsExactly(1, 2, 3);
+    }
+
+    @Test
+    @DisplayName("A later commit replaces the recorded footprint rather than adding to it")
+    void commitSnapshotReplacesStorageBytes() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "growing-world", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        assertThat(worlds.commitSnapshot(
+                        id,
+                        0L,
+                        "node-a",
+                        "worlds/" + id.value() + "/manifest/0-1.json",
+                        1024L,
+                        4903,
+                        "26.2",
+                        new ProfileRepository.Snapshot(0L, 1),
+                        1,
+                        Map.of(),
+                        profiles))
+                .isTrue();
+        assertThat(worlds.totalStorageUsedBy(owner)).isEqualTo(1024L);
+
+        assertThat(worlds.commitSnapshot(
+                        id,
+                        0L,
+                        "node-a",
+                        "worlds/" + id.value() + "/manifest/0-2.json",
+                        4096L,
+                        4903,
+                        "26.2",
+                        new ProfileRepository.Snapshot(0L, 2),
+                        1,
+                        Map.of(),
+                        profiles))
+                .isTrue();
+
+        // A snapshot is the whole world, not a delta, so the newest figure is the whole answer.
+        assertThat(worlds.findById(id).orElseThrow().storageBytes()).isEqualTo(4096L);
+        assertThat(worlds.totalStorageUsedBy(owner)).isEqualTo(4096L);
     }
 
     @Test
@@ -298,6 +345,7 @@ class PlayerWorldRepositoryTest {
                 1L,
                 "node-a",
                 "worlds/" + id.value() + "/manifest/1-1.json",
+                1024L,
                 4903,
                 "26.2",
                 snap,
@@ -332,6 +380,7 @@ class PlayerWorldRepositoryTest {
                 0L,
                 "node-a",
                 "worlds/" + id.value() + "/manifest/0-1.json",
+                1024L,
                 4903,
                 "26.2",
                 snap,
@@ -361,6 +410,7 @@ class PlayerWorldRepositoryTest {
                 0L,
                 "node-a",
                 "worlds/" + id.value() + "/manifest/0-0.json",
+                1024L,
                 4903,
                 "26.2",
                 snap,
@@ -545,6 +595,7 @@ class PlayerWorldRepositoryTest {
                 grant.generation(),
                 "node-1",
                 "manifests/" + id.value() + "/1",
+                1024L,
                 4903,
                 "26.2",
                 new ProfileRepository.Snapshot(1L, 1),
@@ -569,6 +620,7 @@ class PlayerWorldRepositoryTest {
                 first.generation(),
                 "node-1",
                 "manifests/a",
+                1024L,
                 4903,
                 "26.2",
                 new ProfileRepository.Snapshot(1L, 1),
@@ -586,6 +638,7 @@ class PlayerWorldRepositoryTest {
                 first.generation(),
                 "node-1",
                 "manifests/b",
+                1024L,
                 4903,
                 "26.2",
                 new ProfileRepository.Snapshot(2L, 1),
@@ -672,6 +725,7 @@ class PlayerWorldRepositoryTest {
                 onNew.generation(),
                 "node-new",
                 "manifests/new",
+                1024L,
                 4903,
                 "26.2",
                 new ProfileRepository.Snapshot(1L, 1),

@@ -161,13 +161,37 @@ New repository in `nl.gzmn.playerworlds.core.db`:
 ## 4. Storage Quota Subsystem & Permission Resolution
 
 ### 4.1 Permission Parsing (`StorageQuotaResolver`)
-- Scans player permission subjects for `gzmn.worlds.storage.*`.
 - Parsing rules:
   - Regex: `^gzmn\.worlds\.storage\.(\d+)(b|kb|mb|gb|tb)?$` (case-insensitive).
   - Units: `B` (1), `KB` (1024), `MB` ($1024^2$), `GB` ($1024^3$), `TB` ($1024^4$). Unspecified unit defaults to MB.
   - Special permission: `gzmn.worlds.storage.unlimited` or `gzmn.worlds.admin` sets `unlimited = true`.
 - Evaluates the highest parsed limit.
 - If no matching permission exists, defaults to `policy.defaultStorageLimitBytes()`.
+
+### 4.2 Obtaining the permissions (`StorageTiers`, `:proxy`)
+
+An earlier draft of this section said the resolver "scans player permission subjects for
+`gzmn.worlds.storage.*`". **Velocity cannot do that.** `PermissionSubject` exposes
+`hasPermission(String)`, `getPermissionValue(String)` and `getPermissionChecker()` — every one
+of them a question about a node the caller already names. Nothing enumerates. So how the tier
+is obtained depends on what is installed, and there are two paths:
+
+| | How the tier is found | Which tiers work |
+| --- | --- | --- |
+| **LuckPerms installed** | `LuckPermsProvider.get().getPlayerAdapter(Player.class).getPermissionData(player).getPermissionMap()` returns the fully resolved map, inherited nodes included. Nodes mapped to `false` are explicit denials and are discarded. | **Any.** `gzmn.worlds.storage.7gb` works with no configuration. |
+| **No enumerable backend** | Each node named by `storage.quota-tiers` is put to `hasPermission`. | Only the configured ones. A granted tier absent from that list is invisible and the player falls back to the network default. |
+
+- Detection is by `Class.forName("net.luckperms.api.LuckPermsProvider")` followed by a
+  `LuckPermsProvider.get()` call, because the class being on the classpath does not mean the
+  service is registered — a proxy may start this plugin first. It is decided on first use and
+  cached, and every LuckPerms type is confined to `LuckPermsTiers` so the API can be absent
+  at runtime without the class ever being loaded.
+- The LuckPerms API is a `compileOnly` dependency. LuckPerms supplies it at runtime; shading a
+  second copy would break the service lookup.
+- `storage.quota-tiers` (`NetworkPolicy`) is the configured ladder, defaulting to the sizes a
+  network is likely to sell. It is inert when LuckPerms is present.
+- `/world storage` tells an administrator which path answered, so "my tier is not being picked
+  up" is diagnosable without reading the log.
 
 ---
 

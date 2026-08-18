@@ -73,7 +73,8 @@ public record NetworkPolicy(
         long quarantineMaxBytes,
         int quarantineRetainDays,
         List<String> excludeGlobs,
-        long defaultStorageLimitBytes) {
+        long defaultStorageLimitBytes,
+        List<String> storageQuotaTiers) {
 
     // --- key names (the network_setting primary key) -----------------------
 
@@ -131,6 +132,18 @@ public record NetworkPolicy(
     public static final String KEY_EXCLUDE_GLOBS = "storage.exclude-globs";
     public static final String KEY_DEFAULT_STORAGE_LIMIT_GB = "storage.default-limit-gb";
 
+    /**
+     * Storage tiers an operator has actually granted, as {@code gzmn.worlds.storage.<amount><unit>}
+     * suffixes (§4).
+     *
+     * <p>Only consulted where permissions cannot be enumerated. LuckPerms can list what a player
+     * holds, so with it installed every tier works whether or not it appears here; without it the
+     * proxy has to ask about specific nodes, and this is the list it asks about. An operator who
+     * invents a tier outside this list and has no enumerable permission backend gets the default
+     * allowance, so the two need to be kept in step.
+     */
+    public static final String KEY_STORAGE_QUOTA_TIERS = "storage.quota-tiers";
+
     // --- defaults (specification sections 7 and 12.8) ----------------------
 
     public static final int DEFAULT_MAX_WORLDS_PER_PLAYER = 2;
@@ -173,6 +186,12 @@ public record NetworkPolicy(
     public static final long DEFAULT_QUARANTINE_MAX_BYTES = 50L * 1024 * 1024 * 1024;
     public static final int DEFAULT_QUARANTINE_RETAIN_DAYS = 7;
     public static final List<String> DEFAULT_EXCLUDE_GLOBS = List.of("session.lock", "uid.dat");
+
+    /** A ladder covering the tier sizes a network is likely to sell, smallest first. */
+    public static final List<String> DEFAULT_STORAGE_QUOTA_TIERS = List.of(
+            "100mb", "250mb", "500mb", "750mb", "1gb", "2gb", "3gb", "5gb", "10gb", "15gb", "20gb", "25gb", "50gb",
+            "75gb", "100gb", "250gb", "500gb", "1tb", "2tb", "5tb");
+
     public static final long DEFAULT_STORAGE_LIMIT_BYTES = 5L * 1024 * 1024 * 1024;
 
     public NetworkPolicy {
@@ -200,6 +219,7 @@ public record NetworkPolicy(
         Objects.requireNonNull(commitTimeout, "commitTimeout");
         Objects.requireNonNull(coldLoadBudget, "coldLoadBudget");
         Objects.requireNonNull(excludeGlobs, "excludeGlobs");
+        Objects.requireNonNull(storageQuotaTiers, "storageQuotaTiers");
         if (defaultStorageLimitBytes < 0) {
             throw new IllegalArgumentException(
                     "defaultStorageLimitBytes must not be negative: " + defaultStorageLimitBytes);
@@ -207,6 +227,7 @@ public record NetworkPolicy(
         allowedCommands = List.copyOf(allowedCommands);
         archiveWarnDays = List.copyOf(archiveWarnDays);
         excludeGlobs = List.copyOf(excludeGlobs);
+        storageQuotaTiers = List.copyOf(storageQuotaTiers);
     }
 
     /** Specification defaults, used when {@code network_setting} has no row. */
@@ -252,7 +273,8 @@ public record NetworkPolicy(
                 DEFAULT_QUARANTINE_MAX_BYTES,
                 DEFAULT_QUARANTINE_RETAIN_DAYS,
                 DEFAULT_EXCLUDE_GLOBS,
-                DEFAULT_STORAGE_LIMIT_BYTES);
+                DEFAULT_STORAGE_LIMIT_BYTES,
+                DEFAULT_STORAGE_QUOTA_TIERS);
     }
 
     /**
@@ -314,7 +336,8 @@ public record NetworkPolicy(
                 gib(rawJsonByKey, KEY_QUARANTINE_MAX_GB, DEFAULT_QUARANTINE_MAX_BYTES),
                 intVal(rawJsonByKey, KEY_QUARANTINE_RETAIN_DAYS, DEFAULT_QUARANTINE_RETAIN_DAYS),
                 stringList(rawJsonByKey, KEY_EXCLUDE_GLOBS, DEFAULT_EXCLUDE_GLOBS),
-                gib(rawJsonByKey, KEY_DEFAULT_STORAGE_LIMIT_GB, DEFAULT_STORAGE_LIMIT_BYTES));
+                gib(rawJsonByKey, KEY_DEFAULT_STORAGE_LIMIT_GB, DEFAULT_STORAGE_LIMIT_BYTES),
+                stringList(rawJsonByKey, KEY_STORAGE_QUOTA_TIERS, DEFAULT_STORAGE_QUOTA_TIERS));
     }
 
     private static int intVal(Map<String, String> raw, String key, int defaultValue) {

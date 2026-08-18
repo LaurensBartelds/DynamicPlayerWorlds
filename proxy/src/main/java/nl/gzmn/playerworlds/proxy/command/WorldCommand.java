@@ -49,6 +49,7 @@ import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.placement.PlacementDecision;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
+import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -126,6 +127,7 @@ public final class WorldCommand {
     private final Placement placement;
     private final NodeCommandRepository nodeCommands;
     private final Supplier<NetworkPolicy> policy;
+    private final StorageTiers storageTiers = new StorageTiers();
 
     public WorldCommand(
             ProxyServer proxy,
@@ -1481,22 +1483,30 @@ public final class WorldCommand {
         }
         NetworkPolicy current = policy.get();
         run(caller, () -> {
-            StorageQuota quota = quotaFor(caller, current);
-            renderStorage(caller, caller.getUsername(), quota, worlds.listOwnedBy(caller.getUniqueId()));
+            long used = worlds.totalStorageUsedBy(caller.getUniqueId());
+            StorageTiers.Resolution resolved = storageTiers.evaluate(caller, used, current);
+            renderStorage(caller, caller.getUsername(), resolved.quota(), worlds.listOwnedBy(caller.getUniqueId()));
+            if (resolved.source() == StorageTiers.Source.PROBED
+                    && caller.hasPermission(ADMIN_PERMISSION)
+                    && !current.storageQuotaTiers().isEmpty()) {
+                info(
+                        caller,
+                        "  (no enumerable permission plugin: only the "
+                                + current.storageQuotaTiers().size() + " tiers in storage.quota-tiers are recognised)");
+            }
         });
     }
 
     /**
      * Evaluates the caller's quota (§4, FR-30a).
      *
-     * <p>The permission side is a probe rather than a scan: Velocity's {@code PermissionSubject}
-     * answers one node at a time and cannot list what a player holds, so
-     * {@link StorageQuotaResolver#candidatePermissions()} names the tiers worth asking about.
+     * <p>Delegated to {@link StorageTiers}, which reads the player's tier straight off LuckPerms
+     * where it is installed and otherwise probes the nodes named by {@code storage.quota-tiers} —
+     * Velocity alone cannot list what a player holds.
      */
     private StorageQuota quotaFor(Player caller, NetworkPolicy current) throws SQLException {
         long used = worlds.totalStorageUsedBy(caller.getUniqueId());
-        return StorageQuotaResolver.evaluate(
-                caller.getUniqueId(), used, caller::hasPermission, current.defaultStorageLimitBytes());
+        return storageTiers.evaluate(caller, used, current).quota();
     }
 
     /** One consistent refusal, so a player is never told "no" without being told how much of what. */
@@ -1960,8 +1970,7 @@ public final class WorldCommand {
             // network default. Saying so is better than quietly reporting a limit that is not theirs.
             Optional<Player> online = proxy.getPlayer(uuid);
             StorageQuota quota = online.isPresent()
-                    ? StorageQuotaResolver.evaluate(
-                            uuid, used, online.get()::hasPermission, current.defaultStorageLimitBytes())
+                    ? storageTiers.evaluate(online.get(), used, current).quota()
                     : new StorageQuota(uuid, used, current.defaultStorageLimitBytes(), false);
             renderStorage(source, targetName + "'s", quota, worlds.listOwnedBy(uuid));
             if (online.isEmpty()) {

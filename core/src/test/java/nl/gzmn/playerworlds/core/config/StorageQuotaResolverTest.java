@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Predicate;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -121,6 +122,66 @@ class StorageQuotaResolverTest {
                 player, limit + 1024L, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024);
         assertThat(quotaOver.isExceeded()).isTrue();
         assertThat(quotaOver.percentage()).isEqualTo(100.0);
+    }
+
+    @Test
+    @DisplayName("probing sees only the tiers an operator configured")
+    void probesOnlyTheConfiguredTiers() {
+        // Standing in for Velocity, which can answer about a node but cannot list nodes.
+        Predicate<String> holds = permission ->
+                permission.equals("gzmn.worlds.storage.7gb") || permission.equals("gzmn.worlds.storage.1gb");
+
+        // 7gb is granted but not configured, so probing cannot see it and 1gb is the best answer.
+        StorageQuota probed =
+                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "5gb", "10gb"), 500L);
+        assertThat(probed.limitBytes()).isEqualTo(1024L * 1024 * 1024);
+
+        // Configure it and the same player resolves to it.
+        StorageQuota configured =
+                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "7gb", "10gb"), 500L);
+        assertThat(configured.limitBytes()).isEqualTo(7L * 1024 * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("an enumerated permission list sees a tier nobody configured")
+    void enumeratedPermissionsSeeTiersNobodyConfigured() {
+        // What LuckPerms hands over: the resolved node list, needing no configuration at all.
+        long resolved = StorageQuotaResolver.resolveLimitBytes(
+                List.of("gzmn.worlds.join", "gzmn.worlds.storage.7gb"), false, 500L);
+        assertThat(resolved).isEqualTo(7L * 1024 * 1024 * 1024);
+    }
+
+    @Test
+    @DisplayName("probing falls back to the network default when no configured tier matches")
+    void probingFallsBackToTheDefaultWhenNoTierMatches() {
+        StorageQuota quota = StorageQuotaResolver.evaluate(
+                UUID.randomUUID(), 0L, permission -> false, List.of("1gb", "10gb"), 4096L);
+        assertThat(quota.limitBytes()).isEqualTo(4096L);
+        assertThat(quota.unlimited()).isFalse();
+    }
+
+    @Test
+    @DisplayName("probing honours the unlimited and admin exemptions")
+    void probingHonoursTheUnlimitedAndAdminNodes() {
+        StorageQuota unlimited = StorageQuotaResolver.evaluate(
+                UUID.randomUUID(),
+                9999L,
+                StorageQuotaResolver.PERMISSION_STORAGE_UNLIMITED::equals,
+                List.of("1gb"),
+                500L);
+        assertThat(unlimited.unlimited()).isTrue();
+        assertThat(unlimited.isExceeded()).isFalse();
+
+        StorageQuota admin = StorageQuotaResolver.evaluate(
+                UUID.randomUUID(), 9999L, StorageQuotaResolver.PERMISSION_ADMIN::equals, List.of("1gb"), 500L);
+        assertThat(admin.unlimited()).isTrue();
+    }
+
+    @Test
+    @DisplayName("configured tier suffixes become fully qualified permission nodes")
+    void candidatePermissionsQualifiesConfiguredTiers() {
+        assertThat(StorageQuotaResolver.candidatePermissions(List.of("1gb", " 10gb ", "", "  ")))
+                .containsExactly("gzmn.worlds.storage.1gb", "gzmn.worlds.storage.10gb");
     }
 
     @Test

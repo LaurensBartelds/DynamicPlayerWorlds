@@ -366,6 +366,7 @@ public final class PlayerWorldRepository extends Repository {
             long generation,
             @Nullable String nodeId,
             String manifestKey,
+            long storageBytes,
             int dataVersion,
             String mcVersion,
             ProfileRepository.Snapshot snapshot,
@@ -379,27 +380,35 @@ public final class PlayerWorldRepository extends Repository {
         Objects.requireNonNull(snapshot, "snapshot");
         Objects.requireNonNull(profiles, "profiles");
         Objects.requireNonNull(profileRepository, "profileRepository");
+        if (storageBytes < 0) {
+            throw new IllegalArgumentException("storageBytes must not be negative: " + storageBytes);
+        }
 
         return database.inTransaction(connection -> {
+            // storage_bytes moves with manifest_key, in one statement. The figure describes the
+            // manifest, so a commit that wrote one without the other would leave a player's
+            // quota measured against a snapshot that is no longer the current one (§4).
             int updated = execute(connection, """
                     UPDATE player_world
-                       SET manifest_key = ?,
-                           last_played  = now(),
-                           data_version = ?,
-                           mc_version   = ?,
-                           last_node    = COALESCE(?, last_node)
+                       SET manifest_key  = ?,
+                           storage_bytes = ?,
+                           last_played   = now(),
+                           data_version  = ?,
+                           mc_version    = ?,
+                           last_node     = COALESCE(?, last_node)
                      WHERE id = ?
                        AND (?::text IS NULL OR assigned_node IS NULL OR assigned_node = ?)
                        AND generation = ?
                     """, statement -> {
                 statement.setString(1, manifestKey);
-                statement.setInt(2, dataVersion);
-                statement.setString(3, mcVersion);
-                statement.setString(4, nodeId);
-                statement.setObject(5, id.value());
-                statement.setString(6, nodeId);
+                statement.setLong(2, storageBytes);
+                statement.setInt(3, dataVersion);
+                statement.setString(4, mcVersion);
+                statement.setString(5, nodeId);
+                statement.setObject(6, id.value());
                 statement.setString(7, nodeId);
-                statement.setLong(8, generation);
+                statement.setString(8, nodeId);
+                statement.setLong(9, generation);
             });
 
             if (updated != 1) {

@@ -370,6 +370,7 @@ class LeaseFencingTest {
                     2L,
                     "node-B",
                     nodeBManifestKey,
+                    1024L,
                     Platform.BUILD_DATA_VERSION,
                     "26.2",
                     snapB,

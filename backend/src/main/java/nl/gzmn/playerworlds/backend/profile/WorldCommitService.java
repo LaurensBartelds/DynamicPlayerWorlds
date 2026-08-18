@@ -356,6 +356,7 @@ public final class WorldCommitService {
                     manifestToCommit.generation(),
                     nodeId,
                     manifestToCommit.manifestKey(),
+                    manifestToCommit.totalBytes(),
                     manifestToCommit.dataVersion(),
                     manifestToCommit.mcVersion(),
                     snapshot,

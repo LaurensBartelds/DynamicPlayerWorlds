@@ -22,20 +22,6 @@ public final class StorageQuotaResolver {
     private static final Pattern STORAGE_PERMISSION_PATTERN =
             Pattern.compile("^gzmn\\.worlds\\.storage\\.(\\d+)(b|kb|mb|gb|tb)?$", Pattern.CASE_INSENSITIVE);
 
-    /**
-     * Tier nodes probed when a permission backend cannot be enumerated.
-     *
-     * <p>Velocity's {@code PermissionSubject} answers one node at a time — {@code hasPermission}
-     * and {@code getPermissionValue} — and offers no way to list what a player holds. A caller
-     * with only that API therefore cannot scan for {@code gzmn.worlds.storage.*} and has to ask
-     * about specific nodes instead. This is the ladder it asks about: any tier here is honoured,
-     * and {@link #parsePermissionLimit} still governs what each one means, so a backend that
-     * <em>can</em> enumerate keeps the fully dynamic behaviour through the collection overloads.
-     */
-    private static final List<String> CANDIDATE_TIERS = List.of(
-            "100mb", "250mb", "500mb", "750mb", "1gb", "2gb", "3gb", "5gb", "10gb", "15gb", "20gb", "25gb", "50gb",
-            "75gb", "100gb", "250gb", "500gb", "1tb", "2tb", "5tb");
-
     private static final long BYTES_IN_KB = 1024L;
     private static final long BYTES_IN_MB = 1024L * 1024L;
     private static final long BYTES_IN_GB = 1024L * 1024L * 1024L;
@@ -157,39 +143,49 @@ public final class StorageQuotaResolver {
     }
 
     /**
-     * Storage permission nodes worth probing, highest-value last.
+     * Turns configured tier suffixes into the permission nodes that name them.
      *
-     * @return unmodifiable list of fully qualified permission nodes
+     * @param tiers suffixes such as {@code 10gb}, from {@code storage.quota-tiers}
+     * @return fully qualified permission nodes
      */
-    public static List<String> candidatePermissions() {
-        return CANDIDATE_TIERS.stream()
-                .map(tier -> PERMISSION_STORAGE_PREFIX + tier)
+    public static List<String> candidatePermissions(Collection<String> tiers) {
+        Objects.requireNonNull(tiers, "tiers");
+        return tiers.stream()
+                .filter(tier -> tier != null && !tier.isBlank())
+                .map(tier -> PERMISSION_STORAGE_PREFIX + tier.strip())
                 .toList();
     }
 
     /**
      * Evaluates a {@link StorageQuota} against a permission backend that can only be asked about
-     * one node at a time, such as Velocity's.
+     * one node at a time, such as Velocity's own.
      *
-     * <p>Probes {@link #candidatePermissions()} and evaluates the highest node the player actually
-     * holds. Use the {@link #evaluate(UUID, long, Collection, boolean, long)} overload wherever the
-     * granted permissions can be listed outright — that one sees tiers this ladder does not name.
+     * <p>Velocity's {@code PermissionSubject} answers {@code hasPermission} per node and cannot
+     * list what a player holds, so a tier that is neither configured nor asked about is invisible
+     * here. Prefer {@link #evaluate(UUID, long, Collection, boolean, long)} wherever the granted
+     * permissions can be enumerated — LuckPerms can, and through that overload every tier works
+     * whether or not an operator remembered to configure it.
      *
      * @param playerUuid player UUID
      * @param usedBytes total storage used by the player
      * @param holdsPermission answers whether the player holds one permission node
+     * @param tiers configured tier suffixes to ask about
      * @param defaultLimitBytes default network policy quota limit
      * @return evaluated StorageQuota
      */
     public static StorageQuota evaluate(
-            UUID playerUuid, long usedBytes, Predicate<String> holdsPermission, long defaultLimitBytes) {
+            UUID playerUuid,
+            long usedBytes,
+            Predicate<String> holdsPermission,
+            Collection<String> tiers,
+            long defaultLimitBytes) {
         Objects.requireNonNull(playerUuid, "playerUuid");
         Objects.requireNonNull(holdsPermission, "holdsPermission");
 
         boolean unlimited =
                 holdsPermission.test(PERMISSION_ADMIN) || holdsPermission.test(PERMISSION_STORAGE_UNLIMITED);
         List<String> held =
-                candidatePermissions().stream().filter(holdsPermission).toList();
+                candidatePermissions(tiers).stream().filter(holdsPermission).toList();
         return new StorageQuota(playerUuid, usedBytes, resolveLimitBytes(held, false, defaultLimitBytes), unlimited);
     }
 

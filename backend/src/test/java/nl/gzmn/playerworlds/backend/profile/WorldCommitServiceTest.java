@@ -353,6 +353,7 @@ class WorldCommitServiceTest {
                 0L,
                 "node-test",
                 "worlds/" + worldId.value() + "/manifest/0-2.json",
+                1024L,
                 4903,
                 "26.2",
                 snap2,

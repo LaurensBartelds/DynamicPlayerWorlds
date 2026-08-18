@@ -40,6 +40,17 @@ public record Manifest(
     }
 
     /**
+     * Total size of every file this manifest names, which is the world's live footprint (§4).
+     *
+     * <p>What {@code player_world.storage_bytes} holds while a world is READY, and so what a
+     * player's storage quota is measured against. Derived from the manifest rather than from
+     * the folder on disk because the manifest is what actually occupies object storage.
+     */
+    public long totalBytes() {
+        return entries.values().stream().mapToLong(ManifestEntry::sizeBytes).sum();
+    }
+
+    /**
      * Relative S3 key where this manifest is stored.
      */
     public String manifestKey() {
