@@ -139,7 +139,7 @@ public final class MenuChannelListener {
     /**
      * Maps an internal {@link ActionResult.Failed#code()} string to a wire protocol {@link FailureCode}.
      */
-    public static FailureCode mapFailureCode(String code) {
+    public static FailureCode mapFailureCode(@org.jspecify.annotations.Nullable String code) {
         if (code == null) {
             return FailureCode.GENERIC_ERROR;
         }
