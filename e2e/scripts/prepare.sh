@@ -140,6 +140,25 @@ cp "${E2E_ROOT}/config/velocity/velocity.toml" "${VEL_DIR}/velocity.toml"
 # forwarding.secret must be exactly the secret string, no trailing commentary.
 printf '%s' "${E2E_FORWARDING_SECRET}" > "${VEL_DIR}/forwarding.secret"
 cp "${PROXY_JAR}" "${VEL_DIR}/plugins/"
+
+# gzmn-worlds-proxy config. Without this the plugin writes its bundled default,
+# which points at 127.0.0.1 — nothing, inside the Velocity container — so the
+# database bootstrap times out and the plugin logs "/world will not be
+# registered" and carries on. Velocity still forwards a lobby join, so the F11
+# smoke passed anyway and the proxy half of the stack was never exercised at
+# all: no placement (MN-14), no /world, no /world admin.
+mkdir -p "${VEL_DIR}/plugins/gzmn-worlds-proxy"
+cat > "${VEL_DIR}/plugins/gzmn-worlds-proxy/config.toml" <<EOF
+lobby-server = "lobby"
+
+[database]
+url = "jdbc:postgresql://postgres:5432/gzmn_worlds"
+user = "gzmn"
+password = "${E2E_POSTGRES_PASSWORD}"
+pool-size = 8
+connection-timeout-seconds = 10
+EOF
+
 echo "staged velocity"
 
 echo "prepare complete"
