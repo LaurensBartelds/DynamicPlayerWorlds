@@ -84,6 +84,7 @@ public final class WorldCommand {
 
     /** Permissions per specification section 6. */
     public static final String CREATE_PERMISSION = "gzmn.worlds.create";
+
     public static final String JOIN_PERMISSION = "gzmn.worlds.join";
     public static final String PUBLIC_PERMISSION = "gzmn.worlds.public";
     public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
@@ -203,7 +204,8 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.promote(caller, StringArgumentType.getString(context, "player"));
+                                        var _ = actions.promote(
+                                                caller, StringArgumentType.getString(context, "player"));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -253,7 +255,8 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.create(caller, StringArgumentType.getString(context, "name"), null);
+                                        var _ = actions.create(
+                                                caller, StringArgumentType.getString(context, "name"), null);
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -302,7 +305,8 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.join(caller, StringArgumentType.getString(context, "owner"), null);
+                                        var _ = actions.join(
+                                                caller, StringArgumentType.getString(context, "owner"), null);
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -392,7 +396,8 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.ban(caller, StringArgumentType.getString(context, "player"), null);
+                                        var _ = actions.ban(
+                                                caller, StringArgumentType.getString(context, "player"), null);
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -891,8 +896,7 @@ public final class WorldCommand {
     }
 
     /** {@code /world admin restore <id> [player]} — FR-36, optionally handing the world on. */
-    private void adminRestore(
-            CommandSource source, String rawId, @Nullable String targetName) {
+    private void adminRestore(CommandSource source, String rawId, @Nullable String targetName) {
         Optional<WorldId> parsed = parseWorldId(source, rawId);
         if (parsed.isEmpty()) {
             return;
@@ -970,8 +974,8 @@ public final class WorldCommand {
         });
     }
 
-    private @Nullable String adminNodeOrExplain(
-            CommandSource source, PlayerWorld world, NetworkPolicy current) throws SQLException {
+    private @Nullable String adminNodeOrExplain(CommandSource source, PlayerWorld world, NetworkPolicy current)
+            throws SQLException {
         if (world.assignedNode() != null) {
             return world.assignedNode();
         }

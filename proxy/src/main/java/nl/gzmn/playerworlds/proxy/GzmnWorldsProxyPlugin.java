@@ -206,13 +206,7 @@ public final class GzmnWorldsProxyPlugin {
                 this::policy);
 
         WorldCommand command = new WorldCommand(
-                worldActions,
-                proxy,
-                pools,
-                worldRepository,
-                placementService,
-                nodeCommands,
-                this::policy);
+                worldActions, proxy, pools, worldRepository, placementService, nodeCommands, this::policy);
         // metaBuilder rather than register(BrigadierCommand): the single-argument
         // form is deprecated, and naming the owning plugin is what lets Velocity
         // attribute the command in /velocity dump and unregister it cleanly.

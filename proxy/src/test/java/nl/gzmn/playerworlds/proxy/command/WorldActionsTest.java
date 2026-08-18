@@ -6,8 +6,6 @@ import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import java.lang.reflect.Proxy;
-import java.time.Duration;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -29,7 +27,6 @@ import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
-import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
@@ -114,8 +111,7 @@ class WorldActionsTest {
         playersByUuid.put(owner, player);
 
         for (int i = 0; i < policy.maxWorldsPerPlayer(); i++) {
-            worlds.create(
-                    WorldId.random(), owner, "world" + i, 12345L, 5000, Visibility.PRIVATE);
+            worlds.create(WorldId.random(), owner, "world" + i, 12345L, 5000, Visibility.PRIVATE);
         }
 
         ActionResult result = actions.create(player, "extra-world", null).get();
@@ -342,8 +338,10 @@ class WorldActionsTest {
 
         ActionResult result = actions.showSettings(player).get();
         assertThat(result).isInstanceOf(ActionResult.Ok.class);
-        assertThat(messagesByPlayer.get(owner)).anySatisfy(
-                comp -> assertThat(PlainTextComponentSerializer.plainText().serialize(comp)).contains("Settings for 'myworld':"));
+        assertThat(messagesByPlayer.get(owner))
+                .anySatisfy(comp -> assertThat(
+                                PlainTextComponentSerializer.plainText().serialize(comp))
+                        .contains("Settings for 'myworld':"));
     }
 
     @Test
@@ -367,9 +365,7 @@ class WorldActionsTest {
 
     private Player mockPlayer(UUID uuid, String name, Predicate<String> permissions) {
         return (Player) Proxy.newProxyInstance(
-                getClass().getClassLoader(),
-                new Class<?>[] {Player.class},
-                (proxyObj, method, args) -> {
+                getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getUniqueId")) return uuid;
                     if (method.getName().equals("getUsername")) return name;
                     if (method.getName().equals("hasPermission")) {
@@ -388,9 +384,7 @@ class WorldActionsTest {
     private ProxyServer mockProxy(
             Map<UUID, Player> byUuid, Map<String, Player> byName, Map<String, RegisteredServer> servers) {
         return (ProxyServer) Proxy.newProxyInstance(
-                getClass().getClassLoader(),
-                new Class<?>[] {ProxyServer.class},
-                (proxyObj, method, args) -> {
+                getClass().getClassLoader(), new Class<?>[] {ProxyServer.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getPlayer")) {
                         if (args[0] instanceof UUID id) return Optional.ofNullable(byUuid.get(id));
                         if (args[0] instanceof String n) return Optional.ofNullable(byName.get(n));
