@@ -82,6 +82,7 @@ public final class WorldLifecycleService {
     private final WorldsMetrics metrics;
     private final Supplier<NetworkPolicy> policy;
     private final Path worldContainer;
+    private final @Nullable String nodeId;
     private final int nodeDataVersion;
     private final @Nullable WorldDownloader worldDownloader;
     private final @Nullable ObjectStore objectStore;
@@ -99,6 +100,7 @@ public final class WorldLifecycleService {
             WorldsMetrics metrics,
             Supplier<NetworkPolicy> policy,
             Path worldContainer,
+            @Nullable String nodeId,
             @Nullable WorldDownloader worldDownloader,
             @Nullable ObjectStore objectStore,
             @Nullable WorldCommitService commitService,
@@ -113,11 +115,45 @@ public final class WorldLifecycleService {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
+        this.nodeId = nodeId;
         this.nodeDataVersion = platform.identity().dataVersion();
         this.worldDownloader = worldDownloader;
         this.objectStore = objectStore;
         this.commitService = commitService;
         this.cache = cache;
+    }
+
+    public WorldLifecycleService(
+            PlayerWorldRepository worlds,
+            MembershipRepository membership,
+            MembershipCache membershipCache,
+            PluginExecutors executors,
+            Platform platform,
+            WorldFolders folders,
+            WorldRegistry registry,
+            WorldsMetrics metrics,
+            Supplier<NetworkPolicy> policy,
+            Path worldContainer,
+            @Nullable WorldDownloader worldDownloader,
+            @Nullable ObjectStore objectStore,
+            @Nullable WorldCommitService commitService,
+            @Nullable LocalObjectCache cache) {
+        this(
+                worlds,
+                membership,
+                membershipCache,
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                policy,
+                worldContainer,
+                null,
+                worldDownloader,
+                objectStore,
+                commitService,
+                cache);
     }
 
     public @Nullable WorldDownloader worldDownloader() {
@@ -158,6 +194,7 @@ public final class WorldLifecycleService {
                 metrics,
                 policy,
                 worldContainer,
+                null,
                 null,
                 null,
                 null,
@@ -219,7 +256,9 @@ public final class WorldLifecycleService {
                     name,
                     chosenSeed,
                     current.defaultBorderRadius(),
-                    Visibility.valueOf(current.defaultVisibility()));
+                    Visibility.valueOf(current.defaultVisibility()),
+                    nodeId,
+                    current.leaseDuration());
             return Inserted.of(row);
         } catch (SQLException e) {
             throw new CompletionException(e);
@@ -397,6 +436,7 @@ public final class WorldLifecycleService {
                         "world was last written by data version " + worldVersion + "; this node is at "
                                 + nodeDataVersion,
                         id);
+                metrics.leaseAcquireDenied();
                 return Checked.refused(
                         new LoadOutcome.TooNew(id, worldVersion == null ? 0 : worldVersion, nodeDataVersion));
             }
@@ -404,6 +444,43 @@ public final class WorldLifecycleService {
             if (loaded >= current.maxWorldsPerNode()) {
                 return Checked.refused(new LoadOutcome.NodeFull(loaded, current.maxWorldsPerNode()));
             }
+
+            // Lease handling (MN-8, MN-14)
+            if (nodeId != null) {
+                boolean heldByUs = row.assignedNode() != null
+                        && row.assignedNode().equals(nodeId)
+                        && row.leaseExpires() != null
+                        && row.leaseExpires().isAfter(java.time.Instant.now());
+
+                if (!heldByUs) {
+                    Optional<PlayerWorldRepository.LeaseGrant> grant =
+                            worlds.acquireLease(id, nodeId, nodeDataVersion, current.leaseDuration());
+                    if (grant.isEmpty()) {
+                        metrics.leaseAcquireDenied();
+                        Optional<PlayerWorld> refetched = worlds.findById(id);
+                        if (refetched.isPresent()
+                                && refetched.get().assignedNode() != null
+                                && !refetched.get().assignedNode().equals(nodeId)
+                                && refetched.get().leaseExpires() != null
+                                && refetched.get().leaseExpires().isAfter(java.time.Instant.now())) {
+                            return Checked.refused(new LoadOutcome.Failed(
+                                    id,
+                                    "World is currently leased to node "
+                                            + refetched.get().assignedNode()));
+                        }
+                        return Checked.refused(new LoadOutcome.Failed(id, "Could not acquire lease for world"));
+                    }
+                    metrics.leaseAcquireOk();
+                    events.info(
+                            LogEvent.LEASE_ACQUIRE,
+                            "acquired lease for world " + row.name() + " gen "
+                                    + grant.get().generation(),
+                            id);
+                    row = row.withLease(
+                            nodeId, grant.get().expiresAt(), grant.get().generation());
+                }
+            }
+
             return Checked.of(row);
         } catch (SQLException e) {
             throw new CompletionException(e);
@@ -609,8 +686,14 @@ public final class WorldLifecycleService {
         executors.db().execute(() -> {
             try {
                 worlds.touchLastPlayed(loaded.id());
+                if (nodeId != null) {
+                    boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
+                    if (released) {
+                        events.info(LogEvent.LEASE_RELEASE, "lease released for world " + loaded.name(), loaded.id());
+                    }
+                }
             } catch (SQLException e) {
-                log.warn("could not record last_played after unloading world {}", loaded.id(), e);
+                log.warn("could not record last_played or release lease after unloading world {}", loaded.id(), e);
             }
         });
     }

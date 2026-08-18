@@ -372,6 +372,138 @@ class PlayerWorldRepositoryTest {
         assertThat(updated.manifestKey()).isEqualTo("worlds/" + id.value() + "/manifest/0-0.json");
     }
 
+    @Test
+    @DisplayName("acquireLease grants lease and increments generation for unleased world (MN-8)")
+    void acquireLeaseGrantsForUnleasedWorld() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "lease-test", 1L);
+
+        Optional<PlayerWorldRepository.LeaseGrant> grant =
+                worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3));
+
+        assertThat(grant).isPresent();
+        assertThat(grant.get().generation()).isEqualTo(1L);
+        assertThat(grant.get().expiresAt()).isAfter(java.time.Instant.now());
+
+        PlayerWorld loaded = worlds.findById(id).orElseThrow();
+        assertThat(loaded.assignedNode()).isEqualTo("node-1");
+        assertThat(loaded.generation()).isEqualTo(1L);
+        assertThat(loaded.leaseExpires()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("acquireLease refuses acquisition when active lease is held by another node (MN-8)")
+    void acquireLeaseRefusesActiveLease() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "lease-contended", 1L);
+
+        Optional<PlayerWorldRepository.LeaseGrant> grant1 =
+                worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3));
+        assertThat(grant1).isPresent();
+
+        Optional<PlayerWorldRepository.LeaseGrant> grant2 =
+                worlds.acquireLease(id, "node-2", 4903, java.time.Duration.ofMinutes(3));
+        assertThat(grant2).isEmpty();
+    }
+
+    @Test
+    @DisplayName("acquireLease succeeds after existing lease expires and increments generation (MN-8)")
+    void acquireLeaseSucceedsAfterExpiration() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "lease-expired", 1L);
+
+        // Node 1 acquired lease in the past (already expired)
+        updateColumn(
+                "UPDATE player_world SET assigned_node = 'node-1', lease_expires = now() - interval '10 seconds', generation = 1 WHERE id = ?",
+                null,
+                id);
+
+        Optional<PlayerWorldRepository.LeaseGrant> grant =
+                worlds.acquireLease(id, "node-2", 4903, java.time.Duration.ofMinutes(3));
+
+        assertThat(grant).isPresent();
+        assertThat(grant.get().generation()).isEqualTo(2L);
+
+        PlayerWorld loaded = worlds.findById(id).orElseThrow();
+        assertThat(loaded.assignedNode()).isEqualTo("node-2");
+        assertThat(loaded.generation()).isEqualTo(2L);
+    }
+
+    @Test
+    @DisplayName("acquireLease refuses worlds with newer DataVersion (MN-26)")
+    void acquireLeaseRefusesNewerDataVersion() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "lease-version", 1L);
+        setDataVersion(id, 4905);
+
+        // Node with older dataVersion 4903 attempts acquisition
+        Optional<PlayerWorldRepository.LeaseGrant> grant =
+                worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3));
+
+        assertThat(grant).isEmpty();
+
+        // Node with compatible dataVersion 4905 attempts acquisition
+        Optional<PlayerWorldRepository.LeaseGrant> grantOk =
+                worlds.acquireLease(id, "node-1", 4905, java.time.Duration.ofMinutes(3));
+
+        assertThat(grantOk).isPresent();
+    }
+
+    @Test
+    @DisplayName("renewLease extends lease_expires when node and generation match (MN-9)")
+    void renewLeaseExtendsExpiration() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "renew-test", 1L);
+        PlayerWorldRepository.LeaseGrant grant = worlds.acquireLease(
+                        id, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+
+        Optional<java.time.Instant> renewed =
+                worlds.renewLease(id, "node-1", grant.generation(), java.time.Duration.ofMinutes(3));
+
+        assertThat(renewed).isPresent();
+        assertThat(renewed.get()).isAfterOrEqualTo(grant.expiresAt().minusSeconds(1));
+    }
+
+    @Test
+    @DisplayName("renewLease fails when generation or node mismatch (MN-9, MN-10b)")
+    void renewLeaseFailsOnMismatch() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "renew-mismatch", 1L);
+        PlayerWorldRepository.LeaseGrant grant = worlds.acquireLease(
+                        id, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+
+        // Wrong generation
+        assertThat(worlds.renewLease(id, "node-1", grant.generation() + 1, java.time.Duration.ofMinutes(3)))
+                .isEmpty();
+
+        // Wrong node
+        assertThat(worlds.renewLease(id, "node-2", grant.generation(), java.time.Duration.ofMinutes(3)))
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("releaseLease clears assigned_node and lease_expires on clean unload (MN-12)")
+    void releaseLeaseClearsAssignment() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "release-test", 1L);
+        PlayerWorldRepository.LeaseGrant grant = worlds.acquireLease(
+                        id, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+
+        boolean released = worlds.releaseLease(id, "node-1", grant.generation());
+        assertThat(released).isTrue();
+
+        PlayerWorld loaded = worlds.findById(id).orElseThrow();
+        assertThat(loaded.assignedNode()).isNull();
+        assertThat(loaded.leaseExpires()).isNull();
+        assertThat(loaded.generation()).isEqualTo(grant.generation());
+
+        // Second release or mismatch returns false
+        assertThat(worlds.releaseLease(id, "node-1", grant.generation())).isFalse();
+    }
+
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {
         return database.inTransaction(connection ->
                 worlds.insertCreating(connection, id, owner, name, id.folder(), seed, 5000, Visibility.PRIVATE));
@@ -388,8 +520,12 @@ class PlayerWorldRepositoryTest {
     private void updateColumn(String sql, Object value, WorldId id) throws SQLException {
         database.inTransaction((Connection connection) -> {
             try (var statement = connection.prepareStatement(sql)) {
-                statement.setObject(1, value);
-                statement.setObject(2, id.value());
+                if (value != null) {
+                    statement.setObject(1, value);
+                    statement.setObject(2, id.value());
+                } else {
+                    statement.setObject(1, id.value());
+                }
                 statement.executeUpdate();
             }
             return null;

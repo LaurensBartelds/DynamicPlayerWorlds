@@ -242,7 +242,9 @@ public final class WorldCommand {
                     name,
                     seed,
                     current.defaultBorderRadius(),
-                    nl.gzmn.playerworlds.core.model.Visibility.valueOf(current.defaultVisibility()));
+                    nl.gzmn.playerworlds.core.model.Visibility.valueOf(current.defaultVisibility()),
+                    node.get().nodeId(),
+                    current.leaseDuration());
 
             transfers.route(owner, world.id(), node.get().nodeId(), world.generation());
             info(caller, "creating '" + name + "' on " + node.get().nodeId() + "; this may take a few seconds...");
@@ -429,7 +431,25 @@ public final class WorldCommand {
                 return;
             }
 
-            transfers.route(caller.getUniqueId(), world.id(), node.get().nodeId(), world.generation());
+            // MN-14: If the world does not hold a live lease on the target node, acquire it before routing
+            long routingGeneration = world.generation();
+            boolean liveLease = world.assignedNode() != null
+                    && world.assignedNode().equals(node.get().nodeId())
+                    && world.leaseExpires() != null
+                    && world.leaseExpires().isAfter(java.time.Instant.now());
+
+            if (!liveLease) {
+                int nodeDataVersion = node.get().dataVersion();
+                Optional<PlayerWorldRepository.LeaseGrant> grant =
+                        worlds.acquireLease(world.id(), node.get().nodeId(), nodeDataVersion, current.leaseDuration());
+                if (grant.isEmpty()) {
+                    error(caller, "could not acquire a lease for that world; please try again");
+                    return;
+                }
+                routingGeneration = grant.get().generation();
+            }
+
+            transfers.route(caller.getUniqueId(), world.id(), node.get().nodeId(), routingGeneration);
             var targetServer = registry.server(node.get().nodeId());
             if (targetServer.isEmpty()) {
                 error(caller, "that server is not routable right now");

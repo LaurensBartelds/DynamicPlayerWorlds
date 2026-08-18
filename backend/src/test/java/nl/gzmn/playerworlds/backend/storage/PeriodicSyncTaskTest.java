@@ -115,7 +115,8 @@ class PeriodicSyncTaskTest {
     }
 
     private void flushExecutors() throws Exception {
-        for (int i = 0; i < 15; i++) {
+        long deadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline) {
             Runnable task;
             while ((task = mainTasks.poll()) != null) {
                 task.run();
@@ -125,7 +126,17 @@ class PeriodicSyncTaskTest {
             while ((task = mainTasks.poll()) != null) {
                 task.run();
             }
-            Thread.sleep(30);
+            boolean anyCommitting = false;
+            for (LoadedWorld world : registry.loadedWorlds()) {
+                if (commitService.isCommitting(world.id())) {
+                    anyCommitting = true;
+                    break;
+                }
+            }
+            if (!anyCommitting && mainTasks.isEmpty()) {
+                break;
+            }
+            Thread.sleep(50);
         }
     }
 

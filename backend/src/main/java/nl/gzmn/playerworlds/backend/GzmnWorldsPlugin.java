@@ -17,6 +17,8 @@ import nl.gzmn.playerworlds.backend.config.BackendConfig;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
+import nl.gzmn.playerworlds.backend.lease.LeaseCoordinator;
+import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.node.TransferJoinListener;
 import nl.gzmn.playerworlds.backend.platform.Platform;
@@ -60,6 +62,7 @@ import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.storage.FileCloner;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.ObjectStore;
+import nl.gzmn.playerworlds.core.storage.QuarantineManager;
 import nl.gzmn.playerworlds.core.storage.ReflinkFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
@@ -117,8 +120,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
     private @Nullable NodeHeartbeat nodeHeartbeat;
+    private @Nullable LeaseCoordinator leaseCoordinator;
+    private @Nullable SelfFencingHandler fencingHandler;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
+    private @Nullable NodeConfig nodeConfig;
 
     /**
      * Last policy read from the database.
@@ -244,6 +250,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + "); meters remain in-process only");
         }
 
+        this.nodeConfig = node;
         startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report);
         schedulePolicyRefresh(openedDatabase, pools);
 
@@ -333,6 +340,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldsMetrics worldsMetrics,
             NodeConfig node,
             CapabilityReport report) {
+        // MN-13 & MN-5a: Startup quarantine sweep for crash debris and stale snapshot directories
+        try {
+            QuarantineManager.sweepStartup(node.scratchPath(), node.quarantinePath(), java.util.Set.of());
+        } catch (Exception e) {
+            getLogger().warning(() -> "could not complete startup quarantine sweep: " + e.getMessage());
+        }
+
         FileCloner cloner = new ReflinkFileCloner(report.reflink());
         LocalObjectCache objectCache = new LocalObjectCache(node.cachePath(), cloner);
 
@@ -365,6 +379,26 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 node.nodeId());
         this.commitService = worldCommitService;
 
+        SelfFencingHandler fencing = new SelfFencingHandler(
+                worldRegistry,
+                worldFolders,
+                selected,
+                pools,
+                worldCommitService,
+                new NodeCommandRepository(openedDatabase),
+                worldsMetrics,
+                node.scratchPath(),
+                node.quarantinePath(),
+                this::policy);
+        this.fencingHandler = fencing;
+        worldCommitService.setRegistry(worldRegistry);
+        worldCommitService.setFencingHandler(fencing);
+
+        LeaseCoordinator leases = new LeaseCoordinator(
+                node.nodeId(), worldRegistry, worldRepository, fencing, pools, this::policy, node.heartbeatInterval());
+        this.leaseCoordinator = leases;
+        leases.start(pools.sched());
+
         MembershipCache membershipCache = new MembershipCache();
         PendingTransferRepository transferRepository = new PendingTransferRepository(openedDatabase);
         NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
@@ -380,6 +414,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldsMetrics,
                 this::policy,
                 node.scratchPath(),
+                node.nodeId(),
                 worldDownloader,
                 store,
                 worldCommitService,
@@ -617,6 +652,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
      * implement {@code getWorldContainer()}. Production always asks the server:
      * there is no other directory Bukkit will create a world in.
      */
+    public @Nullable LeaseCoordinator leaseCoordinator() {
+        return leaseCoordinator;
+    }
+
+    public @Nullable SelfFencingHandler fencingHandler() {
+        return fencingHandler;
+    }
+
     protected Path worldContainer() {
         return getServer().getWorldContainer().toPath();
     }
@@ -627,12 +670,16 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // still accept it, then drain the pools, then close the database, then
         // drop the main-thread mark so a late callback cannot look like main.
 
-        // FR-28: commit a final snapshot for all loaded worlds synchronously under bounded timeout
+        // FR-28 & MN-12: commit final snapshot and release lease for all loaded worlds synchronously
         WorldRegistry reg = this.registry;
         WorldCommitService commits = this.commitService;
+        PluginExecutors pools = this.executors;
+        Database db = this.database;
+        NodeConfig cfg = this.nodeConfig;
         if (commits != null && reg != null) {
+            List<LoadedWorld> loadedList = List.copyOf(reg.loadedWorlds());
             List<CompletableFuture<Void>> futures = new ArrayList<>();
-            for (LoadedWorld loaded : reg.loadedWorlds()) {
+            for (LoadedWorld loaded : loadedList) {
                 try {
                     futures.add(commits.requestCommit(loaded.id()));
                 } catch (Exception e) {
@@ -652,6 +699,26 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                     getLogger().warning(() -> "shutdown commit failed: " + e.getMessage());
                 }
             }
+
+            // Cleanly release held leases in DB (MN-12)
+            if (db != null && pools != null && cfg != null) {
+                PlayerWorldRepository repo = new PlayerWorldRepository(db);
+                for (LoadedWorld loaded : loadedList) {
+                    try {
+                        BoundedOperations.run(pools.db(), Duration.ofSeconds(2), () -> {
+                            try {
+                                repo.releaseLease(loaded.id(), cfg.nodeId(), loaded.generation());
+                            } catch (SQLException e) {
+                                getLogger()
+                                        .warning(() -> "could not release lease for world " + loaded.id() + ": "
+                                                + e.getMessage());
+                            }
+                        });
+                    } catch (Exception e) {
+                        getLogger().warning(() -> "timeout or error releasing lease for world " + loaded.id());
+                    }
+                }
+            }
         }
 
         IdleUnloadTask sweep = this.idleUnload;
@@ -664,7 +731,6 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // immediately rather than after the node ages out of the alive set.
         NodeHeartbeat heartbeat = this.nodeHeartbeat;
         this.nodeHeartbeat = null;
-        PluginExecutors pools = this.executors;
         if (heartbeat != null && pools != null) {
             try {
                 BoundedOperations.run(pools.db(), Duration.ofSeconds(2), heartbeat::deregister);

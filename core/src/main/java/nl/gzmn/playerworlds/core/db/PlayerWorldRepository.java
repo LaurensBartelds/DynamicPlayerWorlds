@@ -3,6 +3,7 @@ package nl.gzmn.playerworlds.core.db;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -20,13 +21,8 @@ import org.jspecify.annotations.Nullable;
 /**
  * JDBC access to {@code player_world}.
  *
- * <p>Milestone 1 uses the creation, lookup and state-transition statements. The
- * lease columns — {@code assigned_node}, {@code lease_expires},
- * {@code generation} — are deliberately not written here: MN-8's acquisition is
- * one conditional {@code UPDATE} whose predicate is the entire correctness
- * argument, and a milestone-1 statement that set those columns without that
- * predicate would read like a lease while providing none of its guarantees. They
- * arrive with milestone 7.
+ * <p>Handles world creation, lookups, state transitions, snapshot commits,
+ * and atomic lease operations (MN-8, MN-9, MN-12, MN-26).
  */
 public final class PlayerWorldRepository extends Repository {
 
@@ -41,15 +37,134 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Grant returned on successful lease acquisition (MN-8).
+     */
+    public record LeaseGrant(long generation, Instant expiresAt) {
+        public LeaseGrant {
+            Objects.requireNonNull(expiresAt, "expiresAt");
+        }
+    }
+
+    /**
+     * Atomically acquires a lease on a world for a node (MN-8, MN-26).
+     *
+     * <p>Acquisition succeeds only if the world is currently unassigned or its existing
+     * lease has expired, and the node's chunk DataVersion satisfies the version predicate.
+     *
+     * @return the new lease generation and expiration timestamp, or empty if acquisition failed
+     */
+    public Optional<LeaseGrant> acquireLease(
+            Connection connection, WorldId id, String nodeId, int myDataVersion, Duration leaseDuration)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+
+        return queryOne(
+                connection,
+                """
+                UPDATE player_world
+                   SET assigned_node = ?,
+                       lease_expires = now() + (? * interval '1 second'),
+                       generation    = generation + 1
+                 WHERE id = ?
+                   AND (assigned_node IS NULL OR lease_expires < now())
+                   AND (data_version IS NULL OR data_version <= ?)
+                RETURNING generation, lease_expires
+                """,
+                statement -> {
+                    statement.setString(1, nodeId);
+                    statement.setLong(2, leaseDuration.toSeconds());
+                    statement.setObject(3, id.value());
+                    statement.setInt(4, myDataVersion);
+                },
+                row -> new LeaseGrant(row.getLong("generation"), requireInstant(row, "lease_expires")));
+    }
+
+    public Optional<LeaseGrant> acquireLease(WorldId id, String nodeId, int myDataVersion, Duration leaseDuration)
+            throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+        return database.inTransaction(connection -> acquireLease(connection, id, nodeId, myDataVersion, leaseDuration));
+    }
+
+    /**
+     * Heartbeats to renew a lease currently held by this node under the specified generation (MN-9).
+     *
+     * @return the new expiration timestamp in DB time, or empty if the lease was lost / fenced
+     */
+    public Optional<Instant> renewLease(
+            Connection connection, WorldId id, String nodeId, long generation, Duration leaseDuration)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+
+        return queryOne(
+                connection,
+                """
+                UPDATE player_world
+                   SET lease_expires = now() + (? * interval '1 second')
+                 WHERE id = ?
+                   AND assigned_node = ?
+                   AND generation = ?
+                RETURNING lease_expires
+                """,
+                statement -> {
+                    statement.setLong(1, leaseDuration.toSeconds());
+                    statement.setObject(2, id.value());
+                    statement.setString(3, nodeId);
+                    statement.setLong(4, generation);
+                },
+                row -> requireInstant(row, "lease_expires"));
+    }
+
+    public Optional<Instant> renewLease(WorldId id, String nodeId, long generation, Duration leaseDuration)
+            throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+        return database.inTransaction(connection -> renewLease(connection, id, nodeId, generation, leaseDuration));
+    }
+
+    /**
+     * Atomically releases a held lease on clean unload or server shutdown (MN-12, FR-25, FR-28).
+     */
+    public boolean releaseLease(Connection connection, WorldId id, String nodeId, long generation) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+
+        return execute(connection, """
+                UPDATE player_world
+                   SET assigned_node = NULL,
+                       lease_expires = NULL
+                 WHERE id = ?
+                   AND assigned_node = ?
+                   AND generation = ?
+                """, statement -> {
+                    statement.setObject(1, id.value());
+                    statement.setString(2, nodeId);
+                    statement.setLong(3, generation);
+                })
+                == 1;
+    }
+
+    public boolean releaseLease(WorldId id, String nodeId, long generation) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(nodeId, "nodeId");
+        return database.inTransaction(connection -> releaseLease(connection, id, nodeId, generation));
+    }
+
+    /**
      * Inserts a world in {@link WorldState#CREATING} and returns the stored row.
      *
      * <p>Takes a {@link Connection} so the caller owns the transaction: a create
      * that fails during generation has to remove the row it inserted, and the cap
      * check in FR-1 has to see a consistent count.
-     *
-     * <p>{@code created_at} comes from {@code now()} rather than from the caller.
-     * Node clocks drift and every timestamp in this schema is compared against
-     * others written by other nodes (CONTRIBUTING.md rule 5).
      *
      * @param folder must equal {@code id.folder()} (FR-2a); passed explicitly so
      *     the derivation is visible at the call site rather than implied
@@ -62,7 +177,9 @@ public final class PlayerWorldRepository extends Repository {
             String folder,
             long seed,
             int borderRadius,
-            Visibility visibility)
+            Visibility visibility,
+            @Nullable String assignedNode,
+            @Nullable Duration initialLease)
             throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(id, "id");
@@ -79,6 +196,31 @@ public final class PlayerWorldRepository extends Repository {
         }
         if (borderRadius < 1) {
             throw new IllegalArgumentException("borderRadius must be at least 1, was: " + borderRadius);
+        }
+
+        if (assignedNode != null && initialLease != null) {
+            return queryOne(
+                            connection,
+                            """
+                            INSERT INTO player_world (
+                              id, owner_uuid, name, folder, seed, border_radius, visibility, state,
+                              assigned_node, lease_expires, generation
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATING', ?, now() + (? * interval '1 second'), 1)
+                            RETURNING
+                            """ + SELECT_COLUMNS,
+                            statement -> {
+                                statement.setObject(1, id.value());
+                                statement.setObject(2, ownerUuid);
+                                statement.setString(3, name);
+                                statement.setString(4, folder);
+                                statement.setLong(5, seed);
+                                statement.setInt(6, borderRadius);
+                                statement.setString(7, visibility.wire());
+                                statement.setString(8, assignedNode);
+                                statement.setLong(9, initialLease.toSeconds());
+                            },
+                            PlayerWorldRepository::mapRow)
+                    .orElseThrow(() -> new SQLException("INSERT player_world RETURNING produced no row"));
         }
 
         return queryOne(
@@ -102,35 +244,56 @@ public final class PlayerWorldRepository extends Repository {
                 .orElseThrow(() -> new SQLException("INSERT player_world RETURNING produced no row"));
     }
 
+    public PlayerWorld insertCreating(
+            Connection connection,
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            String folder,
+            long seed,
+            int borderRadius,
+            Visibility visibility)
+            throws SQLException {
+        return insertCreating(connection, id, ownerUuid, name, folder, seed, borderRadius, visibility, null, null);
+    }
+
     /**
      * Creates a world in its own transaction (FR-1, FR-2, FR-2a).
-     *
-     * <p>The overload above exists so a caller inside {@code :core} can compose
-     * the insert with other statements; this one exists so a caller <em>outside</em>
-     * {@code :core} never has to hold a {@link Connection}. Keeping JDBC types on
-     * this side of the module boundary is what the ArchUnit rule in each plugin
-     * module enforces, and it is the same rule that keeps NFR-2 structural.
-     *
-     * @param seed shared by all three dimensions (FR-2)
      */
     public PlayerWorld create(
-            WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, Visibility visibility)
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            long seed,
+            int borderRadius,
+            Visibility visibility,
+            @Nullable String assignedNode,
+            @Nullable Duration initialLease)
             throws SQLException {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(ownerUuid, "ownerUuid");
         MembershipRepository membership = new MembershipRepository(database);
         return database.inTransaction(connection -> {
-            PlayerWorld row =
-                    insertCreating(connection, id, ownerUuid, name, id.folder(), seed, borderRadius, visibility);
-            // The owner's own membership row, in the same transaction. FR-31a
-            // describes a transfer as updating "both player_world_member.role
-            // rows", so the owner is expected to have one; without it
-            // /world members omits the owner and FR-29's transfer finds only one
-            // row to move. player_world.owner_uuid stays authoritative either
-            // way — this row is the denormalised convenience, not the truth.
+            PlayerWorld row = insertCreating(
+                    connection,
+                    id,
+                    ownerUuid,
+                    name,
+                    id.folder(),
+                    seed,
+                    borderRadius,
+                    visibility,
+                    assignedNode,
+                    initialLease);
             membership.insertMember(connection, id, ownerUuid, Role.OWNER, null);
             return row;
         });
+    }
+
+    public PlayerWorld create(
+            WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, Visibility visibility)
+            throws SQLException {
+        return create(id, ownerUuid, name, seed, borderRadius, visibility, null, null);
     }
 
     /**
@@ -224,7 +387,7 @@ public final class PlayerWorldRepository extends Repository {
                            data_version = ?,
                            mc_version   = ?
                      WHERE id = ?
-                       AND (assigned_node IS NULL OR assigned_node = ?)
+                       AND (?::text IS NULL OR assigned_node IS NULL OR assigned_node = ?)
                        AND generation = ?
                     """, statement -> {
                 statement.setString(1, manifestKey);
@@ -232,7 +395,8 @@ public final class PlayerWorldRepository extends Repository {
                 statement.setString(3, mcVersion);
                 statement.setObject(4, id.value());
                 statement.setString(5, nodeId);
-                statement.setLong(6, generation);
+                statement.setString(6, nodeId);
+                statement.setLong(7, generation);
             });
 
             if (updated != 1) {

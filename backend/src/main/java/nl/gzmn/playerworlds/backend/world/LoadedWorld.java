@@ -1,12 +1,16 @@
 package nl.gzmn.playerworlds.backend.world;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
+import nl.gzmn.playerworlds.core.db.DbClock;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import org.jspecify.annotations.Nullable;
 
 /**
  * A player world as this node currently holds it.
@@ -37,12 +41,17 @@ public final class LoadedWorld {
 
     /**
      * The lease generation this world was loaded against (FR-11's fencing token).
-     *
-     * <p>Zero until milestone 7 makes leases real. Carried now because FR-11's
-     * transfer check compares against it, and a comparison that silently had
-     * nothing to compare would pass for the wrong reason.
      */
     private final long generation;
+
+    /** Expiration timestamp of the lease issued by the database. */
+    private volatile @Nullable Instant leaseExpires;
+
+    /** Local monotonic nanoTime of the last successful lease acquisition or renewal. */
+    private volatile long lastHeartbeatNanoTime;
+
+    /** Set when a lease heartbeat fails, indicating joins must be refused (MN-10b). */
+    private volatile boolean leaseDegraded;
 
     /**
      * Which of the three dimensions exist on disk and are loaded.
@@ -78,12 +87,18 @@ public final class LoadedWorld {
         }
         this.borderRadius = borderRadius;
         this.generation = generation;
+        this.lastHeartbeatNanoTime = System.nanoTime();
     }
 
     /** From a database row, keeping only what the tick thread cannot re-read. */
     public static LoadedWorld of(PlayerWorld row) {
         Objects.requireNonNull(row, "row");
-        return new LoadedWorld(row.id(), row.ownerUuid(), row.name(), row.seed(), row.borderRadius(), row.generation());
+        LoadedWorld world = new LoadedWorld(
+                row.id(), row.ownerUuid(), row.name(), row.seed(), row.borderRadius(), row.generation());
+        if (row.leaseExpires() != null) {
+            world.recordLeaseGrant(row.leaseExpires());
+        }
+        return world;
     }
 
     public WorldId id() {
@@ -106,6 +121,45 @@ public final class LoadedWorld {
     /** The lease generation this world was loaded against (FR-11). */
     public long generation() {
         return generation;
+    }
+
+    public @Nullable Instant leaseExpires() {
+        return leaseExpires;
+    }
+
+    public boolean isLeaseDegraded() {
+        return leaseDegraded;
+    }
+
+    /** Records initial lease acquisition grant or renewal. */
+    public void recordLeaseGrant(Instant expiresAt) {
+        this.leaseExpires = Objects.requireNonNull(expiresAt, "expiresAt");
+        this.lastHeartbeatNanoTime = System.nanoTime();
+        this.leaseDegraded = false;
+    }
+
+    /** Records a successful lease renewal heartbeat (MN-9). */
+    public void recordHeartbeatSuccess(Instant newExpiresAt) {
+        recordLeaseGrant(newExpiresAt);
+    }
+
+    /** Records that a lease heartbeat failed due to database unreachability (MN-10b). */
+    public void recordHeartbeatFailure() {
+        this.leaseDegraded = true;
+    }
+
+    /**
+     * Checks if this world has crossed its self-fencing deadline under an unreachable database (MN-10b).
+     *
+     * <p>Uses the local monotonic clock via {@code nanoTime} against the last successful
+     * database grant, avoiding wall-clock drift (CONTRIBUTING.md rule 5).
+     */
+    public boolean isFencedByDeadlineToDb(Duration leaseDuration, Duration safetyMargin) {
+        Duration timeout = leaseDuration.minus(safetyMargin);
+        if (timeout.isNegative() || timeout.isZero()) {
+            return true;
+        }
+        return DbClock.elapsedSince(lastHeartbeatNanoTime).compareTo(timeout) >= 0;
     }
 
     /** Overworld and end radius; the nether divides it (FR-3). */

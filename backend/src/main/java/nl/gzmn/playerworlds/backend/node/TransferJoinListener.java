@@ -135,10 +135,6 @@ public final class TransferJoinListener implements Listener {
                                 switch (outcome) {
                                     case LoadOutcome.Loaded loaded -> {
                                         if (loaded.world().generation() != transfer.generation()) {
-                                            // FR-11's generation check. Zero on both sides
-                                            // until milestone 7 makes leases real, but the
-                                            // comparison is live so an unexpected generation
-                                            // drops the player to safety immediately.
                                             log.warn(
                                                     "transfer generation mismatch for player {}: transfer had generation {}, loaded world {} has generation {}",
                                                     player.getUniqueId(),
@@ -150,6 +146,18 @@ public final class TransferJoinListener implements Listener {
                                                     transfer.worldId(),
                                                     "that world moved while you were connecting",
                                                     "World moved to another server");
+                                            return;
+                                        }
+                                        if (loaded.world().isLeaseDegraded()) {
+                                            log.warn(
+                                                    "refusing join for player {} to world {}: lease is degraded (DB unreachable)",
+                                                    player.getUniqueId(),
+                                                    transfer.worldId());
+                                            refuse(
+                                                    player,
+                                                    transfer.worldId(),
+                                                    "that world is currently unavailable due to database connectivity; try again shortly",
+                                                    "Database connectivity issue");
                                             return;
                                         }
                                         sendIn(player, loaded.world());

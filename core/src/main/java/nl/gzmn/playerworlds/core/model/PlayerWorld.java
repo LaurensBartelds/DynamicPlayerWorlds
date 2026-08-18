@@ -109,4 +109,26 @@ public record PlayerWorld(
         Integer worldVersion = dataVersion;
         return worldVersion == null || worldVersion <= nodeDataVersion;
     }
+
+    public PlayerWorld withLease(String node, Instant expires, long gen) {
+        return new PlayerWorld(
+                id,
+                ownerUuid,
+                name,
+                folder,
+                seed,
+                borderRadius,
+                visibility,
+                description,
+                settingsJson,
+                node,
+                expires,
+                gen,
+                manifestKey,
+                dataVersion,
+                mcVersion,
+                createdAt,
+                lastPlayed,
+                state);
+    }
 }

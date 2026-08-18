@@ -15,13 +15,15 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.function.Supplier;
+import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.WorldLifecycle;
 import nl.gzmn.playerworlds.backend.platform.WorldRuntime;
 import nl.gzmn.playerworlds.backend.storage.QuiesceWatchdog;
+import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
-import nl.gzmn.playerworlds.core.concurrent.MainThread;
+import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -43,29 +45,11 @@ import org.slf4j.LoggerFactory;
 
 /**
  * Orchestrates point-in-time quiesced snapshot commits unifying world data and player profiles
- * (FR-15, MN-3a, MN-5a, MN-5c, MN-6a).
- *
- * <p>FR-15's rule is that profiles are persisted <em>only</em> as part of a world
- * snapshot commit — never on a timer of their own — because profiles and world
- * data live in different storage systems and any skew between their durability
- * points is an item duplication bug in one direction and an item destruction bug
- * in the other (FR-15a). Committing both through one transaction removes the window.
- *
- * <p>Commits are single-flight per world through {@link CommitQueue}: a commit
- * in flight absorbs further triggers and schedules exactly one follow-up.
+ * in a single atomic transaction (FR-15, FR-15a, FR-15b, MN-6, MN-3a).
  */
 public final class WorldCommitService {
 
     private static final Logger log = LoggerFactory.getLogger(WorldCommitService.class);
-
-    /**
-     * The lease generation profiles are written under.
-     *
-     * <p>Zero until milestone 7 makes leases real. It is a real column and a real
-     * part of the key (FR-15b); what milestone 7 changes is where the number
-     * comes from, not what it means.
-     */
-    private static final long GENERATION_BEFORE_LEASES = 0L;
 
     private final ProfileRepository profiles;
     private final @Nullable PlayerWorldRepository playerWorlds;
@@ -81,6 +65,8 @@ public final class WorldCommitService {
     private final int dataVersion;
     private final String mcVersion;
     private final CommitQueue queue;
+    private @Nullable WorldRegistry registry;
+    private @Nullable SelfFencingHandler fencingHandler;
 
     private final Map<WorldId, Manifest> cachedManifests = new ConcurrentHashMap<>();
     private final Map<WorldId, Map<UUID, byte[]>> pendingDepartures = new ConcurrentHashMap<>();
@@ -113,6 +99,14 @@ public final class WorldCommitService {
         this.dataVersion = dataVersion;
         this.mcVersion = Objects.requireNonNull(mcVersion, "mcVersion");
         this.queue = new CommitQueue(this::runCommit);
+    }
+
+    public void setRegistry(WorldRegistry registry) {
+        this.registry = registry;
+    }
+
+    public void setFencingHandler(SelfFencingHandler fencingHandler) {
+        this.fencingHandler = fencingHandler;
     }
 
     public WorldCommitService(
@@ -205,7 +199,6 @@ public final class WorldCommitService {
      */
     private CompletableFuture<Void> runCommit(WorldId worldId) {
         if (snapshotEngine == null || playerWorlds == null) {
-            // Fallback for setups without object storage / repository integration
             CompletableFuture<Map<UUID, byte[]>> captured = new CompletableFuture<>();
             executors.main().execute(() -> {
                 try {
@@ -219,36 +212,66 @@ public final class WorldCommitService {
                     captured.completeExceptionally(e);
                 }
             });
-
             return captured.thenApplyAsync(
                     payloads -> {
                         try {
-                            profiles.commit(worldId, GENERATION_BEFORE_LEASES, ProfileCodec.FORMAT_VERSION, payloads);
+                            profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, payloads);
                         } catch (SQLException e) {
                             throw new CompletionException(e);
                         }
                         if (!payloads.isEmpty()) {
                             log.info("committed {} profile(s) for world {} (FR-15)", payloads.size(), worldId);
                         }
-                        return (Void) null;
+                        return null;
                     },
                     executors.db());
         }
 
-        // Milestone 6 multi-stage quiesce & atomic commit pipeline
-        CompletableFuture<Phase1Result> phase1Future = new CompletableFuture<>();
-        executors.main().execute(() -> {
-            try {
-                phase1Future.complete(phase1MainThread(worldId));
-            } catch (RuntimeException e) {
-                phase1Future.completeExceptionally(e);
-            }
-        });
-
-        return phase1Future
+        return phase1MainThread(worldId)
                 .thenApplyAsync(this::phase2IoThread, executors.io())
                 .thenApplyAsync(this::phase3DbThread, executors.db())
                 .thenAccept(this::phase4Completion);
+    }
+
+    private CompletableFuture<Phase1Result> phase1MainThread(WorldId worldId) {
+        CompletableFuture<Phase1Result> future = new CompletableFuture<>();
+        executors.main().execute(() -> {
+            try {
+                NetworkPolicy policy = policySupplier != null ? policySupplier.get() : NetworkPolicy.defaults();
+                Duration quiesceTimeout = policy.snapshotQuiesceTimeout();
+
+                List<World> quiesced = new ArrayList<>();
+                List<ScheduledFuture<?>> watchdogs = new ArrayList<>();
+
+                for (DimensionKind dim : DimensionKind.values()) {
+                    String bukkitName = folders.bukkitWorldName(worldId, dim);
+                    World bukkitWorld = lifecycle.loaded(bukkitName);
+                    if (bukkitWorld != null) {
+                        quiesced.add(bukkitWorld);
+                        if (runtime != null) {
+                            runtime.setAutoSave(bukkitWorld, false);
+                            runtime.save(bukkitWorld);
+                            if (executors.sched() != null) {
+                                ScheduledFuture<?> watchdog =
+                                        QuiesceWatchdog.arm(executors.sched(), runtime, bukkitWorld, quiesceTimeout);
+                                watchdogs.add(watchdog);
+                            }
+                        }
+                    }
+                }
+
+                Map<UUID, byte[]> payloads = captureWorld(worldId);
+                Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
+                if (departures != null) {
+                    payloads.putAll(departures);
+                }
+
+                future.complete(new Phase1Result(worldId, payloads, quiesced, watchdogs));
+            } catch (Exception e) {
+                future.completeExceptionally(e);
+            }
+        });
+        return future;
     }
 
     private record Phase1Result(
@@ -256,44 +279,6 @@ public final class WorldCommitService {
             Map<UUID, byte[]> payloads,
             List<World> quiescedWorlds,
             List<ScheduledFuture<?>> watchdogs) {}
-
-    private Phase1Result phase1MainThread(WorldId worldId) {
-        MainThread.assertOn();
-        List<World> quiescedWorlds = new ArrayList<>();
-        List<ScheduledFuture<?>> watchdogs = new ArrayList<>();
-        Map<UUID, byte[]> payloads = new LinkedHashMap<>();
-
-        NetworkPolicy policy = policySupplier != null ? policySupplier.get() : NetworkPolicy.defaults();
-        Duration timeout = policy.snapshotQuiesceTimeout();
-
-        for (DimensionKind dimension : DimensionKind.values()) {
-            String bukkitName = folders.bukkitWorldName(worldId, dimension);
-            World world = lifecycle.loaded(bukkitName);
-            if (world == null) {
-                continue;
-            }
-            if (runtime != null) {
-                runtime.setAutoSave(world, false);
-                runtime.save(world);
-                if (executors.sched() != null) {
-                    ScheduledFuture<?> wf = QuiesceWatchdog.arm(executors.sched(), runtime, world, timeout);
-                    watchdogs.add(wf);
-                }
-            }
-            quiescedWorlds.add(world);
-            for (Player player : world.getPlayers()) {
-                ProfileEnvelope envelope = profileService.capture(player, bukkitName);
-                payloads.put(player.getUniqueId(), ProfileCodec.encode(envelope));
-            }
-        }
-
-        Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
-        if (departures != null) {
-            payloads.putAll(departures);
-        }
-
-        return new Phase1Result(worldId, payloads, quiescedWorlds, watchdogs);
-    }
 
     private record Phase2Result(
             WorldId worldId,
@@ -311,7 +296,16 @@ public final class WorldCommitService {
 
             List<Path> dirty = DirtyScanner.scanDirty(scratchRoot, worldId, baselineEntries, policy.excludeGlobs());
 
-            long generation = GENERATION_BEFORE_LEASES;
+            long generation = 0L;
+            if (registry != null) {
+                LoadedWorld loaded = registry.find(worldId).orElse(null);
+                if (loaded != null) {
+                    generation = loaded.generation();
+                }
+            }
+            if (generation == 0L && baseline != null) {
+                generation = baseline.generation();
+            }
             int sequence = baseline != null ? baseline.sequence() + 1 : 1;
 
             SnapshotEngine.SnapshotResult snapshotResult = null;
@@ -370,6 +364,10 @@ public final class WorldCommitService {
                     profiles);
 
             if (!committed) {
+                if (fencingHandler != null) {
+                    fencingHandler.selfFence(
+                            worldId, nl.gzmn.playerworlds.backend.lease.SelfFencingHandler.FenceReason.COMMIT_FENCED);
+                }
                 throw new StorageException(
                         "Failed to commit snapshot for world " + worldId + ": fenced or row missing");
             }
@@ -445,11 +443,7 @@ public final class WorldCommitService {
             return CompletableFuture.runAsync(
                             () -> {
                                 try {
-                                    profiles.commit(
-                                            worldId,
-                                            GENERATION_BEFORE_LEASES,
-                                            ProfileCodec.FORMAT_VERSION,
-                                            Map.of(uuid, payload));
+                                    profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, Map.of(uuid, payload));
                                 } catch (SQLException e) {
                                     throw new CompletionException(e);
                                 }
