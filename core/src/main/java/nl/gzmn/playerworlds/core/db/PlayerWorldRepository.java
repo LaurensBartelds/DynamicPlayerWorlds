@@ -596,16 +596,13 @@ public final class PlayerWorldRepository extends Repository {
      */
     public Optional<PlacementContext> placementContext(WorldId id) throws SQLException {
         Objects.requireNonNull(id, "id");
-        return database.withConnection(connection -> queryOne(
-                connection,
-                """
+        return database.withConnection(connection ->
+                queryOne(connection, """
                 SELECT CASE WHEN lease_expires > now() THEN assigned_node END AS lease_holder,
                        last_node, data_version, visibility, state
                   FROM player_world
                  WHERE id = ?
-                """,
-                statement -> statement.setObject(1, id.value()),
-                row -> {
+                """, statement -> statement.setObject(1, id.value()), row -> {
                     int dataVersionRaw = row.getInt("data_version");
                     Integer dataVersion = row.wasNull() ? null : dataVersionRaw;
                     return new PlacementContext(

@@ -56,6 +56,16 @@ class MigratePayloadTest {
     }
 
     @Test
+    @DisplayName("a resume round-trips and is off by default (MN-20)")
+    void resumeRoundTrips() {
+        assertThat(MigratePayload.parse(MigratePayload.resumeDrain().format())).contains(MigratePayload.resumeDrain());
+        assertThat(MigratePayload.parse(MigratePayload.drain(0).format())
+                        .orElseThrow()
+                        .resume())
+                .isFalse();
+    }
+
+    @Test
     @DisplayName("an out-of-range countdown is refused at construction too")
     void countdownIsBounded() {
         assertThatThrownBy(() -> new MigratePayload("node-b", -1)).isInstanceOf(IllegalArgumentException.class);

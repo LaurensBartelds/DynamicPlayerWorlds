@@ -144,34 +144,37 @@ public final class IdleUnloadTask implements Runnable {
         if (!committing.add(world.id())) {
             return;
         }
-        var _ = commit.apply(world.id()).whenComplete((ignored, failure) -> tick.execute(() -> {
-            committing.remove(world.id());
-            if (failure != null) {
-                // Not unloading is the safe direction: the world keeps ticking and
-                // the next sync or the next sweep tries again. Losing it here would
-                // discard the very state the commit failed to save.
-                log.error(
-                        "pre-unload snapshot commit failed for world {}; leaving it loaded and retrying "
-                                + "in {} sweeps (FR-25)",
-                        world.id(),
-                        retryWait,
-                        failure);
-                world.unloadDeferred(retryWait);
-                return;
-            }
-            if (registry.find(world.id()).isEmpty()) {
-                // Fenced, migrated or shut down while the commit was in flight.
-                return;
-            }
-            if (hasPlayers(world)) {
-                // FR-25: "any join into any dimension of that world resets the
-                // timer and cancels the pending unload" — including one that
-                // arrived during the commit.
-                log.info("world {} was rejoined during its pre-unload commit; staying loaded (FR-25)", world.id());
-                return;
-            }
-            unloadNow(world, retryWait);
-        }));
+        var _ = commit.apply(world.id())
+                .whenComplete((ignored, failure) -> tick.execute(() -> {
+                    committing.remove(world.id());
+                    if (failure != null) {
+                        // Not unloading is the safe direction: the world keeps ticking and
+                        // the next sync or the next sweep tries again. Losing it here would
+                        // discard the very state the commit failed to save.
+                        log.error(
+                                "pre-unload snapshot commit failed for world {}; leaving it loaded and retrying "
+                                        + "in {} sweeps (FR-25)",
+                                world.id(),
+                                retryWait,
+                                failure);
+                        world.unloadDeferred(retryWait);
+                        return;
+                    }
+                    if (registry.find(world.id()).isEmpty()) {
+                        // Fenced, migrated or shut down while the commit was in flight.
+                        return;
+                    }
+                    if (hasPlayers(world)) {
+                        // FR-25: "any join into any dimension of that world resets the
+                        // timer and cancels the pending unload" — including one that
+                        // arrived during the commit.
+                        log.info(
+                                "world {} was rejoined during its pre-unload commit; staying loaded (FR-25)",
+                                world.id());
+                        return;
+                    }
+                    unloadNow(world, retryWait);
+                }));
     }
 
     /** The unload half of FR-25, after the commit has landed. Main thread. */

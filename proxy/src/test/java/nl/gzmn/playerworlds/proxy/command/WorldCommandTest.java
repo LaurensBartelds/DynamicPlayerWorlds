@@ -41,6 +41,7 @@ import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
+import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -86,7 +87,16 @@ class WorldCommandTest {
         nodeCommands = new NodeCommandRepository(database);
 
         WorldCommand worldCommand = new WorldCommand(
-                proxy, executors, worlds, membership, names, transfers, registry, nodeCommands, () -> policy);
+                proxy,
+                executors,
+                worlds,
+                membership,
+                names,
+                transfers,
+                registry,
+                new Placement(nodeRepo, worlds),
+                nodeCommands,
+                () -> policy);
         BrigadierCommand brigadierCommand = worldCommand.build();
         dispatcher = new CommandDispatcher<>();
         dispatcher.getRoot().addChild(brigadierCommand.getNode());
@@ -397,6 +407,95 @@ class WorldCommandTest {
         dispatcher.execute("world join Alice incompleteworld", player);
 
         awaitCondition(() -> transfers.claim(ownerUuid, policy.transferExpiry()).isPresent());
+    }
+
+    @Test
+    void joinRoutesToTheLeaseHolderRatherThanTheEmptiestNode() throws Exception {
+        // MN-16: all members of a world always resolve to the same node. Before
+        // milestone 8 the proxy scored first and only then checked the lease, so a
+        // second member joining a loaded world was sent to whichever node was
+        // emptiest and then refused, because the acquisition lost to the holder's
+        // live lease.
+        UUID ownerUuid = UUID.randomUUID();
+        UUID memberUuid = UUID.randomUUID();
+        Player member = registerPlayer(memberUuid, "Bob");
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+        names.remember(memberUuid, "Bob");
+
+        nodeRepo.heartbeat("node-busy", "127.0.0.1:25565", 3, 8, 40, 19.9, false, 4903, "26.2");
+        nodeRepo.heartbeat("node-idle", "127.0.0.1:25566", 0, 0, 5, 20.0, false, 4903, "26.2");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld world = worlds.create(
+                worldId,
+                ownerUuid,
+                "shared",
+                12345L,
+                policy.defaultBorderRadius(),
+                Visibility.PRIVATE,
+                "node-busy",
+                policy.leaseDuration());
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        membership.invite(worldId, memberUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, memberUuid);
+
+        dispatcher.execute("world join Alice shared", member);
+
+        // Claiming consumes the row, so capture it rather than filtering: a wrong
+        // node would otherwise show up as a timeout instead of as a mismatch.
+        java.util.concurrent.atomic.AtomicReference<String> routedTo =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        awaitCondition(() -> {
+            Optional<PendingTransferRepository.PendingTransfer> claimed =
+                    transfers.claim(memberUuid, policy.transferExpiry());
+            claimed.ifPresent(transfer -> routedTo.set(transfer.nodeId()));
+            return claimed.isPresent();
+        });
+        assertThat(routedTo.get()).isEqualTo("node-busy");
+        // The lease is untouched: routing to the holder does not re-acquire, so the
+        // generation the node checks on arrival is still the one it loaded against.
+        assertThat(worlds.findById(worldId).orElseThrow().generation()).isEqualTo(world.generation());
+    }
+
+    @Test
+    void joinRefusesAWorldNewerThanEveryNode() throws Exception {
+        // Section 12.7: the pool was rolled back after an upgrade. The world is
+        // safe and unreachable, and saying so is the whole of the correct handling.
+        UUID ownerUuid = UUID.randomUUID();
+        List<Component> messages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", messages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        nodeRepo.heartbeat("node-old", "127.0.0.1:25565", 0, 0, 5, 20.0, false, 4189, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "upgraded", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        setDataVersion(worldId, 4903);
+
+        dispatcher.execute("world join Alice upgraded", owner);
+
+        awaitCondition(() -> messages.stream()
+                .map(component -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(component))
+                .anyMatch(text -> text.contains("newer Minecraft version")));
+        assertThat(transfers.claim(ownerUuid, policy.transferExpiry())).isEmpty();
+    }
+
+    private void setDataVersion(WorldId worldId, int dataVersion) throws Exception {
+        database.inTransaction(connection -> {
+            try (var statement = connection.prepareStatement("UPDATE player_world SET data_version = ? WHERE id = ?")) {
+                statement.setInt(1, dataVersion);
+                statement.setObject(2, worldId.value());
+                statement.executeUpdate();
+            }
+            return null;
+        });
     }
 
     private Player registerPlayer(UUID uuid, String username) {

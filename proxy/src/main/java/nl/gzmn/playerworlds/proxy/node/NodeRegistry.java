@@ -13,8 +13,6 @@ import java.util.Optional;
 import java.util.Set;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus;
-import nl.gzmn.playerworlds.core.model.WorldId;
-import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -30,6 +28,16 @@ import org.slf4j.LoggerFactory;
  * truth is a table several nodes write to independently and there is nothing to
  * subscribe to. The sweep is idempotent: it registers what is missing,
  * unregisters what has gone, and leaves everything else alone.
+ *
+ * <p>Registration only. Choosing a node is {@link Placement} over
+ * {@code core.placement}, because MN-15's ordering has to be the same answer for
+ * the proxy and for a node's own load path and is therefore tested as a pure
+ * function rather than against Velocity.
+ *
+ * <p>A draining node (MN-22) disappears from {@code aliveNodes} and so is
+ * unregistered by the next sweep. That is MN-22's "then deregisters the node",
+ * and it needs no separate step: players already connected stay where they are,
+ * and Velocity simply stops being able to route new ones to it.
  */
 public final class NodeRegistry {
 
@@ -114,35 +122,6 @@ public final class NodeRegistry {
     /** Whether a node is currently routable. */
     public Optional<RegisteredServer> server(String nodeId) {
         return proxy.getServer(nodeId);
-    }
-
-    /**
-     * Picks a node for a world (MN-14's placement, minus the scoring).
-     *
-     * <p>Milestone 8 replaces the body with MN-15's real selection: version
-     * filtering first, then load, heap and TPS exclusions, then the warm-copy and
-     * public-separation preferences in MN-15a. Until a second node exists there is
-     * nothing to score, and the honest version of "choose a node" is "the one that
-     * is alive and least loaded" — which is the order {@code aliveNodes} already
-     * returns.
-     *
-     * @param worldDataVersion the world's committed chunk data version, or
-     *     {@code null} when it has never been committed and any node may take it
-     */
-    public Optional<NodeStatus> selectNode(WorldId worldId, @Nullable Integer worldDataVersion, Duration deadAfter) {
-        Objects.requireNonNull(worldId, "worldId");
-        try {
-            for (NodeStatus candidate : nodes.aliveNodes(deadAfter)) {
-                // MN-28's version predicate, evaluated before anything else.
-                if (worldDataVersion == null || candidate.dataVersion() >= worldDataVersion) {
-                    return Optional.of(candidate);
-                }
-            }
-            return Optional.empty();
-        } catch (SQLException e) {
-            log.error("could not select a node for world {}", worldId, e);
-            return Optional.empty();
-        }
     }
 
     /** Nodes currently considered alive (MN-14). */

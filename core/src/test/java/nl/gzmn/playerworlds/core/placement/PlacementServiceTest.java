@@ -132,7 +132,8 @@ class PlacementServiceTest {
         // Excluding on absence empties the pool during a rolling restart.
         PlacementDecision decision = PlacementService.select(
                 new PlacementRequest(WorldId.random(), NEW, Visibility.PRIVATE, null, null),
-                List.of(new NodeStatus("node-fresh", "fresh:25565", 0, 0, null, null, false, NEW, "26.2", Instant.EPOCH)),
+                List.of(new NodeStatus(
+                        "node-fresh", "fresh:25565", 0, 0, null, null, false, NEW, "26.2", Instant.EPOCH)),
                 Map.of(),
                 POLICY);
 

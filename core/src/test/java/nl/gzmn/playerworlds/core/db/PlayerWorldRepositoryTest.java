@@ -633,7 +633,8 @@ class PlayerWorldRepositoryTest {
         WorldId lapsed = WorldId.random();
         create(held, UUID.randomUUID(), "held", 1L);
         create(lapsed, UUID.randomUUID(), "lapsed", 1L);
-        worlds.acquireLease(held, "node-1", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+        worlds.acquireLease(held, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
         worlds.acquireLease(lapsed, "node-1", 4903, java.time.Duration.ofMinutes(3))
                 .orElseThrow();
         updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, lapsed);

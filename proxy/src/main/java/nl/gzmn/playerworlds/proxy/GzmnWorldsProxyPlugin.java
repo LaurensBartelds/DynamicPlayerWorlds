@@ -38,6 +38,7 @@ import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
+import nl.gzmn.playerworlds.proxy.node.Placement;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 
@@ -146,7 +147,11 @@ public final class GzmnWorldsProxyPlugin {
         // MN-17: nodes register themselves; velocity.toml is never edited to add
         // capacity. The sweep mirrors the heartbeat table into Velocity's server
         // list and is idempotent, so running it on a timer is enough.
-        NodeRegistry registry = new NodeRegistry(proxy, new NodeRepository(openedDatabase));
+        NodeRepository nodeRepository = new NodeRepository(openedDatabase);
+        PlayerWorldRepository worldRepository = new PlayerWorldRepository(openedDatabase);
+        NodeRegistry registry = new NodeRegistry(proxy, nodeRepository);
+        // MN-14's placement, over the pure decision in core.placement.
+        Placement placementService = new Placement(nodeRepository, worldRepository);
         this.nodeRegistry = registry;
         registry.sync(loadedPolicy.deadAfter());
         var _ = pools.sched()
@@ -177,11 +182,12 @@ public final class GzmnWorldsProxyPlugin {
         WorldCommand command = new WorldCommand(
                 proxy,
                 pools,
-                new PlayerWorldRepository(openedDatabase),
+                worldRepository,
                 new MembershipRepository(openedDatabase),
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
+                placementService,
                 nodeCommands,
                 this::policy);
         // metaBuilder rather than register(BrigadierCommand): the single-argument

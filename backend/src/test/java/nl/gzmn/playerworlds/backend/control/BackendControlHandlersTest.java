@@ -23,6 +23,7 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.control.MigratePayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
@@ -78,8 +79,7 @@ class BackendControlHandlersTest {
 
     @Test
     void unloadWorldReturnsOkWhenWorldNotLoaded() throws Exception {
-        WorldRegistry registry = new WorldRegistry();
-        UnloadWorldHandler handler = new UnloadWorldHandler(registry, null, null, null, null, null);
+        UnloadWorldHandler handler = new UnloadWorldHandler(null, NetworkPolicy::defaults);
 
         NodeCommand command = new NodeCommand(
                 1L,
@@ -101,8 +101,7 @@ class BackendControlHandlersTest {
 
     @Test
     void unloadWorldReturnsErrorWhenWorldIdMissing() throws Exception {
-        WorldRegistry registry = new WorldRegistry();
-        UnloadWorldHandler handler = new UnloadWorldHandler(registry, null, null, null, null, null);
+        UnloadWorldHandler handler = new UnloadWorldHandler(null, NetworkPolicy::defaults);
 
         NodeCommand command = new NodeCommand(
                 1L,
@@ -156,8 +155,12 @@ class BackendControlHandlersTest {
         PlayerMock player = server.addPlayer();
         player.teleport(worldMock.getSpawnLocation());
 
-        UnloadWorldHandler handler =
-                new UnloadWorldHandler(registry, lifecycle, folders, executors, nodeCommands, NetworkPolicy::defaults);
+        // No commit service: this node has no object storage configured, so the
+        // handoff is the eject and the unload. The commit path is exercised where
+        // a store exists, in :testing.
+        WorldHandoff handoff =
+                new WorldHandoff(registry, lifecycle, folders, executors, null, nodeCommands, NetworkPolicy::defaults);
+        UnloadWorldHandler handler = new UnloadWorldHandler(handoff, NetworkPolicy::defaults);
 
         NodeCommand command = new NodeCommand(
                 10L,
@@ -179,7 +182,96 @@ class BackendControlHandlersTest {
         assertEquals(defaultWorld, player.getWorld());
 
         String message = PlainTextComponentSerializer.plainText().serialize(player.nextComponentMessage());
-        assertThat(message).contains("World is unloading...");
+        assertThat(message).contains("This world is being unloaded");
+    }
+
+    @Test
+    void migrateWorldReturnsErrorWhenWorldIdMissing() throws Exception {
+        WorldHandoff handoff = new WorldHandoff(
+                new WorldRegistry(),
+                lifecycleFor(new WorldRegistry()),
+                folders,
+                executors,
+                null,
+                new NodeCommandRepository(database),
+                NetworkPolicy::defaults);
+        MigrateWorldHandler handler = new MigrateWorldHandler(handoff, NetworkPolicy::defaults);
+
+        CommandResult result = handler.handle(migrateCommand(null, "{\"targetNode\":\"node-2\"}"));
+
+        assertFalse(result.isOk());
+        assertEquals("ERROR:missing world_id", result.wire());
+    }
+
+    @Test
+    void migrateWorldRefusesAnUnreadablePayload() throws Exception {
+        // Refusing beats defaulting: a migration run against a payload nobody
+        // could read would move the world somewhere the operator did not ask for.
+        WorldHandoff handoff = new WorldHandoff(
+                new WorldRegistry(),
+                lifecycleFor(new WorldRegistry()),
+                folders,
+                executors,
+                null,
+                new NodeCommandRepository(database),
+                NetworkPolicy::defaults);
+        MigrateWorldHandler handler = new MigrateWorldHandler(handoff, NetworkPolicy::defaults);
+
+        CommandResult result = handler.handle(migrateCommand(WorldId.random(), "not json"));
+
+        assertFalse(result.isOk());
+        assertThat(result.wire()).contains("unreadable migrate payload");
+    }
+
+    @Test
+    void migrateWorldIsIdempotentForAWorldThisNodeDoesNotHold() throws Exception {
+        // CP-5: the same instruction can land twice, and the second landing has
+        // nothing to move.
+        WorldRegistry registry = new WorldRegistry();
+        WorldHandoff handoff = new WorldHandoff(
+                registry,
+                lifecycleFor(registry),
+                folders,
+                executors,
+                null,
+                new NodeCommandRepository(database),
+                NetworkPolicy::defaults);
+        MigrateWorldHandler handler = new MigrateWorldHandler(handoff, NetworkPolicy::defaults);
+
+        CommandResult result = handler.handle(
+                migrateCommand(WorldId.random(), MigratePayload.to("node-2", 0).format()));
+
+        assertTrue(result.isOk());
+    }
+
+    private NodeCommand migrateCommand(WorldId worldId, String payload) {
+        return new NodeCommand(
+                20L,
+                "node-1",
+                worldId,
+                0L,
+                CommandKind.MIGRATE_WORLD.name(),
+                payload,
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+    }
+
+    private WorldLifecycleService lifecycleFor(WorldRegistry registry) {
+        return new WorldLifecycleService(
+                new PlayerWorldRepository(database),
+                new MembershipRepository(database),
+                new MembershipCache(),
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                NetworkPolicy::defaults,
+                tempDir);
     }
 
     @Test

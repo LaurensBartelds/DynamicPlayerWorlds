@@ -25,14 +25,25 @@ import java.util.Optional;
  *     which unloads in place and lets MN-20 place the world fresh on the next join
  * @param countdownSeconds how long to warn players for before ejecting them
  *     (MN-21); zero for an immediate move
+ * @param resume {@link CommandKind#DRAIN_NODE} only: lift the drain instead of
+ *     starting one. The flag has to travel to the node rather than being written
+ *     straight to {@code worlds_node}, because the node overwrites that column on
+ *     every heartbeat — the node is authoritative for its own drain state, and a
+ *     proxy-side write would be undone within {@code node.heartbeat-seconds}.
  */
-public record MigratePayload(@org.jspecify.annotations.Nullable String targetNode, int countdownSeconds) {
+public record MigratePayload(
+        @org.jspecify.annotations.Nullable String targetNode, int countdownSeconds, boolean resume) {
 
     /** MN-21 shows a countdown; ten seconds is long enough to read and short enough not to be argued with. */
     public static final int DEFAULT_COUNTDOWN_SECONDS = 10;
 
     /** A countdown longer than this is a mistake, not a policy, and would outlive the command's TTL. */
     public static final int MAX_COUNTDOWN_SECONDS = 120;
+
+    /** A move or a drain, never a resume. */
+    public MigratePayload(@org.jspecify.annotations.Nullable String targetNode, int countdownSeconds) {
+        this(targetNode, countdownSeconds, false);
+    }
 
     public MigratePayload {
         if (countdownSeconds < 0 || countdownSeconds > MAX_COUNTDOWN_SECONDS) {
@@ -46,11 +57,16 @@ public record MigratePayload(@org.jspecify.annotations.Nullable String targetNod
 
     /** Compact JSON, as stored in {@code node_command.payload}. */
     public String format() {
+        StringBuilder json = new StringBuilder("{");
         String node = targetNode;
-        if (node == null) {
-            return "{\"countdownSeconds\":" + countdownSeconds + "}";
+        if (node != null) {
+            json.append("\"targetNode\":\"").append(escape(node)).append("\",");
         }
-        return "{\"targetNode\":\"" + escape(node) + "\",\"countdownSeconds\":" + countdownSeconds + "}";
+        json.append("\"countdownSeconds\":").append(countdownSeconds);
+        if (resume) {
+            json.append(",\"resume\":true");
+        }
+        return json.append('}').toString();
     }
 
     /**
@@ -81,7 +97,7 @@ public record MigratePayload(@org.jspecify.annotations.Nullable String targetNod
         if (targetNode != null && targetNode.isBlank()) {
             return Optional.empty();
         }
-        return Optional.of(new MigratePayload(targetNode, countdown));
+        return Optional.of(new MigratePayload(targetNode, countdown, trimmed.contains("\"resume\":true")));
     }
 
     private static @org.jspecify.annotations.Nullable String stringField(String json, String key) {
@@ -148,12 +164,17 @@ public record MigratePayload(@org.jspecify.annotations.Nullable String targetNod
 
     /** A drain: unload in place, no destination (MN-22). */
     public static MigratePayload drain(int countdownSeconds) {
-        return new MigratePayload(null, countdownSeconds);
+        return new MigratePayload(null, countdownSeconds, false);
+    }
+
+    /** Lifting a drain, so the node takes new placements again (MN-20). */
+    public static MigratePayload resumeDrain() {
+        return new MigratePayload(null, 0, true);
     }
 
     /** A move to a named node (MN-19, MN-21). */
     public static MigratePayload to(String targetNode, int countdownSeconds) {
         Objects.requireNonNull(targetNode, "targetNode");
-        return new MigratePayload(targetNode, countdownSeconds);
+        return new MigratePayload(targetNode, countdownSeconds, false);
     }
 }

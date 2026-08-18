@@ -108,10 +108,7 @@ public final class PlacementService {
                         .filter(node -> node.dataVersion() >= worldVersion)
                         .toList();
         if (newEnough.isEmpty()) {
-            int newest = alive.stream()
-                    .mapToInt(NodeStatus::dataVersion)
-                    .max()
-                    .orElse(0);
+            int newest = alive.stream().mapToInt(NodeStatus::dataVersion).max().orElse(0);
             return new PlacementDecision.NoNodeNewEnough(worldVersion == null ? 0 : worldVersion, newest);
         }
 

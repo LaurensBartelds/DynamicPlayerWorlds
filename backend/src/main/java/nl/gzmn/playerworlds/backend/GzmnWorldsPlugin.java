@@ -14,9 +14,12 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
+import nl.gzmn.playerworlds.backend.control.MigrateWorldHandler;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
+import nl.gzmn.playerworlds.backend.control.WorldHandoff;
 import nl.gzmn.playerworlds.backend.lease.LeaseCoordinator;
 import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
@@ -493,6 +496,10 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         var _ = pools.sched()
                 .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
 
+        // Before the control plane, because DRAIN_NODE acts on the heartbeat: a
+        // drain that could not set the draining flag would take the node's worlds
+        // away and then let placement send it more.
+        NodeHeartbeat heartbeat = startHeartbeat(openedDatabase, pools, node, selected.identity(), worldRegistry);
         startControlPlane(
                 worldRegistry,
                 lifecycle,
@@ -502,12 +509,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 nodeCommands,
                 pools,
                 node,
-                this.policy);
-        startHeartbeat(openedDatabase, pools, node, selected.identity(), worldRegistry);
+                this.policy,
+                worldCommitService,
+                heartbeat);
     }
 
     /** Publishes this node's heartbeat row (MN-17, MN-18). */
-    private void startHeartbeat(
+    private NodeHeartbeat startHeartbeat(
             Database openedDatabase,
             PluginExecutors pools,
             NodeConfig node,
@@ -531,9 +539,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         pools.db().execute(heartbeat);
         long intervalSeconds = node.heartbeatInterval().toSeconds();
         var _ = pools.sched().scheduleWithFixedDelay(heartbeat, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+        return heartbeat;
     }
 
-    /** Starts the control plane listener and command dispatcher (milestone 5). */
+    /**
+     * Starts the control plane listener and command dispatcher (milestone 5, and
+     * milestone 8's {@code MIGRATE_WORLD} and {@code DRAIN_NODE}).
+     */
     private void startControlPlane(
             WorldRegistry worldRegistry,
             WorldLifecycleService lifecycle,
@@ -543,7 +555,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             NodeCommandRepository nodeCommands,
             PluginExecutors pools,
             NodeConfig node,
-            NetworkPolicy loadedPolicy) {
+            NetworkPolicy loadedPolicy,
+            WorldCommitService commits,
+            NodeHeartbeat heartbeat) {
         ExecutorService listen = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "gzmn-backend-listen");
             thread.setDaemon(true);
@@ -558,9 +572,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 loadedPolicy.controlPollInterval(),
                 loadedPolicy.controlClaimTimeout());
 
-        plane.register(
-                CommandKind.UNLOAD_WORLD,
-                new UnloadWorldHandler(worldRegistry, lifecycle, worldFolders, pools, nodeCommands, this::policy));
+        // One implementation of MN-19's warn, eject, commit, unload, release for
+        // all three commands that give a world up.
+        WorldHandoff handoff =
+                new WorldHandoff(worldRegistry, lifecycle, worldFolders, pools, commits, nodeCommands, this::policy);
+
+        plane.register(CommandKind.UNLOAD_WORLD, new UnloadWorldHandler(handoff, this::policy));
+        plane.register(CommandKind.MIGRATE_WORLD, new MigrateWorldHandler(handoff, this::policy));
+        plane.register(CommandKind.DRAIN_NODE, new DrainNodeHandler(worldRegistry, handoff, heartbeat, this::policy));
         plane.register(
                 CommandKind.INVALIDATE_CACHE,
                 new InvalidateCacheHandler(new NetworkSettings(openedDatabase), membershipCache, pools.db()));
