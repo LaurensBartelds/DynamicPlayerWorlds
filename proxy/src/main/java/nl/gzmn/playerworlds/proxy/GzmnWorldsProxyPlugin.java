@@ -35,6 +35,7 @@ import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
+import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
@@ -82,6 +83,7 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable Database database;
     private @Nullable PluginExecutors executors;
     private @Nullable PlayerNameRepository playerNames;
+    private @Nullable TransferRequestRepository transferRequests;
     private @Nullable NodeRegistry nodeRegistry;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
@@ -181,11 +183,15 @@ public final class GzmnWorldsProxyPlugin {
         proxyPlane.start(pools.sched(), listen);
         this.controlPlane = proxyPlane;
 
+        TransferRequestRepository transferRequests = new TransferRequestRepository(openedDatabase);
+        this.transferRequests = transferRequests;
+
         WorldCommand command = new WorldCommand(
                 proxy,
                 pools,
                 worldRepository,
                 new MembershipRepository(openedDatabase),
+                transferRequests,
                 new WorldBanRepository(openedDatabase),
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
@@ -333,6 +339,10 @@ public final class GzmnWorldsProxyPlugin {
         return controlPlane;
     }
 
+    public @Nullable TransferRequestRepository transferRequests() {
+        return transferRequests;
+    }
+
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
         ControlPlane plane = this.controlPlane;
@@ -350,6 +360,8 @@ public final class GzmnWorldsProxyPlugin {
         if (registry != null) {
             registry.unregisterAll();
         }
+        this.playerNames = null;
+        this.transferRequests = null;
         PluginExecutors pools = this.executors;
         this.executors = null;
         if (pools != null) {

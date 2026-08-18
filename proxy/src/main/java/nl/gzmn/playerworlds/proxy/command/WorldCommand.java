@@ -32,9 +32,11 @@ import nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
@@ -77,6 +79,7 @@ public final class WorldCommand {
             "kick",
             "members",
             "promote",
+            "transfer",
             "list",
             "browse",
             "public",
@@ -95,7 +98,7 @@ public final class WorldCommand {
     public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
-    public static final List<String> ADMIN_SUBCOMMANDS = List.of("list", "unload", "migrate", "drain");
+    public static final List<String> ADMIN_SUBCOMMANDS = List.of("list", "unload", "migrate", "drain", "transfer");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -110,6 +113,7 @@ public final class WorldCommand {
     private final PluginExecutors executors;
     private final PlayerWorldRepository worlds;
     private final MembershipRepository membership;
+    private final TransferRequestRepository transferRequests;
     private final WorldBanRepository bans;
     private final PlayerNameRepository names;
     private final PendingTransferRepository transfers;
@@ -123,6 +127,7 @@ public final class WorldCommand {
             PluginExecutors executors,
             PlayerWorldRepository worlds,
             MembershipRepository membership,
+            TransferRequestRepository transferRequests,
             WorldBanRepository bans,
             PlayerNameRepository names,
             PendingTransferRepository transfers,
@@ -134,6 +139,7 @@ public final class WorldCommand {
         this.executors = Objects.requireNonNull(executors, "executors");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
         this.membership = Objects.requireNonNull(membership, "membership");
+        this.transferRequests = Objects.requireNonNull(transferRequests, "transferRequests");
         this.bans = Objects.requireNonNull(bans, "bans");
         this.names = Objects.requireNonNull(names, "names");
         this.transfers = Objects.requireNonNull(transfers, "transfers");
@@ -176,6 +182,30 @@ public final class WorldCommand {
                                     promote(context, StringArgumentType.getString(context, "player"));
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
+                .then(BrigadierCommand.literalArgumentBuilder("transfer")
+                        .then(BrigadierCommand.literalArgumentBuilder("accept")
+                                .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
+                                        .executes(context -> {
+                                            transferAccept(context, StringArgumentType.getString(context, "owner"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.literalArgumentBuilder("decline")
+                                .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
+                                        .executes(context -> {
+                                            transferDecline(context, StringArgumentType.getString(context, "owner"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                .suggests(this::suggestOnlinePlayers)
+                                .executes(context -> {
+                                    transfer(context, StringArgumentType.getString(context, "player"), false);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                        .executes(context -> {
+                                            transfer(context, StringArgumentType.getString(context, "player"), true);
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
                         .requires(source -> source.hasPermission(CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
@@ -364,6 +394,17 @@ public final class WorldCommand {
                                                     context.getSource(),
                                                     StringArgumentType.getString(context, "node"),
                                                     true);
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("transfer")
+                        .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
+                                .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                        .suggests(this::suggestOnlinePlayers)
+                                        .executes(context -> {
+                                            adminTransfer(
+                                                    context.getSource(),
+                                                    StringArgumentType.getString(context, "id"),
+                                                    StringArgumentType.getString(context, "player"));
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))));
     }
@@ -825,6 +866,161 @@ public final class WorldCommand {
             } else {
                 error(caller, targetName + " is not a member of '" + world.get().name() + "', or is its owner");
             }
+        });
+    }
+
+    /**
+     * {@code /world transfer <player> [confirm]} — FR-29, FR-30, FR-31, FR-32.
+     */
+    private void transfer(CommandContext<CommandSource> context, String targetName, boolean confirmed) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            Optional<UUID> target = resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                error(caller, "no player called '" + targetName + "' has been seen on this network");
+                return;
+            }
+            if (target.get().equals(caller.getUniqueId())) {
+                error(caller, "you already own this world");
+                return;
+            }
+            if (membership.findMember(world.get().id(), target.get()).isEmpty()) {
+                error(caller, targetName + " is not a member of '" + world.get().name() + "'");
+                return;
+            }
+            int ownedCount = worlds.countOwnedBy(target.get());
+            if (ownedCount >= current.maxWorldsPerPlayer()) {
+                error(caller, targetName + " has reached their world limit (" + current.maxWorldsPerPlayer() + ")");
+                return;
+            }
+
+            if (!confirmed) {
+                info(
+                        caller,
+                        "Are you sure you want to transfer ownership of '"
+                                + world.get().name()
+                                + "' to " + targetName + "? You will become a BUILDER. Type /world transfer "
+                                + targetName + " confirm to proceed.");
+                return;
+            }
+
+            Optional<Player> online = proxy.getPlayer(target.get());
+            if (online.isPresent()) {
+                // Online -> immediate transfer (FR-31)
+                if (!worlds.transferOwnership(world.get().id(), caller.getUniqueId(), target.get(), "MANUAL")) {
+                    error(
+                            caller,
+                            "could not transfer ownership of '" + world.get().name() + "'");
+                    return;
+                }
+                enqueueToWorldOrAliveNodes(
+                        world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                success(
+                        caller,
+                        "transferred ownership of '" + world.get().name() + "' to " + targetName
+                                + "; you are now a BUILDER");
+                online.get()
+                        .sendMessage(Component.text(
+                                "You are now the owner of '" + world.get().name() + "'!", NamedTextColor.GREEN));
+            } else {
+                // Offline -> create pending transfer request (FR-32)
+                transferRequests.requestTransfer(
+                        world.get().id(), target.get(), caller.getUniqueId(), current.transferPendingExpiry());
+                success(
+                        caller,
+                        "created transfer request for " + targetName + "; they can accept it next time they log in");
+            }
+        });
+    }
+
+    /**
+     * {@code /world transfer accept <owner>} — FR-32.
+     */
+    private void transferAccept(CommandContext<CommandSource> context, String ownerName) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<UUID> owner = resolvePlayer(ownerName);
+            if (owner.isEmpty()) {
+                error(caller, "no player called '" + ownerName + "' has been seen on this network");
+                return;
+            }
+            List<TransferRequest> pending = transferRequests.findLiveRequestsFor(caller.getUniqueId());
+            Optional<TransferRequest> matching = pending.stream()
+                    .filter(r -> r.fromUuid().equals(owner.get()))
+                    .findFirst();
+            if (matching.isEmpty()) {
+                error(caller, "you have no pending transfer requests from " + ownerName);
+                return;
+            }
+            int ownedCount = worlds.countOwnedBy(caller.getUniqueId());
+            if (ownedCount >= current.maxWorldsPerPlayer()) {
+                error(caller, "you have reached your world limit (" + current.maxWorldsPerPlayer() + ")");
+                return;
+            }
+            Optional<PlayerWorld> worldOpt = worlds.findById(matching.get().worldId());
+            if (worldOpt.isEmpty()) {
+                error(caller, "that world no longer exists");
+                return;
+            }
+            PlayerWorld world = worldOpt.get();
+            if (!world.ownerUuid().equals(owner.get())) {
+                transferRequests.deleteRequest(world.id(), caller.getUniqueId());
+                error(caller, ownerName + " is no longer the owner of '" + world.name() + "'");
+                return;
+            }
+            if (!worlds.transferOwnership(world.id(), owner.get(), caller.getUniqueId(), "MANUAL")) {
+                error(caller, "could not accept transfer of '" + world.name() + "'");
+                return;
+            }
+            enqueueToWorldOrAliveNodes(world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+            success(caller, "you are now the owner of '" + world.name() + "'!");
+            proxy.getPlayer(owner.get())
+                    .ifPresent(online -> online.sendMessage(Component.text(
+                            caller.getUsername() + " accepted ownership transfer of '" + world.name() + "'!",
+                            NamedTextColor.GREEN)));
+        });
+    }
+
+    /**
+     * {@code /world transfer decline <owner>} — FR-32.
+     */
+    private void transferDecline(CommandContext<CommandSource> context, String ownerName) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            Optional<UUID> owner = resolvePlayer(ownerName);
+            if (owner.isEmpty()) {
+                error(caller, "no player called '" + ownerName + "' has been seen on this network");
+                return;
+            }
+            List<TransferRequest> pending = transferRequests.findLiveRequestsFor(caller.getUniqueId());
+            Optional<TransferRequest> matching = pending.stream()
+                    .filter(r -> r.fromUuid().equals(owner.get()))
+                    .findFirst();
+            if (matching.isEmpty()) {
+                error(caller, "you have no pending transfer requests from " + ownerName);
+                return;
+            }
+            transferRequests.deleteRequest(matching.get().worldId(), caller.getUniqueId());
+            success(caller, "declined transfer request from " + ownerName);
+            proxy.getPlayer(owner.get())
+                    .ifPresent(online -> online.sendMessage(Component.text(
+                            caller.getUsername() + " declined ownership transfer of your world",
+                            NamedTextColor.YELLOW)));
         });
     }
 
@@ -1516,6 +1712,58 @@ public final class WorldCommand {
             } else {
                 success(source, targetNode + " will take new placements again");
             }
+        });
+    }
+
+    /**
+     * {@code /world admin transfer <id> <player>} — FR-33.
+     */
+    private void adminTransfer(CommandSource source, String rawId, String targetName) {
+        Optional<WorldId> parsed = parseWorldId(source, rawId);
+        if (parsed.isEmpty()) {
+            return;
+        }
+        WorldId worldId = parsed.get();
+        NetworkPolicy current = policy.get();
+        runAsAdmin(source, () -> {
+            Optional<PlayerWorld> found = worlds.findById(worldId);
+            if (found.isEmpty()) {
+                error(source, "no world with that id");
+                return;
+            }
+            PlayerWorld world = found.get();
+            Optional<UUID> target = resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                error(source, "no player called '" + targetName + "' has been seen on this network");
+                return;
+            }
+            if (target.get().equals(world.ownerUuid())) {
+                error(source, targetName + " is already the owner of that world");
+                return;
+            }
+            int ownedCount = worlds.countOwnedBy(target.get());
+            if (ownedCount >= current.maxWorldsPerPlayer()) {
+                error(source, targetName + " has reached their world limit (" + current.maxWorldsPerPlayer() + ")");
+                return;
+            }
+            if (!worlds.transferOwnership(worldId, world.ownerUuid(), target.get(), "ADMIN")) {
+                error(source, "could not transfer world " + worldId);
+                return;
+            }
+            enqueueToWorldOrAliveNodes(world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+            success(
+                    source,
+                    "transferred ownership of '" + world.name() + "' (" + worldId + ") to " + targetName
+                            + " with reason ADMIN");
+            proxy.getPlayer(target.get())
+                    .ifPresent(online -> online.sendMessage(Component.text(
+                            "You were granted ownership of '" + world.name() + "' by an administrator.",
+                            NamedTextColor.GREEN)));
+            proxy.getPlayer(world.ownerUuid())
+                    .ifPresent(online -> online.sendMessage(Component.text(
+                            "Ownership of '" + world.name() + "' was transferred to " + targetName
+                                    + " by an administrator.",
+                            NamedTextColor.YELLOW)));
         });
     }
 

@@ -35,9 +35,11 @@ import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
+import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
@@ -55,6 +57,7 @@ class WorldCommandTest {
     private PluginExecutors executors;
     private PlayerWorldRepository worlds;
     private MembershipRepository membership;
+    private TransferRequestRepository transferRequests;
     private WorldBanRepository bans;
     private PlayerNameRepository names;
     private NodeRepository nodeRepo;
@@ -83,6 +86,7 @@ class WorldCommandTest {
 
         worlds = new PlayerWorldRepository(database);
         membership = new MembershipRepository(database);
+        transferRequests = new TransferRequestRepository(database);
         bans = new WorldBanRepository(database);
         names = new PlayerNameRepository(database);
         nodeRepo = new NodeRepository(database);
@@ -95,6 +99,7 @@ class WorldCommandTest {
                 executors,
                 worlds,
                 membership,
+                transferRequests,
                 bans,
                 names,
                 transfers,
@@ -666,6 +671,375 @@ class WorldCommandTest {
                 () -> transfers.claim(visitorUuid, policy.transferExpiry()).isPresent());
         assertThat(membership.findMember(w1, visitorUuid)).isPresent();
         assertThat(membership.findMember(w1, visitorUuid).get().role()).isEqualTo(Role.VISITOR);
+    }
+
+    @Test
+    void subcommandsContainsTransfer() {
+        assertThat(WorldCommand.SUBCOMMANDS).contains("transfer");
+        assertThat(WorldCommand.ADMIN_SUBCOMMANDS).contains("transfer");
+    }
+
+    @Test
+    void transferPromptRequiresConfirmation() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(
+                worldId, ownerUuid, "transfer-prompt-world", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+
+        dispatcher.execute("world transfer Bob", owner);
+
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("confirm") && text.contains("Bob")));
+
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+        assertThat(transferRequests.findLiveRequest(worldId, targetUuid)).isEmpty();
+    }
+
+    @Test
+    void transferConfirmWhenTargetOnlineTransfersImmediately() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> targetMessages = Collections.synchronizedList(new ArrayList<>());
+        Player target = mockPlayer(targetUuid, "Bob", targetMessages);
+        playersByUuid.put(targetUuid, target);
+        playersByName.put("Bob", target);
+        names.remember(targetUuid, "Bob");
+
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "online-transfer", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+
+        dispatcher.execute("world transfer Bob confirm", owner);
+
+        awaitCondition(() -> worlds.findById(worldId).orElseThrow().ownerUuid().equals(targetUuid));
+
+        assertThat(membership.findMember(worldId, ownerUuid).orElseThrow().role())
+                .isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, targetUuid).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
+
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand cmd = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(cmd.command()).isEqualTo(CommandKind.INVALIDATE_CACHE.name());
+        assertThat(cmd.worldId()).isEqualTo(worldId);
+
+        awaitCondition(() -> targetMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("online-transfer")));
+    }
+
+    @Test
+    void transferConfirmWhenTargetOfflineCreatesTransferRequest() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        // Target is remembered in names repo but NOT in online players
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "offline-transfer", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+
+        dispatcher.execute("world transfer Bob confirm", owner);
+
+        awaitCondition(
+                () -> transferRequests.findLiveRequest(worldId, targetUuid).isPresent());
+        TransferRequest req =
+                transferRequests.findLiveRequest(worldId, targetUuid).orElseThrow();
+        assertThat(req.fromUuid()).isEqualTo(ownerUuid);
+        assertThat(req.toUuid()).isEqualTo(targetUuid);
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("transfer request")));
+    }
+
+    @Test
+    void transferConfirmWhenTargetAtCapRefuses() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        // Bob already owns 2 worlds (default cap is 2)
+        WorldId b1 = WorldId.random();
+        WorldId b2 = WorldId.random();
+        worlds.create(b1, targetUuid, "bob-world-1", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(b2, targetUuid, "bob-world-2", 2L, 5000, Visibility.PRIVATE);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "alice-world", 3L, 5000, Visibility.PRIVATE);
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+
+        dispatcher.execute("world transfer Bob confirm", owner);
+
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("limit") || text.contains("cap")));
+
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+        assertThat(transferRequests.findLiveRequest(worldId, targetUuid)).isEmpty();
+    }
+
+    @Test
+    void transferConfirmWhenTargetNotMemberRefuses() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "alice-world", 3L, 5000, Visibility.PRIVATE);
+        // Bob is NOT a member
+
+        dispatcher.execute("world transfer Bob confirm", owner);
+
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("not a member")));
+
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+    }
+
+    @Test
+    void transferAcceptTransfersOwnershipAndInvalidatesCache() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> targetMessages = Collections.synchronizedList(new ArrayList<>());
+        Player target = mockPlayer(targetUuid, "Bob", targetMessages);
+        playersByUuid.put(targetUuid, target);
+        playersByName.put("Bob", target);
+        names.remember(targetUuid, "Bob");
+
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "accept-world", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+        transferRequests.requestTransfer(worldId, targetUuid, ownerUuid, policy.transferPendingExpiry());
+
+        dispatcher.execute("world transfer accept Alice", target);
+
+        awaitCondition(() -> worlds.findById(worldId).orElseThrow().ownerUuid().equals(targetUuid));
+        assertThat(membership.findMember(worldId, ownerUuid).orElseThrow().role())
+                .isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, targetUuid).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
+        assertThat(transferRequests.findLiveRequest(worldId, targetUuid)).isEmpty();
+
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand cmd = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(cmd.command()).isEqualTo(CommandKind.INVALIDATE_CACHE.name());
+        assertThat(cmd.worldId()).isEqualTo(worldId);
+
+        awaitCondition(() -> targetMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("accept-world")));
+    }
+
+    @Test
+    void transferAcceptWhenTargetAtCapRefuses() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> targetMessages = Collections.synchronizedList(new ArrayList<>());
+        Player target = mockPlayer(targetUuid, "Bob", targetMessages);
+        playersByUuid.put(targetUuid, target);
+        playersByName.put("Bob", target);
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "cap-accept-world", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+        transferRequests.requestTransfer(worldId, targetUuid, ownerUuid, policy.transferPendingExpiry());
+
+        // In the meantime, Bob created 2 worlds
+        WorldId b1 = WorldId.random();
+        WorldId b2 = WorldId.random();
+        worlds.create(b1, targetUuid, "bob-1", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(b2, targetUuid, "bob-2", 2L, 5000, Visibility.PRIVATE);
+
+        dispatcher.execute("world transfer accept Alice", target);
+
+        awaitCondition(() -> targetMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("limit") || text.contains("cap")));
+
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+    }
+
+    @Test
+    void transferDeclineRemovesTransferRequest() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> targetMessages = Collections.synchronizedList(new ArrayList<>());
+        Player target = mockPlayer(targetUuid, "Bob", targetMessages);
+        playersByUuid.put(targetUuid, target);
+        playersByName.put("Bob", target);
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "decline-world", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        membership.invite(worldId, targetUuid, ownerUuid, policy.inviteExpiry());
+        membership.acceptInvite(worldId, targetUuid);
+        transferRequests.requestTransfer(worldId, targetUuid, ownerUuid, policy.transferPendingExpiry());
+
+        dispatcher.execute("world transfer decline Alice", target);
+
+        awaitCondition(
+                () -> transferRequests.findLiveRequest(worldId, targetUuid).isEmpty());
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+
+        awaitCondition(() -> targetMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("declined")));
+    }
+
+    @Test
+    void adminTransferForcesOwnershipAndInvalidatesCache() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        UUID adminUuid = UUID.randomUUID();
+
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        List<Component> adminMessages = Collections.synchronizedList(new ArrayList<>());
+        Player admin = mockPlayer(adminUuid, "Admin", adminMessages);
+        playersByUuid.put(adminUuid, admin);
+        playersByName.put("Admin", admin);
+
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "admin-world", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+
+        // Note: Bob is not even a member yet
+
+        dispatcher.execute("world admin transfer " + worldId + " Bob", admin);
+
+        awaitCondition(() -> worlds.findById(worldId).orElseThrow().ownerUuid().equals(targetUuid));
+        assertThat(membership.findMember(worldId, ownerUuid).orElseThrow().role())
+                .isEqualTo(Role.BUILDER);
+        assertThat(membership.findMember(worldId, targetUuid).orElseThrow().role())
+                .isEqualTo(Role.OWNER);
+
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand cmd = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(cmd.command()).isEqualTo(CommandKind.INVALIDATE_CACHE.name());
+        assertThat(cmd.worldId()).isEqualTo(worldId);
+
+        awaitCondition(() -> adminMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("ADMIN")));
     }
 
     private void setDataVersion(WorldId worldId, int dataVersion) throws Exception {
