@@ -9,36 +9,69 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
-## Milestone 8 — the second node: code complete, **not built and not tested here**
+## Milestone 8 — the second node: built, tested and booted on two nodes
 
 Spec §11 milestone 8: "heartbeats, placement service, dynamic Velocity
 registration, `/world admin migrate`, node draining. Version gating (12.9) is
 tested here, because this is the first milestone with two nodes to disagree."
 
-### What could not be verified, and why
+### Verified
 
-`./gradlew check build` **did not run.** The environment this was written in has
-only a JDK 21 and `gradle.properties` pins `javaToolchainVersion = 25`, which
-Paper 26.x requires; every JDK download host is blocked by the network policy,
-as is `repo.papermc.io`, so `:backend` and `:proxy` cannot resolve their compile
-classpath either. Docker is absent, so every Testcontainers test is skipped.
+`./gradlew check build` **is green**, on a JDK 25 toolchain with
+`repo.papermc.io` reachable and a Docker daemon available — the three things the
+environment this milestone was written in did not have.
 
-What *was* run, and what it proves:
+- **`./gradlew check build`: BUILD SUCCESSFUL.** 378 tests, 0 failures, 0
+  skipped (`:core` 234, `:backend` 106, `:proxy` 17, `:testing` 21). Re-run with
+  `--no-build-cache --rerun-tasks` to confirm the result is not a restored one.
+- **`:backend` and `:proxy` compile**, under Error Prone, NullAway,
+  forbidden-apis, the licence gate and Spotless. This was the milestone's largest
+  unknown, and nothing in their main sources needed changing.
+- **The 96 Testcontainers suites run**, against real PostgreSQL 18.3 and MinIO,
+  rather than being skipped.
+- **The two new ArchUnit rules were verified by breaking them**, not by grep: a
+  deliberate `Instant.now()` in `proxy.node.Placement` and a
+  `System.currentTimeMillis()` in `backend.world.IdleUnloadTask` each failed the
+  rule with the offending method named. Both injections were reverted.
+- **The e2e compose harness boots the whole two-node stack**: `paper-a` and
+  `paper-b` both enable `gzmn-worlds` against real PostgreSQL, Velocity enables
+  `gzmn-worlds-proxy`, and a player joins the lobby through the proxy. This is
+  the first time either plugin jar has run in the harness.
+- **V3 applied against real PostgreSQL** — `flyway_schema_history` shows
+  `3 placement`, and `player_world.last_node` exists (MN-15a's warm-copy source).
+- **The heartbeat publishes TPS** — `worlds_node` carries `tps` 19.8 and 20.0 for
+  the two nodes, varying between reads rather than constant. This is the
+  milestone 8 fix for a column that was previously always NULL, and MN-15
+  excludes on it.
+- **Dynamic Velocity registration works with two nodes** (MN-17, MN-18): the
+  proxy logs `registered node paper-a` and `registered node paper-b`, and
+  registers `/world` with all ten subcommands including the `admin` subtree.
 
-- **`:core` compiles**, via `javac 21 --enable-preview --release 21` against the
-  Gradle-resolved classpath. Preview mode stands in for the unnamed variables the
-  project uses; it is not the real toolchain and does not run Error Prone,
-  NullAway, forbidden-apis or the licence gate.
-- **`:core`'s non-Docker tests pass: 138 green, 0 failing.** The other 96 fail on
-  "no Docker environment" and are the Testcontainers suites.
-- **`./gradlew spotlessApply` ran clean** on every module, so formatting and
-  import hygiene are not what will break the build.
-- The two new ArchUnit rules were checked by grep rather than by running them:
-  no wall-clock read and no `java.sql` type other than `SQLException` survives in
-  `backend` or `proxy` main sources.
-- `:backend` and `:proxy` were **never compiled**. Their share of this milestone
-  is reviewed code, not verified code. The first real `check` may well find type
-  errors in it.
+One fix was needed to make the build pass: eight of the new lease setups in
+`PlayerWorldRepositoryTest` discarded the result of `acquireLease(...)
+.orElseThrow()`, which Error Prone rejects as `ReturnValueIgnored`, so
+`:core:compileTestJava` did not compile. Nothing had caught it because no JDK 25
+had ever run javac with Error Prone attached over this code.
+
+Two defects in the e2e harness itself had to be fixed before it could reach the
+proxy at all, both of them older than milestone 8:
+
+- **`prepare.sh` staged the proxy jar and no configuration for it.** The plugin
+  fell back to its bundled default of `127.0.0.1:5432`, the bootstrap timed out,
+  and it logged `/world will not be registered` and carried on. Velocity forwards
+  a lobby join whether or not `gzmn-worlds-proxy` is awake, so the F11 smoke
+  passed over the top of an inert proxy — the harness had never exercised
+  placement, `/world`, or the proxy control plane.
+- **The scripts were committed non-executable.** `e2e/scripts/run.sh`, the
+  documented entry point, fails with "Permission denied" on a fresh clone, as do
+  the `prepare.sh` and `smoke.sh` it invokes by path.
+
+### Still not verified
+
+The behavioural two-node checks below are still open. The harness now reaches
+the proxy, so they are reachable, but no scenario drives them yet: the smoke
+joins a lobby and stops there. Driving `/world` needs either a bot that sends
+chat commands or console access to Velocity, neither of which exists.
 
 ### Landed
 
@@ -122,14 +155,25 @@ rule.
   and `join` `gzmn.worlds.create` / `gzmn.worlds.join`; the proxy checks neither.
   Only the `admin` subtree added here is gated. Out of scope for milestone 8, but
   it is a gap in milestone 2's work rather than a deferred feature.
+- **`DrainNodeHandler`'s budget is not clamped to the claim timeout, but says it
+  is.** Its comment argues the drain "fits inside one
+  `control.claim-timeout-seconds` instead of being reclaimed halfway through by a
+  second poller", yet `budget()` returns `countdown + storage.commit-timeout + 5s`
+  with no ceiling. `MigrateWorldHandler.budget()` clamps to
+  `controlClaimTimeout - 1s` for exactly this reason. At the defaults (countdown
+  10s, commit timeout 15s, claim timeout 60s) the drain budget is 30s and the
+  gap cannot bite; raise `storage.commit-timeout-seconds` past ~45s, which is a
+  plausible tuning for large worlds, and a second poller can reclaim a
+  `DRAIN_NODE` command while the first is still draining. Left alone rather than
+  changed because it alters the timing of a path no test here can drive.
 
 ### What must happen on two nodes before this milestone is believed
 
 Nothing below can be checked without a second node, which is the whole point of
 the milestone.
 
-- [ ] **Build it.** `./gradlew check build` on a JDK 25 with `repo.papermc.io`
-      reachable. Everything above is unverified until this passes.
+- [x] **Build it.** `./gradlew check build` on a JDK 25 with `repo.papermc.io`
+      reachable. Green: 378 tests, 0 failures, 0 skipped.
 - [ ] **MN-16.** Two accounts, one world. The first joins and loads it on node A;
       the second joins while node B is emptier, and must land on node A.
 - [ ] **MN-28 / MN-26, the §11 acceptance case.** Run the pair at different
