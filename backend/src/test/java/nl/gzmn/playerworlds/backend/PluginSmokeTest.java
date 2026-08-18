@@ -79,6 +79,8 @@ class PluginSmokeTest {
         assertThat(plugin.registry().size()).isZero();
         assertThat(plugin.policy()).isNotNull();
         assertThat(plugin.policy().maxWorldsPerPlayer()).isEqualTo(NetworkPolicy.DEFAULT_MAX_WORLDS_PER_PLAYER);
+        assertThat(plugin.menuService()).isNotNull();
+        assertThat(plugin.menuChannel()).isNotNull();
     }
 
     @Test
@@ -96,6 +98,8 @@ class PluginSmokeTest {
         assertThat(plugin.platform()).isNotNull();
         assertThat(plugin.executors()).isNotNull();
         assertThat(plugin.policy()).isNotNull();
+        assertThat(plugin.menuService()).isNotNull();
+        assertThat(plugin.menuChannel()).isNotNull();
         assertThat(plugin.heartbeat()).isNull();
         assertThat(plugin.registry()).isNull();
         assertThat(plugin.controlPlane()).isNull();

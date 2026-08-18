@@ -22,6 +22,9 @@ import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
 import nl.gzmn.playerworlds.backend.control.MigrateWorldHandler;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
 import nl.gzmn.playerworlds.backend.control.WorldHandoff;
+import nl.gzmn.playerworlds.backend.gui.MenuChannel;
+import nl.gzmn.playerworlds.backend.gui.MenuListener;
+import nl.gzmn.playerworlds.backend.gui.MenuService;
 import nl.gzmn.playerworlds.backend.lease.LeaseCoordinator;
 import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
@@ -66,11 +69,13 @@ import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
+import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
+import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
@@ -144,6 +149,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable NodeConfig nodeConfig;
     private @Nullable WorldArchiver archiver;
     private @Nullable WorldRestorer restorer;
+    private @Nullable MenuChannel menuChannel;
+    private @Nullable MenuService menuService;
+    private @Nullable MenuListener menuListener;
 
     /**
      * Last policy read from the database.
@@ -223,11 +231,37 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         this.nodeConfig = node;
         schedulePolicyRefresh(openedDatabase, pools);
 
+        PlayerWorldRepository menuWorldRepo = new PlayerWorldRepository(openedDatabase);
+        MembershipRepository menuMembershipRepo = new MembershipRepository(openedDatabase);
+        TransferRequestRepository menuTransferRepo = new TransferRequestRepository(openedDatabase);
+        WorldBanRepository menuBanRepo = new WorldBanRepository(openedDatabase);
+        PlayerNameRepository menuNameRepo = new PlayerNameRepository(openedDatabase);
+
+        MenuChannel channel = new MenuChannel(this, pools);
+        MenuService service = new MenuService(
+                menuWorldRepo,
+                menuMembershipRepo,
+                menuTransferRepo,
+                menuBanRepo,
+                menuNameRepo,
+                channel,
+                pools,
+                this::policy);
+        channel.setMenuService(service);
+        channel.register();
+        this.menuChannel = channel;
+        this.menuService = service;
+
+        MenuListener listener = new MenuListener(service, channel);
+        this.menuListener = listener;
+        getServer().getPluginManager().registerEvents(listener, this);
+
         if (node.mode() == NodeMode.GUI_ONLY) {
             getLogger()
-                    .info(() -> "enabled (gui-only mode): node "
-                            + node.nodeId()
-                            + ", database connected, world lifecycle and heartbeat suppressed");
+                    .info(
+                            () -> "enabled (gui-only mode): node "
+                                    + node.nodeId()
+                                    + ", database connected, menu infrastructure active, world lifecycle and heartbeat suppressed");
             return;
         }
 
@@ -811,6 +845,18 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         return fencingHandler;
     }
 
+    public @Nullable MenuService menuService() {
+        return menuService;
+    }
+
+    public @Nullable MenuChannel menuChannel() {
+        return menuChannel;
+    }
+
+    public @Nullable MenuListener menuListener() {
+        return menuListener;
+    }
+
     protected Path worldContainer() {
         return getServer().getWorldContainer().toPath();
     }
@@ -924,6 +970,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 getLogger().warning(() -> "could not close object store cleanly: " + e.getMessage());
             }
         }
+
+        MenuChannel ch = this.menuChannel;
+        this.menuChannel = null;
+        if (ch != null) {
+            ch.unregister();
+        }
+        this.menuService = null;
+        this.menuListener = null;
 
         this.executors = null;
         if (pools != null) {
