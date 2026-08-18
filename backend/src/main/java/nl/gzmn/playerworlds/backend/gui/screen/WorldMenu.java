@@ -199,8 +199,12 @@ public final class WorldMenu implements GuiScreen {
                             });
                 }
             }
-            case SLOT_MEMBERS -> menuService.openMembersMenu(player, world.id());
-            case SLOT_SETTINGS -> menuService.openSettingsMenu(player, world.id());
+            case SLOT_MEMBERS -> {
+                var _ = menuService.openMembersMenu(player, world.id());
+            }
+            case SLOT_SETTINGS -> {
+                var _ = menuService.openSettingsMenu(player, world.id());
+            }
             case SLOT_VISIBILITY -> {
                 Visibility next = (world.visibility() == Visibility.PUBLIC) ? Visibility.PRIVATE : Visibility.PUBLIC;
                 if (menuChannel != null) {
@@ -217,7 +221,9 @@ public final class WorldMenu implements GuiScreen {
                             });
                 }
             }
-            case SLOT_BANS -> menuService.openBansMenu(player, world.id());
+            case SLOT_BANS -> {
+                var _ = menuService.openBansMenu(player, world.id());
+            }
             case SLOT_STORAGE -> {
                 var _ = menuService.openStorageMenu(player);
             }

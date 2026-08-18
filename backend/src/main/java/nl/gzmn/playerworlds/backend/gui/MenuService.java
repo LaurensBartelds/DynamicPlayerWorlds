@@ -1,7 +1,9 @@
 package nl.gzmn.playerworlds.backend.gui;
 
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -12,9 +14,13 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import nl.gzmn.playerworlds.backend.gui.screen.BansMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.ConfirmMenu;
+import nl.gzmn.playerworlds.backend.gui.screen.InvitesMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.MainMenu;
+import nl.gzmn.playerworlds.backend.gui.screen.MembersMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.MyWorldsMenu;
+import nl.gzmn.playerworlds.backend.gui.screen.SettingsMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.StorageMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.WorldMenu;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
@@ -28,7 +34,12 @@ import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
+import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.model.WorldInvite;
+import nl.gzmn.playerworlds.core.model.WorldMember;
+import nl.gzmn.playerworlds.core.model.WorldSettings;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.jspecify.annotations.Nullable;
@@ -354,31 +365,271 @@ public class MenuService {
         openScreen(player, new ConfirmMenu(title, description, onConfirm, onCancel));
     }
 
-    /** Placeholder for members screen (Task 7). */
-    public void openMembersMenu(Player player, WorldId worldId) {
-        Objects.requireNonNull(player, "player");
-        Objects.requireNonNull(worldId, "worldId");
-        player.sendMessage(Component.text("Members menu coming soon...", NamedTextColor.GRAY));
+    /**
+     * Opens page 0 of the members management screen for a world.
+     *
+     * @param player the player
+     * @param worldId world ID
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openMembersMenu(Player player, WorldId worldId) {
+        return openMembersMenu(player, worldId, 0);
     }
 
-    /** Placeholder for settings screen (Task 7). */
-    public void openSettingsMenu(Player player, WorldId worldId) {
+    /**
+     * Opens a specific page of the members management screen for a world.
+     *
+     * @param player the player
+     * @param worldId world ID
+     * @param page 0-based page index
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openMembersMenu(Player player, WorldId worldId, int page) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(worldId, "worldId");
-        player.sendMessage(Component.text("Settings menu coming soon...", NamedTextColor.GRAY));
+
+        return CompletableFuture.supplyAsync(
+                        () -> {
+                            MainThread.assertOff();
+                            Optional<PlayerWorld> worldOpt = Optional.empty();
+                            List<MembersMenu.MemberEntry> entries = List.of();
+                            try {
+                                if (worldRepository != null) {
+                                    worldOpt = worldRepository.findById(worldId);
+                                }
+                                if (membershipRepository != null && nameRepository != null) {
+                                    List<WorldMember> members = membershipRepository.listMembers(worldId);
+                                    List<UUID> uuids = members.stream()
+                                            .map(WorldMember::uuid)
+                                            .toList();
+                                    Map<UUID, String> names = nameRepository.namesOf(uuids);
+                                    entries = members.stream()
+                                            .map(m -> new MembersMenu.MemberEntry(
+                                                    m.uuid(),
+                                                    names.getOrDefault(
+                                                            m.uuid(), m.uuid().toString()),
+                                                    m.role(),
+                                                    m.joinedAt()))
+                                            .toList();
+                                }
+                            } catch (SQLException e) {
+                                log.warn("Failed to fetch members for world {}", worldId, e);
+                            }
+                            return new MembersData(worldOpt, entries);
+                        },
+                        executors.db())
+                .thenAcceptAsync(
+                        data -> {
+                            if (data.world().isPresent()) {
+                                openScreen(
+                                        player,
+                                        new MembersMenu(
+                                                this, channel, data.world().get(), data.entries(), page));
+                            } else {
+                                player.sendMessage(Component.text("World not found", NamedTextColor.RED));
+                                var _ = openMyWorldsMenu(player);
+                            }
+                        },
+                        executors.main());
     }
 
-    /** Placeholder for invites screen (Task 7). */
-    public void openInvitesMenu(Player player) {
-        Objects.requireNonNull(player, "player");
-        player.sendMessage(Component.text("Invites menu coming soon...", NamedTextColor.GRAY));
-    }
-
-    /** Placeholder for bans screen (Task 7). */
-    public void openBansMenu(Player player, WorldId worldId) {
+    /**
+     * Opens the world settings configuration screen for a world.
+     *
+     * @param player the player
+     * @param worldId world ID
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openSettingsMenu(Player player, WorldId worldId) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(worldId, "worldId");
-        player.sendMessage(Component.text("Bans menu coming soon...", NamedTextColor.GRAY));
+
+        return CompletableFuture.supplyAsync(
+                        () -> {
+                            MainThread.assertOff();
+                            Optional<PlayerWorld> worldOpt = Optional.empty();
+                            if (worldRepository != null) {
+                                try {
+                                    worldOpt = worldRepository.findById(worldId);
+                                } catch (SQLException e) {
+                                    log.warn("Failed to fetch world {} for settings", worldId, e);
+                                }
+                            }
+                            return worldOpt;
+                        },
+                        executors.db())
+                .thenAcceptAsync(
+                        worldOpt -> {
+                            if (worldOpt.isPresent()) {
+                                PlayerWorld world = worldOpt.get();
+                                WorldSettings settings = WorldSettings.fromJson(world.settingsJson());
+                                openScreen(player, new SettingsMenu(this, channel, world, settings));
+                            } else {
+                                player.sendMessage(Component.text("World not found", NamedTextColor.RED));
+                                var _ = openMyWorldsMenu(player);
+                            }
+                        },
+                        executors.main());
+    }
+
+    /**
+     * Opens page 0 of the pending invites and transfer requests screen.
+     *
+     * @param player the player
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openInvitesMenu(Player player) {
+        return openInvitesMenu(player, 0);
+    }
+
+    /**
+     * Opens a specific page of the pending invites and transfer requests screen.
+     *
+     * @param player the player
+     * @param page 0-based page index
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openInvitesMenu(Player player, int page) {
+        Objects.requireNonNull(player, "player");
+
+        return CompletableFuture.supplyAsync(
+                        () -> {
+                            MainThread.assertOff();
+                            List<InvitesMenu.InviteEntry> entries = new ArrayList<>();
+                            try {
+                                List<WorldInvite> liveInvites = List.of();
+                                if (membershipRepository != null) {
+                                    liveInvites = membershipRepository.findLiveInvitesFor(player.getUniqueId());
+                                }
+                                List<TransferRequest> liveTransfers = List.of();
+                                if (transferRepository != null) {
+                                    liveTransfers = transferRepository.findLiveRequestsFor(player.getUniqueId());
+                                }
+
+                                List<UUID> senderUuids = new ArrayList<>();
+                                for (WorldInvite invite : liveInvites) {
+                                    senderUuids.add(invite.invitedBy());
+                                }
+                                for (TransferRequest req : liveTransfers) {
+                                    senderUuids.add(req.fromUuid());
+                                }
+
+                                Map<UUID, String> names = (nameRepository != null && !senderUuids.isEmpty())
+                                        ? nameRepository.namesOf(senderUuids)
+                                        : Map.of();
+
+                                for (WorldInvite invite : liveInvites) {
+                                    String worldName = invite.worldId().toString();
+                                    if (worldRepository != null) {
+                                        Optional<PlayerWorld> w = worldRepository.findById(invite.worldId());
+                                        if (w.isPresent()) {
+                                            worldName = w.get().name();
+                                        }
+                                    }
+                                    String senderName = names.getOrDefault(
+                                            invite.invitedBy(),
+                                            invite.invitedBy().toString());
+                                    entries.add(new InvitesMenu.InviteEntry(
+                                            invite.worldId(),
+                                            worldName,
+                                            invite.invitedBy(),
+                                            senderName,
+                                            invite.expiresAt(),
+                                            false));
+                                }
+
+                                for (TransferRequest req : liveTransfers) {
+                                    String worldName = req.worldId().toString();
+                                    if (worldRepository != null) {
+                                        Optional<PlayerWorld> w = worldRepository.findById(req.worldId());
+                                        if (w.isPresent()) {
+                                            worldName = w.get().name();
+                                        }
+                                    }
+                                    String senderName = names.getOrDefault(
+                                            req.fromUuid(), req.fromUuid().toString());
+                                    entries.add(new InvitesMenu.InviteEntry(
+                                            req.worldId(),
+                                            worldName,
+                                            req.fromUuid(),
+                                            senderName,
+                                            req.expiresAt(),
+                                            true));
+                                }
+                            } catch (SQLException e) {
+                                log.warn("Failed to fetch invites for player {}", player.getUniqueId(), e);
+                            }
+                            return List.copyOf(entries);
+                        },
+                        executors.db())
+                .thenAcceptAsync(
+                        entries -> openScreen(player, new InvitesMenu(this, channel, entries, page)), executors.main());
+    }
+
+    /**
+     * Opens page 0 of the bans management screen for a world.
+     *
+     * @param player the player
+     * @param worldId world ID
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openBansMenu(Player player, WorldId worldId) {
+        return openBansMenu(player, worldId, 0);
+    }
+
+    /**
+     * Opens a specific page of the bans management screen for a world.
+     *
+     * @param player the player
+     * @param worldId world ID
+     * @param page 0-based page index
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openBansMenu(Player player, WorldId worldId, int page) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(worldId, "worldId");
+
+        return CompletableFuture.supplyAsync(
+                        () -> {
+                            MainThread.assertOff();
+                            Optional<PlayerWorld> worldOpt = Optional.empty();
+                            List<BansMenu.BanEntry> entries = List.of();
+                            try {
+                                if (worldRepository != null) {
+                                    worldOpt = worldRepository.findById(worldId);
+                                }
+                                if (banRepository != null && nameRepository != null) {
+                                    List<WorldBan> bans = banRepository.listBans(worldId);
+                                    List<UUID> uuids =
+                                            bans.stream().map(WorldBan::uuid).toList();
+                                    Map<UUID, String> names = nameRepository.namesOf(uuids);
+                                    entries = bans.stream()
+                                            .map(b -> new BansMenu.BanEntry(
+                                                    b.uuid(),
+                                                    names.getOrDefault(
+                                                            b.uuid(), b.uuid().toString()),
+                                                    b.reason(),
+                                                    b.bannedAt()))
+                                            .toList();
+                                }
+                            } catch (SQLException e) {
+                                log.warn("Failed to fetch bans for world {}", worldId, e);
+                            }
+                            return new BansData(worldOpt, entries);
+                        },
+                        executors.db())
+                .thenAcceptAsync(
+                        data -> {
+                            if (data.world().isPresent()) {
+                                openScreen(
+                                        player,
+                                        new BansMenu(this, channel, data.world().get(), data.entries(), page));
+                            } else {
+                                player.sendMessage(Component.text("World not found", NamedTextColor.RED));
+                                var _ = openMyWorldsMenu(player);
+                            }
+                        },
+                        executors.main());
     }
 
     /** Placeholder for public browse screen (Task 8). */
@@ -402,4 +653,8 @@ public class MenuService {
     private record MyWorldsData(List<PlayerWorld> worlds, int maxWorlds) {}
 
     private record StorageMenuData(StorageQuota quota, List<PlayerWorld> owned) {}
+
+    private record MembersData(Optional<PlayerWorld> world, List<MembersMenu.MemberEntry> entries) {}
+
+    private record BansData(Optional<PlayerWorld> world, List<BansMenu.BanEntry> entries) {}
 }
