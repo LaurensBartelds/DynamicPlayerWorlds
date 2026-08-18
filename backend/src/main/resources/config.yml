@@ -11,6 +11,12 @@ node:
   # itself under (MN-17), so it must be stable across restarts.
   id: worlds-1
 
+  # Operation mode for this node.
+  # "worlds" (default): normal node hosting player worlds and publishing heartbeats.
+  # "gui-only": connects to the database to serve GUI menus (e.g. on lobby/hub servers)
+  #             without publishing a heartbeat or hosting player worlds.
+  mode: worlds
+
   # host:port the proxy should route players to.
   address: 127.0.0.1:25566
 
