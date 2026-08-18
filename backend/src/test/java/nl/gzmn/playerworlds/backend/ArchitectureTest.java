@@ -73,6 +73,36 @@ class ArchitectureTest {
     }
 
     @Test
+    @DisplayName("the wall clock is never read (CONTRIBUTING.md rule 5, MN-10b)")
+    void noWallClockReads() {
+        // The rule that used to exist only for core.db, which is how it was
+        // broken twice: WorldLifecycleService compared lease_expires to
+        // Instant.now() to decide whether to re-acquire a lease, and the proxy
+        // did the same at /world join. Every lease safety property in section
+        // 12.3 is a timestamp comparison between machines whose clocks drift
+        // independently, and the answer has to come from the database.
+        //
+        // Deliberately the whole module rather than the lease packages: the two
+        // sites that got this wrong were in the world and command packages, and a
+        // rule scoped to where the mistake was already made prevents nothing. The
+        // sanctioned alternatives are DbClock for database time and
+        // DbClock.elapsedSince over System.nanoTime for elapsed time, which is
+        // monotonic and therefore not a clock.
+        ArchRule rule = noClasses()
+                .should()
+                .callMethod(System.class, "currentTimeMillis")
+                .orShould()
+                .callMethod(java.time.Instant.class, "now")
+                .orShould()
+                .callMethod(java.time.LocalDateTime.class, "now")
+                .because("node clocks drift and every lease decision is a timestamp comparison; "
+                        + "read database time through DbClock, and elapsed time through "
+                        + "DbClock.elapsedSince (CONTRIBUTING.md rule 5, MN-10b)");
+
+        rule.allowEmptyShould(true).check(backend);
+    }
+
+    @Test
     @DisplayName("JDBC is never touched from the backend directly (CONTRIBUTING.md rule 3)")
     void databaseAccessGoesThroughCore() {
         ArchRule rule = noClasses()

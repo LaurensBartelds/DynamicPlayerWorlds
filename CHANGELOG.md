@@ -147,6 +147,38 @@ the jar filename (`+mc<version>`), not part of the project version.
   `/world join` on the proxy, and dynamic Velocity server registration driven
   from the heartbeat table rather than from `velocity.toml`.
 
+- Milestone 8, the second node: placement, version gating, `/world admin` and
+  node draining.
+- `core.placement`: MN-14's node selection as a pure function — a live lease
+  routes without scoring (MN-14, MN-16), MN-28's version filter excludes before
+  any other term, MN-15's loaded-world, heap and TPS thresholds exclude hard, and
+  MN-15a's warm copy and public/private separation score as preferences. It lives
+  in `:core` and knows nothing of Velocity or Paper, because the proxy and a
+  node's own load path have to reach the same answer.
+- `player_world.last_node` (migration V3), written by the same conditional
+  `UPDATE` that moves the manifest pointer (MN-3a), so a fenced commit cannot
+  claim a warm copy it did not write. MN-15a's warm-copy preference needs to know
+  which node wrote the current snapshot and nothing in section 4 stored it —
+  `assigned_node` is NULL for exactly the worlds placement is asked about.
+- `PlayerWorldRepository.placementContext`, `leaseHolder`, `liveLeaseOccupancy`
+  and `worldsLeasedTo`: placement's and the drain's inputs, all evaluated in
+  database time, so whether a lease is live is the same answer for the proxy, for
+  the node holding it and for the node about to take it over.
+- `/world admin list | unload | migrate` (specification section 6) and
+  `/world admin drain <node> [on|off]` (MN-22), gated on `gzmn.worlds.admin`.
+  `migrate` drives MN-19 in MN-8's only safe order: the holding node gives the
+  world up, the proxy waits for that control-plane row to complete, and only then
+  is the lease acquired on the target. `drain` is an addition to section 6's
+  table rather than an entry from it — that table predates section 12, and MN-22
+  names no command.
+- `MIGRATE_WORLD` and `DRAIN_NODE` handlers on the node, over a shared
+  `WorldHandoff` that runs MN-19's warn, eject, commit, unload, release. One
+  implementation for all three commands that give a world up, since the order is
+  the correctness argument and three copies would be three chances to get it
+  wrong.
+- The node heartbeat reports TPS, which MN-15 excludes on and which was being
+  published as NULL.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper
@@ -169,6 +201,30 @@ the jar filename (`+mc<version>`), not part of the project version.
 
 ### Fixed
 
+- **MN-16 was not enforced.** `/world join` selected a node and only then checked
+  whether the world held a live lease on that node, so the second member of a
+  loaded world was routed to whichever node was emptier, where the lease
+  acquisition lost to the holder and the join was refused. Unreachable while the
+  pool had one node in it, which is why milestone 8 is where it surfaces.
+- **FR-25's pre-unload snapshot commit was missing.** FR-25 orders the idle
+  unload *commit, unload, release*, and only the last two happened. Every idle
+  unload therefore discarded up to `storage.sync-minutes` of play, for the world
+  and every profile in it together (FR-15). The control plane's `UNLOAD_WORLD`
+  had the same gap. Both now commit first, stay loaded if the commit fails, and
+  abandon the unload if somebody rejoins while it is in flight.
+- **Lease decisions read the local clock.** The node's load path and the proxy's
+  `/world join` both compared `lease_expires` to `Instant.now()` to decide
+  whether to skip MN-8's acquisition — the clock-drift bug MN-10b and
+  CONTRIBUTING rule 5 exist to prevent. The ArchUnit rule that forbids it covers
+  only `core.db`, so neither was caught.
+- **Self-fencing could not unload a world that still held a player.** MN-10a's
+  shutdown path messaged them and then called `unloadWorld`, which Bukkit
+  refuses in that state; the proxy eject that would have moved them was enqueued
+  afterwards and asynchronously. A fenced world therefore kept ticking, which is
+  the one thing MN-10a exists to stop. Players are moved to the holding area
+  first now.
+- `/world create` placed one randomly generated world id and then inserted a
+  different one. Invisible only because placement did not key on the id.
 - A `database.pool-size` below 4 deadlocked node startup. `Schema.migrate` holds
   one pooled connection for the FR-40 advisory lock across the whole migration
   while Flyway independently takes two, so a smaller pool handed out every

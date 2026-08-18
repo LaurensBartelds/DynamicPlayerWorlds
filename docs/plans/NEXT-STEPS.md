@@ -9,6 +9,154 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
+## Milestone 8 — the second node: code complete, **not built and not tested here**
+
+Spec §11 milestone 8: "heartbeats, placement service, dynamic Velocity
+registration, `/world admin migrate`, node draining. Version gating (12.9) is
+tested here, because this is the first milestone with two nodes to disagree."
+
+### What could not be verified, and why
+
+`./gradlew check build` **did not run.** The environment this was written in has
+only a JDK 21 and `gradle.properties` pins `javaToolchainVersion = 25`, which
+Paper 26.x requires; every JDK download host is blocked by the network policy,
+as is `repo.papermc.io`, so `:backend` and `:proxy` cannot resolve their compile
+classpath either. Docker is absent, so every Testcontainers test is skipped.
+
+What *was* run, and what it proves:
+
+- **`:core` compiles**, via `javac 21 --enable-preview --release 21` against the
+  Gradle-resolved classpath. Preview mode stands in for the unnamed variables the
+  project uses; it is not the real toolchain and does not run Error Prone,
+  NullAway, forbidden-apis or the licence gate.
+- **`:core`'s non-Docker tests pass: 138 green, 0 failing.** The other 96 fail on
+  "no Docker environment" and are the Testcontainers suites.
+- **`./gradlew spotlessApply` ran clean** on every module, so formatting and
+  import hygiene are not what will break the build.
+- The two new ArchUnit rules were checked by grep rather than by running them:
+  no wall-clock read and no `java.sql` type other than `SQLException` survives in
+  `backend` or `proxy` main sources.
+- `:backend` and `:proxy` were **never compiled**. Their share of this milestone
+  is reviewed code, not verified code. The first real `check` may well find type
+  errors in it.
+
+### Landed
+
+- **Placement (MN-14 to MN-16, MN-15a, MN-28)** — `core.placement` holds the
+  decision as a pure function, and `proxy.node.Placement` the three queries that
+  feed it. A live lease wins outright and is not scored; MN-28's version filter
+  is evaluated before every other term; MN-15's loaded-world, heap and TPS
+  thresholds exclude hard; MN-15a's warm copy and public/private separation score
+  as preferences, warm copy dominating. Thirteen unit tests, all green.
+- **MN-16 was broken and is fixed.** `/world join` scored a node and *then*
+  checked whether the world held a live lease on that node. With one node the two
+  always agreed. With two, the second member of a loaded world was routed to
+  whichever node was emptier, where `acquireLease` lost to the holder's live
+  lease and the join was refused with "could not acquire a lease". This is the
+  defect milestone 8 exists to expose, and it was in the milestone-5 stub exactly
+  as that stub's comment said it would be.
+- **Version gating (12.9)**, on both halves: placement excludes an older node
+  (MN-28) and MN-26's predicate refuses it the lease anyway. A world newer than
+  every live node now reports *that* rather than "no server available" —
+  §12.7's rolled-back pool is a wait, not a capacity problem.
+- **`/world admin list | unload | migrate`** (§6), gated on `gzmn.worlds.admin`.
+  `migrate` drives MN-19 in MN-8's only safe order: ask the holder to give the
+  world up, wait for the control-plane row to complete, then acquire the lease on
+  the target. There is no window in which two nodes hold it.
+- **`/world admin drain <node> [on|off]`** (MN-22), plus `DRAIN_NODE` and
+  `MIGRATE_WORLD` handlers on the node. Both run `WorldHandoff` — one
+  implementation of MN-19's warn, eject, commit, unload, release.
+- **The heartbeat reports TPS.** MN-15 excludes on it; it was published as NULL.
+- **`player_world.last_node` (V3)**, written by the same conditional `UPDATE`
+  that moves the manifest pointer, so a fenced commit cannot claim a warm copy it
+  did not write. MN-15a's warm-copy term has no other source: `assigned_node` is
+  NULL for exactly the worlds placement is asked about.
+
+### Found while reviewing milestones 1–7
+
+Four defects, all fixed here, none of which a single-node test could have caught.
+
+- **FR-25's pre-unload commit was missing.** FR-25 orders it *commit, unload,
+  release*; the idle sweep did only the last two. Every idle unload therefore
+  discarded up to `storage.sync-minutes` of play — for the world and for every
+  profile in it together (FR-15). The sweep now commits first, leaves the world
+  loaded if the commit fails, and cancels the unload if somebody rejoins while it
+  is in flight. `UNLOAD_WORLD` owed the same commit and now runs the same path.
+- **Lease decisions read the local clock.** `WorldLifecycleService.readForLoad`
+  and the proxy's `/world join` both compared `lease_expires` to
+  `Instant.now()` to decide whether to skip MN-8's acquisition. That is
+  CONTRIBUTING rule 5 and MN-10b, and the ArchUnit rule that forbids it only
+  covers `core.db`, so both slipped through. Liveness is now asked of the
+  database (`leaseHolder`, `placementContext`).
+- **Self-fencing could not unload.** `SelfFencingHandler` messaged the players
+  inside and then called `unloadWorld`, which Bukkit refuses while a world holds
+  a player. The proxy eject that would have moved them was enqueued *after*, and
+  asynchronously. So a fenced world kept ticking, which is the one thing MN-10a
+  exists to prevent. Players are now moved to the holding area first.
+- **`/world create` placed one world id and inserted another.** Two independent
+  `WorldId.random()` calls. Invisible only because placement did not key on the
+  id; it does now.
+
+### Guarded so it cannot come back
+
+`backend` and `proxy` each gained an ArchUnit rule banning `Instant.now()`,
+`LocalDateTime.now()` and `System.currentTimeMillis()`, module-wide rather than
+scoped to the lease packages — the two sites that got it wrong were in the world
+and command packages, and a rule scoped to where the mistake was already made
+prevents nothing. `System.nanoTime` is untouched: it is monotonic, measures
+elapsed time, and is what `DbClock.elapsedSince` wraps. The proxy had no
+architecture test at all before this; it now also has `core`'s JDBC-confinement
+rule.
+
+### Reported rather than fixed
+
+- **MN-22 has no command in §6.** Section 6's table predates section 12, and
+  draining a node is an operational requirement with no other way to invoke it.
+  `/world admin drain` is therefore an addition to that table, not an entry from
+  it. Either §6 should gain the row or MN-22 should name the mechanism.
+- **`commitSnapshot`'s fencing predicate is looser than MN-3a.** It permits a
+  commit when `assigned_node IS NULL`, which lets a node commit after its own
+  `releaseLease` — harmless today, because generation still gates it and only the
+  releasing node can match, but it is not what MN-3a says.
+- **`/world`'s member commands have no permission checks.** §6 gives `create`
+  and `join` `gzmn.worlds.create` / `gzmn.worlds.join`; the proxy checks neither.
+  Only the `admin` subtree added here is gated. Out of scope for milestone 8, but
+  it is a gap in milestone 2's work rather than a deferred feature.
+
+### What must happen on two nodes before this milestone is believed
+
+Nothing below can be checked without a second node, which is the whole point of
+the milestone.
+
+- [ ] **Build it.** `./gradlew check build` on a JDK 25 with `repo.papermc.io`
+      reachable. Everything above is unverified until this passes.
+- [ ] **MN-16.** Two accounts, one world. The first joins and loads it on node A;
+      the second joins while node B is emptier, and must land on node A.
+- [ ] **MN-28 / MN-26, the §11 acceptance case.** Run the pair at different
+      Minecraft versions, open a world on the newer one so a commit stamps its
+      `data_version`, then confirm the older node is excluded from placement for
+      it *and* cannot acquire its lease.
+- [ ] **MN-15a's warm copy.** Load a world on A, let it idle out, then rejoin:
+      placement should return it to A, and the load should be warm.
+- [ ] **`/world admin migrate <id> <node>`** with a player inside: countdown
+      shown, player to lobby, snapshot committed, lease on the target, and the
+      player's inventory intact when they rejoin.
+- [ ] **`/world admin drain`**: the node stops taking placements, releases its
+      worlds, and leaves Velocity's server list on the next sweep. Then
+      `drain <node> off` brings it back.
+- [ ] **The FR-25 commit.** Play, let a world idle out, wipe local scratch,
+      rejoin: the last few minutes before the unload must still be there. This
+      is the regression the fix above is for.
+- [ ] **Self-fencing with a player inside**, which is milestone 7's SIGSTOP test
+      re-run now that the unload can actually succeed. Before this it could not:
+      Bukkit refuses to unload a world holding a player, so the fenced world kept
+      ticking and the test would have passed on the data-integrity assertion
+      while the liveness half silently did nothing.
+
+The e2e compose harness already boots two Paper nodes, so MN-16 and the version
+gate are reachable there rather than only by hand. Writing that scenario needs
+Docker, which this environment does not have, so it is not attempted here.
+
 ## Milestone 5 — transfer handoff, node registration and control plane: code complete, unverified
 
 `./gradlew check build` is green. Landed:
@@ -38,9 +186,10 @@ and both plugin jars have been loaded on real servers.
 
 ### Still to do in milestone 5
 
-- **MN-14 placement** is a stub that picks the least-loaded alive node after
-  MN-28's version filter. MN-15's scoring is milestone 8, where a second node
-  first exists to score against.
+- ~~**MN-14 placement** is a stub that picks the least-loaded alive node after
+  MN-28's version filter.~~ Done in milestone 8, along with the MN-16 defect the
+  stub was hiding: it scored a node and only then checked the lease, which is
+  indistinguishable from correct until a second node exists.
 
 ## Milestone 3 — visibility isolation: code complete, unverified
 
