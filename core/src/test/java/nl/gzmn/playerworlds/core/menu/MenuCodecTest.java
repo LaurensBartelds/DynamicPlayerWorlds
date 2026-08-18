@@ -287,6 +287,17 @@ class MenuCodecTest {
             byte[] encoded = MenuCodec.encodeIntent(correlationId, intent);
             assertThat(MenuCodec.decodeIntent(encoded).intent()).isEqualTo(intent);
         }
+
+        @Test
+        @DisplayName("round-trips HardDeleteWorld")
+        void roundTripsHardDeleteWorld() {
+            WorldId worldId = WorldId.random();
+            MenuIntent.HardDeleteWorld intent = new MenuIntent.HardDeleteWorld(worldId);
+            byte[] encoded = MenuCodec.encodeIntent(correlationId, intent);
+            IntentEnvelope envelope = MenuCodec.decodeIntent(encoded);
+            assertThat(envelope.correlationId()).isEqualTo(correlationId);
+            assertThat(envelope.intent()).isEqualTo(intent);
+        }
     }
 
     @Nested

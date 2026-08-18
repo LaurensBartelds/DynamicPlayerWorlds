@@ -39,6 +39,7 @@ public final class MenuCodec {
     public static final byte INTENT_ACCEPT_TRANSFER = 13;
     public static final byte INTENT_DECLINE_TRANSFER = 14;
     public static final byte INTENT_ACCEPT_INVITE = 15;
+    public static final byte INTENT_HARD_DELETE_WORLD = 16;
 
     private MenuCodec() {}
 
@@ -303,6 +304,10 @@ public final class MenuCodec {
                 out.writeByte(INTENT_ACCEPT_INVITE);
                 out.writeUTF(acceptInvite.ownerName());
             }
+            case MenuIntent.HardDeleteWorld hardDelete -> {
+                out.writeByte(INTENT_HARD_DELETE_WORLD);
+                writeWorldId(out, hardDelete.worldId());
+            }
         }
     }
 
@@ -333,6 +338,7 @@ public final class MenuCodec {
             case INTENT_ACCEPT_TRANSFER -> new MenuIntent.AcceptTransfer(in.readUTF());
             case INTENT_DECLINE_TRANSFER -> new MenuIntent.DeclineTransfer(in.readUTF());
             case INTENT_ACCEPT_INVITE -> new MenuIntent.AcceptInvite(in.readUTF());
+            case INTENT_HARD_DELETE_WORLD -> new MenuIntent.HardDeleteWorld(readWorldId(in));
             default -> throw new MenuCodecException("Unknown intent type: " + intentType);
         };
     }

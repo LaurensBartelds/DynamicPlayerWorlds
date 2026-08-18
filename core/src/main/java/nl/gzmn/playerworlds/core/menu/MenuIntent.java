@@ -26,7 +26,14 @@ public sealed interface MenuIntent
                 MenuIntent.RequestTransfer,
                 MenuIntent.AcceptTransfer,
                 MenuIntent.DeclineTransfer,
-                MenuIntent.AcceptInvite {
+                MenuIntent.AcceptInvite,
+                MenuIntent.HardDeleteWorld {
+
+    record HardDeleteWorld(WorldId worldId) implements MenuIntent {
+        public HardDeleteWorld {
+            Objects.requireNonNull(worldId, "worldId");
+        }
+    }
 
     record JoinWorld(WorldId worldId) implements MenuIntent {
         public JoinWorld {
