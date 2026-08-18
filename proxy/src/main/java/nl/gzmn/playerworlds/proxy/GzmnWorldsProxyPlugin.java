@@ -41,6 +41,7 @@ import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.proxy.command.WorldActions;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
@@ -190,7 +191,7 @@ public final class GzmnWorldsProxyPlugin {
         TransferRequestRepository transferRequests = new TransferRequestRepository(openedDatabase);
         this.transferRequests = transferRequests;
 
-        WorldCommand command = new WorldCommand(
+        WorldActions worldActions = new WorldActions(
                 proxy,
                 pools,
                 worldRepository,
@@ -200,6 +201,15 @@ public final class GzmnWorldsProxyPlugin {
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
+                placementService,
+                nodeCommands,
+                this::policy);
+
+        WorldCommand command = new WorldCommand(
+                worldActions,
+                proxy,
+                pools,
+                worldRepository,
                 placementService,
                 nodeCommands,
                 this::policy);
