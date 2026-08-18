@@ -20,6 +20,8 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
@@ -36,6 +38,7 @@ import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldBan;
@@ -88,6 +91,7 @@ public final class WorldCommand {
             "ban",
             "unban",
             "bans",
+            "storage",
             "admin");
 
     /** Permissions per specification section 6. */
@@ -98,7 +102,8 @@ public final class WorldCommand {
     public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
-    public static final List<String> ADMIN_SUBCOMMANDS = List.of("list", "unload", "migrate", "drain", "transfer");
+    public static final List<String> ADMIN_SUBCOMMANDS =
+            List.of("list", "unload", "migrate", "drain", "transfer", "storage", "archive", "restore", "delete");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -323,6 +328,10 @@ public final class WorldCommand {
                                     unban(context, StringArgumentType.getString(context, "player"));
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
+                .then(BrigadierCommand.literalArgumentBuilder("storage").executes(context -> {
+                    storage(context);
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
                 .then(BrigadierCommand.literalArgumentBuilder("bans").executes(context -> {
                     listBans(context);
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
@@ -406,6 +415,50 @@ public final class WorldCommand {
                                                     StringArgumentType.getString(context, "id"),
                                                     StringArgumentType.getString(context, "player"));
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("storage")
+                        .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                .suggests(this::suggestOnlinePlayers)
+                                .executes(context -> {
+                                    adminStorage(context.getSource(), StringArgumentType.getString(context, "player"));
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })))
+                .then(BrigadierCommand.literalArgumentBuilder("archive")
+                        .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
+                                .executes(context -> {
+                                    adminArchive(context.getSource(), StringArgumentType.getString(context, "id"));
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })))
+                .then(BrigadierCommand.literalArgumentBuilder("restore")
+                        .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
+                                .executes(context -> {
+                                    adminRestore(
+                                            context.getSource(), StringArgumentType.getString(context, "id"), null);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                        .suggests(this::suggestOnlinePlayers)
+                                        .executes(context -> {
+                                            adminRestore(
+                                                    context.getSource(),
+                                                    StringArgumentType.getString(context, "id"),
+                                                    StringArgumentType.getString(context, "player"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("delete")
+                        .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
+                                .executes(context -> {
+                                    adminDelete(
+                                            context.getSource(), StringArgumentType.getString(context, "id"), false);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                        .executes(context -> {
+                                            adminDelete(
+                                                    context.getSource(),
+                                                    StringArgumentType.getString(context, "id"),
+                                                    true);
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))));
     }
 
@@ -443,6 +496,11 @@ public final class WorldCommand {
             }
             if (worlds.findByOwnerAndName(owner, name).isPresent()) {
                 error(caller, "you already own a world called '" + name + "'");
+                return;
+            }
+            StorageQuota quota = quotaFor(caller, current);
+            if (quota.isExceeded()) {
+                refuseForQuota(caller, quota, "create another world");
                 return;
             }
 
@@ -556,21 +614,50 @@ public final class WorldCommand {
                 return;
             }
 
-            if (!worlds.transitionState(world.id(), WorldState.READY, WorldState.ARCHIVED)) {
-                error(caller, "'" + name + "' changed while you were confirming; try again");
+            String node = archivalNodeOrExplain(caller, world, current);
+            if (node == null) {
                 return;
             }
-            enqueueToWorldOrAliveNodes(world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
-            success(caller, "archived '" + name + "'; you have a world slot free");
+            enqueueTo(node, world, CommandKind.ARCHIVE_WORLD, ArchivePayload.format(caller.getUniqueId()), current);
+            info(caller, "archiving '" + name + "' on " + node + "; this may take a few minutes for a large world");
             info(
                     caller,
-                    "nothing was erased - the world data is still on its server and /world restore " + name
+                    "nothing is erased - the world is packed to cold storage and /world restore " + name
                             + " brings it back");
-            log.info(
-                    "world {} archived by its owner (FR-27, state transition only; FR-35's pack to object storage "
-                            + "arrives with milestone 11, so the folders are retained)",
-                    world.id());
+            log.info("world {} queued for archival on {} by its owner (FR-27, FR-35)", world.id(), node);
         });
+    }
+
+    /**
+     * Picks the node that will run an archival or restore, or explains why none can.
+     *
+     * <p>Unlike {@link #enqueueToWorldOrAliveNodes}, this never broadcasts. Archival and restore
+     * both take the world's lease (FR-35, FR-36), so sending them to every alive node would have
+     * one node do the work and the rest report a lease they could not take.
+     *
+     * @return the node id, or null when the caller has already been told why there is none
+     */
+    private @org.jspecify.annotations.Nullable String archivalNodeOrExplain(
+            Player caller, PlayerWorld world, NetworkPolicy current) throws SQLException {
+        if (world.assignedNode() != null) {
+            return world.assignedNode();
+        }
+        PlacementDecision decision = placement.forExistingWorld(world.id(), current);
+        return routableNodeOrExplain(caller, decision, world.id());
+    }
+
+    /** Addresses one control command at one node (CP-2). */
+    private void enqueueTo(
+            String nodeId, PlayerWorld world, CommandKind kind, String payloadJson, NetworkPolicy current)
+            throws SQLException {
+        nodeCommands.enqueue(
+                nodeId,
+                world.id(),
+                world.generation(),
+                kind.name(),
+                payloadJson,
+                current.holdingTimeout(),
+                ControlChannels.forNode(nodeId));
     }
 
     /**
@@ -607,11 +694,20 @@ public final class WorldCommand {
                                 + "); archive one before restoring this");
                 return;
             }
-            if (!worlds.transitionState(world.id(), WorldState.ARCHIVED, WorldState.READY)) {
-                error(caller, "'" + name + "' changed while you were restoring; try again");
+            // The quota is re-checked for the same reason as the cap: a restore puts live bytes
+            // back on the books, and the owner's allowance may have shrunk since it was archived.
+            StorageQuota quota = quotaFor(caller, current);
+            if (quota.isExceeded()) {
+                refuseForQuota(caller, quota, "restore '" + name + "'");
                 return;
             }
-            success(caller, "restored '" + name + "'");
+            String node = archivalNodeOrExplain(caller, world, current);
+            if (node == null) {
+                return;
+            }
+            enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(null), current);
+            info(caller, "restoring '" + name + "' on " + node + "; this may take a few minutes");
+            log.info("world {} queued for restore on {} by its owner (FR-36)", world.id(), node);
         });
     }
 
@@ -975,6 +1071,20 @@ public final class WorldCommand {
                 return;
             }
             PlayerWorld world = worldOpt.get();
+            // The world's bytes move onto the accepting player's allowance, so the check is
+            // against what they would hold afterwards, not against what they hold now.
+            StorageQuota quota = quotaFor(caller, current);
+            if (!quota.unlimited() && quota.usedBytes() + world.storageBytes() > quota.limitBytes()) {
+                refuseForQuota(
+                        caller,
+                        new StorageQuota(
+                                quota.playerUuid(),
+                                quota.usedBytes() + world.storageBytes(),
+                                quota.limitBytes(),
+                                false),
+                        "accept '" + world.name() + "'");
+                return;
+            }
             if (!world.ownerUuid().equals(owner.get())) {
                 transferRequests.deleteRequest(world.id(), caller.getUniqueId());
                 error(caller, ownerName + " is no longer the owner of '" + world.name() + "'");
@@ -1361,6 +1471,76 @@ public final class WorldCommand {
             return Optional.empty();
         }
         return Optional.of(owned.getFirst());
+    }
+
+    /**
+     * {@code /world storage} — the owner's live and archived footprint against their allowance.
+     */
+    private void storage(CommandContext<CommandSource> context) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            StorageQuota quota = quotaFor(caller, current);
+            renderStorage(caller, caller.getUsername(), quota, worlds.listOwnedBy(caller.getUniqueId()));
+        });
+    }
+
+    /**
+     * Evaluates the caller's quota (§4, FR-30a).
+     *
+     * <p>The permission side is a probe rather than a scan: Velocity's {@code PermissionSubject}
+     * answers one node at a time and cannot list what a player holds, so
+     * {@link StorageQuotaResolver#candidatePermissions()} names the tiers worth asking about.
+     */
+    private StorageQuota quotaFor(Player caller, NetworkPolicy current) throws SQLException {
+        long used = worlds.totalStorageUsedBy(caller.getUniqueId());
+        return StorageQuotaResolver.evaluate(
+                caller.getUniqueId(), used, caller::hasPermission, current.defaultStorageLimitBytes());
+    }
+
+    /** One consistent refusal, so a player is never told "no" without being told how much of what. */
+    private static void refuseForQuota(Player caller, StorageQuota quota, String attempted) {
+        error(
+                caller,
+                "you cannot " + attempted + ": that would use "
+                        + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " of your "
+                        + StorageQuotaResolver.formatBytes(quota.limitBytes()) + " storage allowance");
+        info(caller, "/world storage shows where it has gone; archiving a world does not free it, deleting does");
+    }
+
+    private static void renderStorage(CommandSource target, String who, StorageQuota quota, List<PlayerWorld> owned) {
+        if (quota.unlimited()) {
+            info(target, who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " (unlimited)");
+        } else {
+            info(
+                    target,
+                    who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " / "
+                            + StorageQuotaResolver.formatBytes(quota.limitBytes()) + " "
+                            + progressBar(quota.percentage()) + " "
+                            + String.format(Locale.ROOT, "%.0f%%", quota.percentage()));
+        }
+        if (owned.isEmpty()) {
+            info(target, "  no worlds owned");
+            return;
+        }
+        for (PlayerWorld world : owned) {
+            info(
+                    target,
+                    "  " + world.name() + " - " + StorageQuotaResolver.formatBytes(world.storageBytes()) + " - "
+                            + (world.state() == WorldState.ARCHIVED ? "archived" : "live"));
+        }
+    }
+
+    private static String progressBar(double percentage) {
+        int filled = (int) Math.round(percentage / 10.0);
+        StringBuilder bar = new StringBuilder(12).append('[');
+        for (int i = 0; i < 10; i++) {
+            bar.append(i < filled ? '|' : '.');
+        }
+        return bar.append(']').toString();
     }
 
     /**
@@ -1765,6 +1945,154 @@ public final class WorldCommand {
                                     + " by an administrator.",
                             NamedTextColor.YELLOW)));
         });
+    }
+
+    /** {@code /world admin storage <player>} — another player's footprint, for support. */
+    private void adminStorage(CommandSource source, String targetName) {
+        NetworkPolicy current = policy.get();
+        runAsAdmin(source, () -> {
+            Optional<UUID> target = resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                error(source, "no player called '" + targetName + "' has been seen on this network");
+                return;
+            }
+            UUID uuid = target.get();
+            long used = worlds.totalStorageUsedBy(uuid);
+            // An offline player cannot be asked about permissions, so their allowance shows as the
+            // network default. Saying so is better than quietly reporting a limit that is not theirs.
+            Optional<Player> online = proxy.getPlayer(uuid);
+            StorageQuota quota = online.isPresent()
+                    ? StorageQuotaResolver.evaluate(
+                            uuid, used, online.get()::hasPermission, current.defaultStorageLimitBytes())
+                    : new StorageQuota(uuid, used, current.defaultStorageLimitBytes(), false);
+            renderStorage(source, targetName + "'s", quota, worlds.listOwnedBy(uuid));
+            if (online.isEmpty()) {
+                info(source, "  (offline: allowance shown is the network default, not their permission tier)");
+            }
+        });
+    }
+
+    /** {@code /world admin archive <id>} — FR-35 on demand, whoever owns the world. */
+    private void adminArchive(CommandSource source, String rawId) {
+        Optional<WorldId> parsed = parseWorldId(source, rawId);
+        if (parsed.isEmpty()) {
+            return;
+        }
+        WorldId worldId = parsed.get();
+        NetworkPolicy current = policy.get();
+        runAsAdmin(source, () -> {
+            Optional<PlayerWorld> found = worlds.findById(worldId);
+            if (found.isEmpty()) {
+                error(source, "no world with that id");
+                return;
+            }
+            PlayerWorld world = found.get();
+            if (world.state() == WorldState.ARCHIVED) {
+                info(source, "'" + world.name() + "' is already archived");
+                return;
+            }
+            String node = adminNodeOrExplain(source, world, current);
+            if (node == null) {
+                return;
+            }
+            // No owner in the payload: an administrator archiving somebody else's world is not
+            // asserting who owns it, so the node must not refuse on an owner mismatch.
+            enqueueTo(node, world, CommandKind.ARCHIVE_WORLD, ArchivePayload.format(null), current);
+            success(source, "queued archival of '" + world.name() + "' on " + node);
+            log.info("world {} queued for archival on {} by an administrator (FR-35)", worldId, node);
+        });
+    }
+
+    /** {@code /world admin restore <id> [player]} — FR-36, optionally handing the world on. */
+    private void adminRestore(
+            CommandSource source, String rawId, @org.jspecify.annotations.Nullable String targetName) {
+        Optional<WorldId> parsed = parseWorldId(source, rawId);
+        if (parsed.isEmpty()) {
+            return;
+        }
+        WorldId worldId = parsed.get();
+        NetworkPolicy current = policy.get();
+        runAsAdmin(source, () -> {
+            Optional<PlayerWorld> found = worlds.findById(worldId);
+            if (found.isEmpty()) {
+                error(source, "no world with that id");
+                return;
+            }
+            PlayerWorld world = found.get();
+            if (world.state() != WorldState.ARCHIVED) {
+                error(source, "'" + world.name() + "' is " + world.state() + " and does not need restoring");
+                return;
+            }
+            UUID newOwner = null;
+            if (targetName != null) {
+                Optional<UUID> target = resolvePlayer(targetName);
+                if (target.isEmpty()) {
+                    error(source, "no player called '" + targetName + "' has been seen on this network");
+                    return;
+                }
+                newOwner = target.get();
+            }
+            String node = adminNodeOrExplain(source, world, current);
+            if (node == null) {
+                return;
+            }
+            enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(newOwner), current);
+            success(
+                    source,
+                    "queued restore of '" + world.name() + "' on " + node
+                            + (targetName == null ? "" : " for " + targetName));
+            log.info("world {} queued for restore on {} by an administrator (FR-36)", worldId, node);
+        });
+    }
+
+    /**
+     * {@code /world admin delete <id> confirm} — FR-37's hard deletion.
+     *
+     * <p>The only path that destroys an archive. FR-37 makes it an admin action with typed
+     * confirmation precisely because nothing else in the system removes one.
+     */
+    private void adminDelete(CommandSource source, String rawId, boolean confirmed) {
+        Optional<WorldId> parsed = parseWorldId(source, rawId);
+        if (parsed.isEmpty()) {
+            return;
+        }
+        WorldId worldId = parsed.get();
+        NetworkPolicy current = policy.get();
+        runAsAdmin(source, () -> {
+            Optional<PlayerWorld> found = worlds.findById(worldId);
+            if (found.isEmpty()) {
+                error(source, "no world with that id");
+                return;
+            }
+            PlayerWorld world = found.get();
+            if (!confirmed) {
+                error(
+                        source,
+                        "this permanently destroys '" + world.name() + "' and every archive of it. "
+                                + "There is no undo and no other command undoes it.");
+                info(source, "type /world admin delete " + worldId.value() + " confirm to go ahead");
+                return;
+            }
+            if (!worlds.deleteHard(worldId)) {
+                error(source, "'" + world.name() + "' changed while you were confirming; try again");
+                return;
+            }
+            enqueueToWorldOrAliveNodes(world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+            success(source, "permanently deleted '" + world.name() + "' (" + worldId.value() + ")");
+            log.warn(
+                    "world {} ('{}') hard deleted by an administrator (FR-37); archives are gone",
+                    worldId,
+                    world.name());
+        });
+    }
+
+    /** {@link #archivalNodeOrExplain} for an administrator, who is not the owner. */
+    private @org.jspecify.annotations.Nullable String adminNodeOrExplain(
+            CommandSource source, PlayerWorld world, NetworkPolicy current) throws SQLException {
+        if (world.assignedNode() != null) {
+            return world.assignedNode();
+        }
+        return routableNodeOrExplain(source, placement.forExistingWorld(world.id(), current), world.id());
     }
 
     // -----------------------------------------------------------------------

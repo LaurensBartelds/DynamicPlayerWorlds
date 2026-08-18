@@ -399,7 +399,8 @@ public final class WorldLifecycleService {
                             row.mcVersion(),
                             row.createdAt(),
                             row.lastPlayed(),
-                            WorldState.READY);
+                            WorldState.READY,
+                            row.storageBytes());
                     return (CreateOutcome) new CreateOutcome.Created(ready, loaded);
                 },
                 executors.db());

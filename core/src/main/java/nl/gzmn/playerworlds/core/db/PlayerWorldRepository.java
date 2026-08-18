@@ -30,7 +30,7 @@ public final class PlayerWorldRepository extends Repository {
     private static final String SELECT_COLUMNS = """
             id, owner_uuid, name, folder, seed, border_radius, visibility, description,
             settings::text AS settings_json, assigned_node, lease_expires, generation,
-            manifest_key, data_version, mc_version, created_at, last_played, state
+            manifest_key, data_version, mc_version, created_at, last_played, state, storage_bytes
             """;
 
     public PlayerWorldRepository(Database database) {
@@ -678,6 +678,36 @@ public final class PlayerWorldRepository extends Repository {
                 == 1;
     }
 
+    /**
+     * Destroys a world row and everything that references it (FR-37).
+     *
+     * <p>The only path in the system that removes an archive. FR-37 makes it an administrator
+     * action with typed confirmation for that reason: {@code /world delete} archives, FR-40's
+     * sweeps prune snapshots and manifests, and nothing else deletes a {@code player_world_archive}
+     * row at all. Members, bans, invites, archives and queued commands go with it through the
+     * schema's {@code ON DELETE CASCADE}.
+     *
+     * <p>The archive objects themselves outlive this call and are collected by FR-40's object
+     * storage sweep (MN-2b), which is the only component that can see the bucket.
+     *
+     * @return true when a row was removed
+     */
+    public boolean deleteHard(Connection connection, WorldId id) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        return execute(
+                        connection,
+                        "DELETE FROM player_world WHERE id = ?",
+                        statement -> statement.setObject(1, id.value()))
+                == 1;
+    }
+
+    /** {@link #deleteHard(Connection, WorldId)} in its own transaction. */
+    public boolean deleteHard(WorldId id) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        return database.inTransaction(connection -> deleteHard(connection, id));
+    }
+
     // -----------------------------------------------------------------------
     // Placement (MN-14, MN-15a, MN-16)
     // -----------------------------------------------------------------------
@@ -1054,7 +1084,8 @@ public final class PlayerWorldRepository extends Repository {
                 row.getString("mc_version"),
                 requireInstant(row, "created_at"),
                 optionalInstant(row, "last_played"),
-                WorldState.fromWire(Objects.requireNonNull(row.getString("state"), "state")));
+                WorldState.fromWire(Objects.requireNonNull(row.getString("state"), "state")),
+                row.getLong("storage_bytes"));
     }
 
     private static Instant requireInstant(ResultSet row, String column) throws SQLException {

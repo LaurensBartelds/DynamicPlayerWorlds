@@ -21,9 +21,13 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.EjectPayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
@@ -66,6 +70,7 @@ class WorldCommandTest {
     private NodeCommandRepository nodeCommands;
     private NetworkPolicy policy;
 
+    private Map<UUID, List<Component>> messagesByPlayer;
     private Map<UUID, Player> playersByUuid;
     private Map<String, Player> playersByName;
     private Map<String, RegisteredServer> registeredServers;
@@ -79,6 +84,7 @@ class WorldCommandTest {
         executors = PluginExecutors.create(2, 2, Runnable::run);
         policy = NetworkPolicy.defaults();
 
+        messagesByPlayer = new ConcurrentHashMap<>();
         playersByUuid = new ConcurrentHashMap<>();
         playersByName = new ConcurrentHashMap<>();
         registeredServers = new ConcurrentHashMap<>();
@@ -124,46 +130,7 @@ class WorldCommandTest {
     }
 
     @Test
-    void deleteConfirmEnqueuesUnloadWorldWhenAssignedNodePresent() throws Exception {
-        UUID ownerUuid = UUID.randomUUID();
-        Player player = registerPlayer(ownerUuid, "Alice");
-        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
-        registry.sync(policy.deadAfter());
-
-        WorldId worldId = WorldId.random();
-        PlayerWorld created = worlds.create(
-                worldId, ownerUuid, "testworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
-        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
-        database.inTransaction(connection -> {
-            try (var stmt =
-                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
-                stmt.setObject(1, worldId.value());
-                stmt.executeUpdate();
-            }
-            return null;
-        });
-
-        dispatcher.execute("world delete testworld confirm", player);
-
-        awaitCondition(() -> !nodeCommands
-                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
-                .isEmpty());
-
-        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
-        assertThat(ids).hasSize(1);
-        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
-        assertThat(command.command()).isEqualTo(CommandKind.UNLOAD_WORLD.name());
-        assertThat(command.targetNode()).isEqualTo("node-1");
-        assertThat(command.worldId()).isEqualTo(worldId);
-        assertThat(command.generation()).isEqualTo(created.generation());
-        assertThat(command.payloadJson()).isEqualTo(NodeCommand.EMPTY_PAYLOAD);
-
-        PlayerWorld updated = worlds.findById(worldId).orElseThrow();
-        assertThat(updated.state()).isEqualTo(WorldState.ARCHIVED);
-    }
-
-    @Test
-    void deleteConfirmEnqueuesUnloadWorldToAllAliveNodesWhenAssignedNodeNull() throws Exception {
+    void deleteConfirmTargetsExactlyOneNodeForArchivalWhenAssignedNodeNull() throws Exception {
         UUID ownerUuid = UUID.randomUUID();
         Player player = registerPlayer(ownerUuid, "Alice");
         nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
@@ -180,23 +147,22 @@ class WorldCommandTest {
         awaitCondition(() -> !nodeCommands
                         .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
                         .isEmpty()
-                && !nodeCommands
+                || !nodeCommands
                         .findClaimableIds("node-2", policy.controlClaimTimeout(), 10)
                         .isEmpty());
 
+        // Archival acquires the world's lease (FR-35). Sending it to every alive node would have
+        // one node do the work and the rest fail on a lease they could not take, so placement
+        // picks a single target instead.
         List<Long> node1Ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
-        assertThat(node1Ids).hasSize(1);
-        NodeCommand cmd1 = nodeCommands.findById(node1Ids.getFirst()).orElseThrow();
-        assertThat(cmd1.command()).isEqualTo(CommandKind.UNLOAD_WORLD.name());
-        assertThat(cmd1.worldId()).isEqualTo(worldId);
-        assertThat(cmd1.generation()).isEqualTo(created.generation());
-
         List<Long> node2Ids = nodeCommands.findClaimableIds("node-2", policy.controlClaimTimeout(), 10);
-        assertThat(node2Ids).hasSize(1);
-        NodeCommand cmd2 = nodeCommands.findById(node2Ids.getFirst()).orElseThrow();
-        assertThat(cmd2.command()).isEqualTo(CommandKind.UNLOAD_WORLD.name());
-        assertThat(cmd2.worldId()).isEqualTo(worldId);
-        assertThat(cmd2.generation()).isEqualTo(created.generation());
+        assertThat(node1Ids.size() + node2Ids.size()).isEqualTo(1);
+
+        List<Long> ids = node1Ids.isEmpty() ? node2Ids : node1Ids;
+        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.ARCHIVE_WORLD.name());
+        assertThat(command.worldId()).isEqualTo(worldId);
+        assertThat(command.generation()).isEqualTo(created.generation());
     }
 
     @Test
@@ -1053,12 +1019,331 @@ class WorldCommandTest {
         });
     }
 
+    // -----------------------------------------------------------------------
+    // Milestone 11: storage quotas, archival and restore
+    // -----------------------------------------------------------------------
+
+    /** Grants every tier at or below the named one, which is how a permission plugin stacks them. */
+    private static Predicate<String> storageTier(String tier) {
+        long granted = StorageQuotaResolver.parsePermissionLimit(StorageQuotaResolver.PERMISSION_STORAGE_PREFIX + tier);
+        return permission -> {
+            long value = StorageQuotaResolver.parsePermissionLimit(permission);
+            if (value > 0) {
+                return value <= granted;
+            }
+            // Everything that is not a storage tier is held as normal, minus the two blanket
+            // exemptions — a tiered player is precisely one who is not unlimited.
+            return !StorageQuotaResolver.PERMISSION_STORAGE_UNLIMITED.equals(permission)
+                    && !StorageQuotaResolver.PERMISSION_ADMIN.equals(permission);
+        };
+    }
+
+    private void assignNode(WorldId worldId, String nodeId) throws Exception {
+        database.inTransaction(connection -> {
+            try (var stmt = connection.prepareStatement("UPDATE player_world SET assigned_node = ? WHERE id = ?")) {
+                stmt.setString(1, nodeId);
+                stmt.setObject(2, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    private void setStorageBytes(WorldId worldId, long bytes) throws Exception {
+        database.inTransaction(connection -> {
+            try (var stmt = connection.prepareStatement("UPDATE player_world SET storage_bytes = ? WHERE id = ?")) {
+                stmt.setLong(1, bytes);
+                stmt.setObject(2, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    @Test
+    void storageShowsUsageBarAndOwnedWorlds() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice", storageTier("10gb"));
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "bigworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        setStorageBytes(worldId, 5L * 1024 * 1024 * 1024);
+
+        dispatcher.execute("world storage", player);
+        awaitCondition(() -> messagesTo(player).stream().anyMatch(m -> m.contains("storage:")));
+
+        List<String> messages = messagesTo(player);
+        assertThat(messages)
+                .anySatisfy(line -> assertThat(line)
+                        .contains("5.00 GB")
+                        .contains("10.00 GB")
+                        .contains("50%")
+                        .contains("[|||||.....]"));
+        assertThat(messages)
+                .anySatisfy(line -> assertThat(line).contains("bigworld").contains("live"));
+    }
+
+    @Test
+    void storageReportsUnlimitedForAdmins() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(
+                ownerUuid, "Root", permission -> StorageQuotaResolver.PERMISSION_ADMIN.equals(permission));
+
+        dispatcher.execute("world storage", player);
+        awaitCondition(() -> messagesTo(player).stream().anyMatch(m -> m.contains("storage:")));
+
+        assertThat(messagesTo(player)).anySatisfy(line -> assertThat(line).contains("unlimited"));
+    }
+
+    @Test
+    void createRefusedWhenStorageQuotaExceeded() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice", storageTier("100mb"));
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId existing = WorldId.random();
+        worlds.create(existing, ownerUuid, "hoarder", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(existing, WorldState.CREATING, WorldState.READY);
+        setStorageBytes(existing, 200L * 1024 * 1024);
+
+        dispatcher.execute("world create another", player);
+        awaitCondition(() -> messagesTo(player).stream().anyMatch(m -> m.contains("storage allowance")));
+
+        assertThat(messagesTo(player)).anySatisfy(line -> assertThat(line).contains("cannot create another world"));
+        assertThat(worlds.findByOwnerAndName(ownerUuid, "another")).isEmpty();
+    }
+
+    @Test
+    void deleteConfirmEnqueuesArchiveWorldWithOwnerPayload() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld created =
+                worlds.create(worldId, ownerUuid, "packme", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        assignNode(worldId, "node-1");
+
+        dispatcher.execute("world delete packme confirm", player);
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.ARCHIVE_WORLD.name());
+        assertThat(command.worldId()).isEqualTo(worldId);
+        assertThat(command.generation()).isEqualTo(created.generation());
+        assertThat(ArchivePayload.parse(command.payloadJson()).orElseThrow().ownerUuid())
+                .isEqualTo(ownerUuid);
+
+        // The state change is the node's to make, once the archive verifies (FR-35).
+        assertThat(worlds.findById(worldId).orElseThrow().state()).isEqualTo(WorldState.READY);
+    }
+
+    @Test
+    void restoreRefusedWhenStorageQuotaExceeded() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice", storageTier("100mb"));
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "coldworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+        setStorageBytes(worldId, 500L * 1024 * 1024);
+
+        dispatcher.execute("world restore coldworld", player);
+        awaitCondition(() -> messagesTo(player).stream().anyMatch(m -> m.contains("storage allowance")));
+
+        assertThat(messagesTo(player)).anySatisfy(line -> assertThat(line).contains("cannot restore 'coldworld'"));
+        assertThat(nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10))
+                .isEmpty();
+        assertThat(worlds.findById(worldId).orElseThrow().state()).isEqualTo(WorldState.ARCHIVED);
+    }
+
+    @Test
+    void restoreEnqueuesRestoreWorldWhenWithinQuota() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player player = registerPlayer(ownerUuid, "Alice", storageTier("10gb"));
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld created = worlds.create(
+                worldId, ownerUuid, "coldworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+        setStorageBytes(worldId, 100L * 1024 * 1024);
+
+        dispatcher.execute("world restore coldworld", player);
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.RESTORE_WORLD.name());
+        assertThat(command.worldId()).isEqualTo(worldId);
+        assertThat(command.generation()).isEqualTo(created.generation());
+
+        // The node makes the world READY only once the archive is unpacked and verified (FR-36).
+        assertThat(worlds.findById(worldId).orElseThrow().state()).isEqualTo(WorldState.ARCHIVED);
+    }
+
+    @Test
+    void transferAcceptRefusedWhenWorldWouldExceedQuota() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        Player ownerPlayer = registerPlayer(ownerUuid, "Alice");
+        Player targetPlayer = registerPlayer(targetUuid, "Bob", storageTier("1gb"));
+        names.remember(ownerUuid, "Alice");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "heavy", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        setStorageBytes(worldId, 2L * 1024 * 1024 * 1024);
+        var _ = transferRequests.requestTransfer(worldId, targetUuid, ownerUuid, Duration.ofMinutes(10));
+
+        dispatcher.execute("world transfer accept Alice", targetPlayer);
+        awaitCondition(() -> messagesTo(targetPlayer).stream().anyMatch(m -> m.contains("storage allowance")));
+
+        assertThat(messagesTo(targetPlayer)).anySatisfy(line -> assertThat(line).contains("cannot accept 'heavy'"));
+        assertThat(worlds.findById(worldId).orElseThrow().ownerUuid()).isEqualTo(ownerUuid);
+        assertThat(ownerPlayer.getUniqueId()).isEqualTo(ownerUuid);
+    }
+
+    @Test
+    void adminStorageReportsAnotherPlayersFootprint() throws Exception {
+        UUID adminUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+        Player admin = registerPlayer(adminUuid, "Root");
+        registerPlayer(targetUuid, "Bob", storageTier("10gb"));
+        names.remember(targetUuid, "Bob");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, targetUuid, "bobworld", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        setStorageBytes(worldId, 1024L * 1024 * 1024);
+
+        dispatcher.execute("world admin storage Bob", admin);
+        awaitCondition(() -> messagesTo(admin).stream().anyMatch(m -> m.contains("storage:")));
+
+        assertThat(messagesTo(admin))
+                .anySatisfy(line -> assertThat(line)
+                        .contains("Bob's storage:")
+                        .contains("1.00 GB")
+                        .contains("10.00 GB"));
+        assertThat(messagesTo(admin)).anySatisfy(line -> assertThat(line).contains("bobworld"));
+    }
+
+    @Test
+    void adminArchiveEnqueuesArchiveWorldWithoutOwnerAssertion() throws Exception {
+        UUID adminUuid = UUID.randomUUID();
+        UUID ownerUuid = UUID.randomUUID();
+        Player admin = registerPlayer(adminUuid, "Root");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "somebodyelses", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        assignNode(worldId, "node-1");
+
+        dispatcher.execute("world admin archive " + worldId.value(), admin);
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.ARCHIVE_WORLD.name());
+        // No owner asserted: an admin archiving another player's world must not trip the
+        // owner-mismatch guard in WorldArchiver.
+        assertThat(ArchivePayload.parse(command.payloadJson()).orElseThrow().ownerUuid())
+                .isNull();
+    }
+
+    @Test
+    void adminRestoreCarriesTargetOwnerInPayload() throws Exception {
+        UUID adminUuid = UUID.randomUUID();
+        UUID ownerUuid = UUID.randomUUID();
+        UUID newOwnerUuid = UUID.randomUUID();
+        Player admin = registerPlayer(adminUuid, "Root");
+        registerPlayer(newOwnerUuid, "Carol");
+        names.remember(newOwnerUuid, "Carol");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "reassign", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        dispatcher.execute("world admin restore " + worldId.value() + " Carol", admin);
+        awaitCondition(() -> !nodeCommands
+                .findClaimableIds("node-1", policy.controlClaimTimeout(), 10)
+                .isEmpty());
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        NodeCommand command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.RESTORE_WORLD.name());
+        assertThat(ArchivePayload.parse(command.payloadJson()).orElseThrow().ownerUuid())
+                .isEqualTo(newOwnerUuid);
+    }
+
+    @Test
+    void adminDeleteRequiresConfirmationThenDestroysTheWorld() throws Exception {
+        UUID adminUuid = UUID.randomUUID();
+        UUID ownerUuid = UUID.randomUUID();
+        Player admin = registerPlayer(adminUuid, "Root");
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, ownerUuid, "doomed", 12345L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        dispatcher.execute("world admin delete " + worldId.value(), admin);
+        awaitCondition(() -> messagesTo(admin).stream().anyMatch(m -> m.contains("permanently destroys")));
+        assertThat(worlds.findById(worldId)).isPresent();
+
+        dispatcher.execute("world admin delete " + worldId.value() + " confirm", admin);
+        awaitCondition(() -> worlds.findById(worldId).isEmpty());
+        assertThat(worlds.findById(worldId)).isEmpty();
+    }
+
     private Player registerPlayer(UUID uuid, String username) {
+        return registerPlayer(uuid, username, permission -> true);
+    }
+
+    /** A player whose permission answers are scripted, for the storage tier probe. */
+    private Player registerPlayer(UUID uuid, String username, Predicate<String> permissions) {
         List<Component> messages = Collections.synchronizedList(new ArrayList<>());
-        Player player = mockPlayer(uuid, username, messages);
+        Player player = mockPlayer(uuid, username, messages, permissions);
         playersByUuid.put(uuid, player);
         playersByName.put(username, player);
+        messagesByPlayer.put(uuid, messages);
         return player;
+    }
+
+    /** Every message the command surface sent to this player, oldest first. */
+    private List<String> messagesTo(Player player) {
+        List<Component> captured = messagesByPlayer.get(player.getUniqueId());
+        if (captured == null) {
+            return List.of();
+        }
+        synchronized (captured) {
+            return captured.stream()
+                    .map(component -> PlainTextComponentSerializer.plainText().serialize(component))
+                    .toList();
+        }
     }
 
     private void awaitCondition(Callable<Boolean> condition) throws Exception {
@@ -1112,6 +1397,11 @@ class WorldCommandTest {
     }
 
     private Player mockPlayer(UUID uuid, String username, List<Component> receivedMessages) {
+        return mockPlayer(uuid, username, receivedMessages, permission -> true);
+    }
+
+    private Player mockPlayer(
+            UUID uuid, String username, List<Component> receivedMessages, Predicate<String> permissions) {
         return (Player) Proxy.newProxyInstance(
                 Player.class.getClassLoader(), new Class<?>[] {Player.class}, (proxy, method, args) -> {
                     if ("getUniqueId".equals(method.getName())) {
@@ -1126,8 +1416,8 @@ class WorldCommandTest {
                         }
                         return null;
                     }
-                    if ("hasPermission".equals(method.getName())) {
-                        return true;
+                    if ("hasPermission".equals(method.getName()) && args != null && args.length == 1) {
+                        return permissions.test((String) args[0]);
                     }
                     if ("toString".equals(method.getName())) {
                         return "MockPlayer[" + username + "]";

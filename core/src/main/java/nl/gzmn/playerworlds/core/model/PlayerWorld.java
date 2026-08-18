@@ -43,6 +43,8 @@ import org.jspecify.annotations.Nullable;
  * @param createdAt database time
  * @param lastPlayed database time of the last session, {@code null} if never played
  * @param state FR-35 / FR-36 lifecycle state
+ * @param storageBytes size on the owner's allowance: live snapshot bytes while the world is
+ *     READY, archive bytes once it is ARCHIVED (§4)
  */
 public record PlayerWorld(
         WorldId id,
@@ -62,7 +64,8 @@ public record PlayerWorld(
         @Nullable String mcVersion,
         Instant createdAt,
         @Nullable Instant lastPlayed,
-        WorldState state) {
+        WorldState state,
+        long storageBytes) {
 
     /** Empty per-world settings, as the schema default writes them. */
     public static final String EMPTY_SETTINGS = "{}";
@@ -85,6 +88,9 @@ public record PlayerWorld(
         }
         if (generation < 0) {
             throw new IllegalArgumentException("generation must not be negative, was: " + generation);
+        }
+        if (storageBytes < 0) {
+            throw new IllegalArgumentException("storageBytes must not be negative, was: " + storageBytes);
         }
         if (!folder.equals(id.folder())) {
             // FR-2a is not advice. A folder that does not follow from the id means
@@ -129,6 +135,7 @@ public record PlayerWorld(
                 mcVersion,
                 createdAt,
                 lastPlayed,
-                state);
+                state,
+                0L);
     }
 }
