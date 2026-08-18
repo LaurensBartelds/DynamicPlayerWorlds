@@ -45,6 +45,7 @@ import nl.gzmn.playerworlds.proxy.command.WorldActions;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
+import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import org.jspecify.annotations.Nullable;
@@ -219,8 +220,21 @@ public final class GzmnWorldsProxyPlugin {
                                 .build(),
                         built);
 
+        com.velocitypowered.api.command.BrigadierCommand builtWorlds = command.buildWorlds();
+        proxy.getCommandManager()
+                .register(
+                        proxy.getCommandManager()
+                                .metaBuilder(builtWorlds)
+                                .plugin(this)
+                                .build(),
+                        builtWorlds);
+
+        // Register menu channel and channel listener for GUI menu interaction
+        proxy.getChannelRegistrar().register(MenuChannelListener.CHANNEL_IDENTIFIER);
+        proxy.getEventManager().register(this, new MenuChannelListener(worldActions));
+
         logger.info(
-                "enabled: lobby '{}', /world registered ({} subcommands), db threads {}",
+                "enabled: lobby '{}', /world and /worlds registered ({} subcommands), db threads {}",
                 config.lobbyServer(),
                 WorldCommand.SUBCOMMANDS.size(),
                 pools.dbThreads());
@@ -235,7 +249,10 @@ public final class GzmnWorldsProxyPlugin {
         String raw = event.getCommand();
         String lower = raw.trim().toLowerCase(Locale.ROOT);
         for (String backendSub : WorldCommand.BACKEND_SUBCOMMANDS) {
-            if (lower.equals("world " + backendSub) || lower.startsWith("world " + backendSub + " ")) {
+            if (lower.equals("world " + backendSub)
+                    || lower.startsWith("world " + backendSub + " ")
+                    || lower.equals("worlds " + backendSub)
+                    || lower.startsWith("worlds " + backendSub + " ")) {
                 event.setResult(
                         com.velocitypowered.api.event.command.CommandExecuteEvent.CommandResult.forwardToServer());
                 return;
@@ -381,6 +398,7 @@ public final class GzmnWorldsProxyPlugin {
         if (registry != null) {
             registry.unregisterAll();
         }
+        proxy.getChannelRegistrar().unregister(MenuChannelListener.CHANNEL_IDENTIFIER);
         this.playerNames = null;
         this.transferRequests = null;
         PluginExecutors pools = this.executors;

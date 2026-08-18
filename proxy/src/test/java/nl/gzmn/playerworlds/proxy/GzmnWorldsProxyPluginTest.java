@@ -4,11 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.velocitypowered.api.command.CommandManager;
 import com.velocitypowered.api.command.CommandMeta;
+import com.velocitypowered.api.event.EventManager;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.messages.ChannelRegistrar;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.proxy.server.ServerInfo;
 import com.velocitypowered.api.scheduler.ScheduledTask;
@@ -210,6 +212,14 @@ class GzmnWorldsProxyPluginTest {
             Map<UUID, Player> playersByUuid, Map<String, Player> playersByName, Map<String, RegisteredServer> servers) {
         Scheduler scheduler = mockScheduler();
         CommandManager commandManager = mockCommandManager();
+        ChannelRegistrar channelRegistrar = (ChannelRegistrar) Proxy.newProxyInstance(
+                ChannelRegistrar.class.getClassLoader(),
+                new Class<?>[] {ChannelRegistrar.class},
+                (proxy, method, args) -> defaultValue(method.getReturnType()));
+        EventManager eventManager = (EventManager) Proxy.newProxyInstance(
+                EventManager.class.getClassLoader(),
+                new Class<?>[] {EventManager.class},
+                (proxy, method, args) -> defaultValue(method.getReturnType()));
 
         return (ProxyServer) Proxy.newProxyInstance(
                 ProxyServer.class.getClassLoader(), new Class<?>[] {ProxyServer.class}, (proxy, method, args) -> {
@@ -246,6 +256,12 @@ class GzmnWorldsProxyPluginTest {
                     }
                     if ("getCommandManager".equals(method.getName())) {
                         return commandManager;
+                    }
+                    if ("getChannelRegistrar".equals(method.getName())) {
+                        return channelRegistrar;
+                    }
+                    if ("getEventManager".equals(method.getName())) {
+                        return eventManager;
                     }
                     if ("toString".equals(method.getName())) {
                         return "MockProxyServer";

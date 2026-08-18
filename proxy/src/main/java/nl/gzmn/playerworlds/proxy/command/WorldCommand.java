@@ -7,6 +7,7 @@ import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.ServerConnection;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Locale;
@@ -14,6 +15,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -33,10 +35,13 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.menu.MenuCodec;
+import nl.gzmn.playerworlds.core.menu.OpenMenu;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
@@ -163,11 +168,13 @@ public final class WorldCommand {
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
+    private static final AtomicLong CORRELATION_SEQ = new AtomicLong(1);
+
     /** Builds the Brigadier tree. */
     public BrigadierCommand build() {
         LiteralArgumentBuilder<CommandSource> root = BrigadierCommand.literalArgumentBuilder("world")
                 .executes(context -> {
-                    usage(context.getSource());
+                    openMenuOrUsage(context.getSource());
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 })
                 .then(BrigadierCommand.literalArgumentBuilder("invite")
@@ -1049,6 +1056,30 @@ public final class WorldCommand {
                 error(source, "that did not work; the failure is in the proxy log");
             }
         });
+    }
+
+    /**
+     * Builds the Brigadier command for {@code /worlds}.
+     */
+    public BrigadierCommand buildWorlds() {
+        LiteralArgumentBuilder<CommandSource> root = BrigadierCommand.literalArgumentBuilder("worlds")
+                .executes(context -> {
+                    openMenuOrUsage(context.getSource());
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                });
+        return new BrigadierCommand(root);
+    }
+
+    private static void openMenuOrUsage(CommandSource source) {
+        if (source instanceof Player player) {
+            Optional<ServerConnection> connection = player.getCurrentServer();
+            if (connection.isPresent()) {
+                byte[] data = MenuCodec.encodeOpenMenu(new OpenMenu(CORRELATION_SEQ.getAndIncrement()));
+                connection.get().sendPluginMessage(MenuChannelListener.CHANNEL_IDENTIFIER, data);
+                return;
+            }
+        }
+        usage(source);
     }
 
     private static void usage(CommandSource source) {
