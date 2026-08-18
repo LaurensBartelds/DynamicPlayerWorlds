@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.util.Objects;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
+import nl.gzmn.playerworlds.core.config.NodeMode;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.db.DatabaseSettings;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
@@ -48,6 +49,7 @@ public final class BackendConfig {
         String nodeId = requireString(config, "node.id");
         String address = requireString(config, "node.address");
         Duration heartbeat = Duration.ofSeconds(config.getLong("node.heartbeat-seconds", 30L));
+        NodeMode mode = parseMode(config);
 
         DatabaseSettings database = new DatabaseSettings(
                 requireString(config, "database.url"),
@@ -64,7 +66,7 @@ public final class BackendConfig {
         long minFree = config.getLong("storage.min-free-space-bytes", NodeConfig.DEFAULT_MIN_FREE_SPACE_BYTES);
 
         return new NodeConfig(
-                nodeId, address, heartbeat, database, objectStorage(config), scratch, cache, quarantine, minFree);
+                nodeId, address, heartbeat, database, objectStorage(config), scratch, cache, quarantine, minFree, mode);
     }
 
     /** Prometheus scrape endpoint, loopback by default. */
@@ -140,6 +142,14 @@ public final class BackendConfig {
             throw new ConfigException(key + " is required in config.yml and was not set");
         }
         return value;
+    }
+
+    private static NodeMode parseMode(FileConfiguration config) {
+        String raw = config.getString("node.mode");
+        if (raw == null || raw.isBlank()) {
+            return NodeMode.WORLDS;
+        }
+        return NodeMode.fromConfig(raw);
     }
 
     private static @Nullable String emptyToNull(@Nullable String value) {

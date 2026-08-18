@@ -42,6 +42,7 @@ import org.jspecify.annotations.Nullable;
  * @param quarantinePath crash-debris holding area (MN-13)
  * @param minFreeSpaceBytes refuse creation below this free space on the scratch
  *     volume (NFR-3)
+ * @param mode operating mode of the node ({@link NodeMode#WORLDS} or {@link NodeMode#GUI_ONLY})
  */
 public record NodeConfig(
         String nodeId,
@@ -52,7 +53,8 @@ public record NodeConfig(
         Path scratchPath,
         Path cachePath,
         Path quarantinePath,
-        long minFreeSpaceBytes) {
+        long minFreeSpaceBytes,
+        NodeMode mode) {
 
     /** Specification section 12.8 default for {@code node.heartbeat-seconds}. */
     public static final Duration DEFAULT_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
@@ -64,6 +66,29 @@ public record NodeConfig(
      */
     public static final long DEFAULT_MIN_FREE_SPACE_BYTES = 20L * 1024 * 1024 * 1024;
 
+    public NodeConfig(
+            String nodeId,
+            String address,
+            Duration heartbeatInterval,
+            DatabaseSettings database,
+            @Nullable StorageClientSettings storage,
+            Path scratchPath,
+            Path cachePath,
+            Path quarantinePath,
+            long minFreeSpaceBytes) {
+        this(
+                nodeId,
+                address,
+                heartbeatInterval,
+                database,
+                storage,
+                scratchPath,
+                cachePath,
+                quarantinePath,
+                minFreeSpaceBytes,
+                NodeMode.WORLDS);
+    }
+
     public NodeConfig {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(address, "address");
@@ -72,6 +97,7 @@ public record NodeConfig(
         Objects.requireNonNull(scratchPath, "scratchPath");
         Objects.requireNonNull(cachePath, "cachePath");
         Objects.requireNonNull(quarantinePath, "quarantinePath");
+        Objects.requireNonNull(mode, "mode");
 
         if (nodeId.isBlank()) {
             throw new ConfigException("node.id must not be blank");

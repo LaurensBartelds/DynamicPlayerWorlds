@@ -82,6 +82,31 @@ class PluginSmokeTest {
     }
 
     @Test
+    @DisplayName("gui-only mode suppresses heartbeat and world lifecycle")
+    void guiOnlyModeSuppressesHeartbeatAndLifecycle() throws Exception {
+        TestDatabase.openFresh().close();
+
+        FileConfiguration config = config(TestDatabase.settings());
+        config.set("node.mode", "gui-only");
+
+        GzmnWorldsPlugin plugin = MockBukkit.loadWithConfig(SmokePlugin.class, config);
+
+        assertThat(plugin.isEnabled()).isTrue();
+        assertThat(Bukkit.getPluginManager().isPluginEnabled(plugin)).isTrue();
+        assertThat(plugin.platform()).isNotNull();
+        assertThat(plugin.executors()).isNotNull();
+        assertThat(plugin.policy()).isNotNull();
+        assertThat(plugin.heartbeat()).isNull();
+        assertThat(plugin.registry()).isNull();
+        assertThat(plugin.controlPlane()).isNull();
+        assertThat(plugin.commits()).isNull();
+        assertThat(plugin.archiver()).isNull();
+        assertThat(plugin.restorer()).isNull();
+        assertThat(plugin.leaseCoordinator()).isNull();
+        assertThat(plugin.fencingHandler()).isNull();
+    }
+
+    @Test
     @DisplayName("the descriptor declares /pworld, gated, and leaves /world to the proxy (plan 01, D8)")
     void descriptorDeclaresTheOperatorCommand() throws Exception {
         // Read the built descriptor rather than asking the mock server. MockBukkit

@@ -56,6 +56,7 @@ import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
+import nl.gzmn.playerworlds.core.config.NodeMode;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.ControlPlane;
 import nl.gzmn.playerworlds.core.db.ArchiveRepository;
@@ -219,6 +220,17 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 });
         this.executors = pools;
 
+        this.nodeConfig = node;
+        schedulePolicyRefresh(openedDatabase, pools);
+
+        if (node.mode() == NodeMode.GUI_ONLY) {
+            getLogger()
+                    .info(() -> "enabled (gui-only mode): node "
+                            + node.nodeId()
+                            + ", database connected, world lifecycle and heartbeat suppressed");
+            return;
+        }
+
         WorldsMetrics worldsMetrics = WorldsMetrics.create();
         this.metrics = worldsMetrics;
 
@@ -268,9 +280,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + "); meters remain in-process only");
         }
 
-        this.nodeConfig = node;
         startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report);
-        schedulePolicyRefresh(openedDatabase, pools);
 
         // Concatenation rather than a format string: %d formats through the
         // default locale, which forbidden-apis bans and which would render the
