@@ -516,7 +516,8 @@ class PlayerWorldRepositoryTest {
 
         assertThat(worlds.placementContext(id).orElseThrow().leaseHolder()).isNull();
 
-        worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+        assertThat(worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
         assertThat(worlds.placementContext(id).orElseThrow().leaseHolder()).isEqualTo("node-1");
 
         // Expired in database time. The row still names node-1 in assigned_node,
@@ -575,7 +576,8 @@ class PlayerWorldRepositoryTest {
 
         // node-2 takes over; node-1 wakes up and tries to finish its commit.
         updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, id);
-        worlds.acquireLease(id, "node-2", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+        assertThat(worlds.acquireLease(id, "node-2", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
 
         boolean stale = worlds.commitSnapshot(
                 id,
@@ -607,14 +609,14 @@ class PlayerWorldRepositoryTest {
         create(privateOnTwo, UUID.randomUUID(), "p2", 1L);
         updateColumn("UPDATE player_world SET visibility = 'PUBLIC' WHERE id = ?", null, publicOnOne);
 
-        worlds.acquireLease(privateOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
-        worlds.acquireLease(publicOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
-        worlds.acquireLease(expiredOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
-        worlds.acquireLease(privateOnTwo, "node-2", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
+        assertThat(worlds.acquireLease(privateOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
+        assertThat(worlds.acquireLease(publicOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
+        assertThat(worlds.acquireLease(expiredOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
+        assertThat(worlds.acquireLease(privateOnTwo, "node-2", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
         updateColumn(
                 "UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, expiredOnOne);
 
@@ -633,10 +635,10 @@ class PlayerWorldRepositoryTest {
         WorldId lapsed = WorldId.random();
         create(held, UUID.randomUUID(), "held", 1L);
         create(lapsed, UUID.randomUUID(), "lapsed", 1L);
-        worlds.acquireLease(held, "node-1", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
-        worlds.acquireLease(lapsed, "node-1", 4903, java.time.Duration.ofMinutes(3))
-                .orElseThrow();
+        assertThat(worlds.acquireLease(held, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
+        assertThat(worlds.acquireLease(lapsed, "node-1", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
         updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, lapsed);
 
         assertThat(worlds.worldsLeasedTo("node-1")).containsExactly(held);
