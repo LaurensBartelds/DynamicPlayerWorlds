@@ -33,6 +33,7 @@ import nl.gzmn.playerworlds.backend.profile.ProfileListener;
 import nl.gzmn.playerworlds.backend.profile.ProfileService;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
 import nl.gzmn.playerworlds.backend.storage.ArchiveStorage;
+import nl.gzmn.playerworlds.backend.storage.MaintenanceTask;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
 import nl.gzmn.playerworlds.backend.storage.WorldArchiver;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
@@ -68,6 +69,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
+import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
@@ -538,6 +540,19 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         long syncIntervalSeconds = Math.max(1, this.policy.syncInterval().toSeconds());
         var _ = pools.sched()
                 .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
+
+        // FR-40: inactivity archival and recovery of interrupted archival and restore. Every
+        // node schedules it; the advisory lock inside decides which one actually sweeps.
+        MaintenanceTask maintenance = new MaintenanceTask(
+                openedDatabase,
+                new PlayerWorldRepository(openedDatabase),
+                new TransferRequestRepository(openedDatabase),
+                new NodeCommandRepository(openedDatabase),
+                this::policy,
+                node.nodeId());
+        long maintenanceSeconds = Math.max(1, this.policy.maintenanceInterval().toSeconds());
+        var _ = pools.sched()
+                .scheduleWithFixedDelay(maintenance, maintenanceSeconds, maintenanceSeconds, TimeUnit.SECONDS);
 
         // Before the control plane, because DRAIN_NODE acts on the heartbeat: a
         // drain that could not set the draining flag would take the node's worlds

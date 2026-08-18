@@ -708,6 +708,104 @@ public final class PlayerWorldRepository extends Repository {
         return database.inTransaction(connection -> deleteHard(connection, id));
     }
 
+    /**
+     * Worlds nobody has played for {@code afterDays}, oldest first, for FR-34's auto-archival.
+     *
+     * <p>Compared in database time (rule 5, MN-10b): the sweep runs on whichever node holds
+     * FR-40's advisory lock, and a node whose clock has drifted must not archive a world that
+     * was played yesterday. A world that has never been played counts from its creation.
+     *
+     * @param afterDays days without a login before a world is due for archival
+     * @param limit most rows to return in one sweep
+     */
+    public List<PlayerWorld> findInactive(int afterDays, int limit) throws SQLException {
+        if (afterDays < 1) {
+            throw new IllegalArgumentException("afterDays must be at least 1, was: " + afterDays);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE state = 'READY'
+                   AND assigned_node IS NULL
+                   AND COALESCE(last_played, created_at) < now() - (? * interval '1 day')
+                 ORDER BY COALESCE(last_played, created_at)
+                 LIMIT ?
+                """,
+                statement -> {
+                    statement.setInt(1, afterDays);
+                    statement.setInt(2, limit);
+                },
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Worlds stuck mid-archival or mid-restore with a dead lease, for FR-40's recovery sweep.
+     *
+     * <p>An expired lease is the whole signal: FR-35 and FR-36 are written as state transitions
+     * so that a crash leaves exactly this, and a live lease means the work is still in progress
+     * on some node rather than abandoned.
+     *
+     * @param state {@link WorldState#ARCHIVING} or {@link WorldState#RESTORING}
+     * @param limit most rows to return in one sweep
+     */
+    public List<PlayerWorld> findStuckWithDeadLease(WorldState state, int limit) throws SQLException {
+        Objects.requireNonNull(state, "state");
+        if (state != WorldState.ARCHIVING && state != WorldState.RESTORING) {
+            throw new IllegalArgumentException("only ARCHIVING and RESTORING can be stuck, was: " + state);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE state = ?
+                   AND (assigned_node IS NULL OR lease_expires IS NULL OR lease_expires < now())
+                 ORDER BY lease_expires NULLS FIRST
+                 LIMIT ?
+                """,
+                statement -> {
+                    statement.setString(1, state.wire());
+                    statement.setInt(2, limit);
+                },
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Returns a world stuck in a transient state to a resting one and clears its dead lease (FR-40).
+     *
+     * <p>Fenced on the lease still being dead, so a node that picked the world up between the scan
+     * and this call keeps it. An interrupted archival goes back to READY and an interrupted restore
+     * back to ARCHIVED — in both cases the state the world was in before the attempt, which is safe
+     * because neither flow deletes anything before its checksum verifies.
+     *
+     * @return true when this call performed the reset
+     */
+    public boolean resetStuck(WorldId id, WorldState from, WorldState to) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(from, "from");
+        Objects.requireNonNull(to, "to");
+        return database.inTransaction(connection -> execute(connection, """
+                        UPDATE player_world
+                           SET state = ?,
+                               assigned_node = NULL,
+                               lease_expires = NULL
+                         WHERE id = ?
+                           AND state = ?
+                           AND (assigned_node IS NULL OR lease_expires IS NULL OR lease_expires < now())
+                        """, statement -> {
+                    statement.setString(1, to.wire());
+                    statement.setObject(2, id.value());
+                    statement.setString(3, from.wire());
+                })
+                == 1);
+    }
+
     // -----------------------------------------------------------------------
     // Placement (MN-14, MN-15a, MN-16)
     // -----------------------------------------------------------------------
