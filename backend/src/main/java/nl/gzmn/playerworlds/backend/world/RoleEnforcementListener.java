@@ -37,10 +37,16 @@ public final class RoleEnforcementListener implements Listener {
 
     private final WorldFolders folders;
     private final MembershipCache membership;
+    private final WorldSettingsCache settingsCache;
 
     public RoleEnforcementListener(WorldFolders folders, MembershipCache membership) {
+        this(folders, membership, new WorldSettingsCache());
+    }
+
+    public RoleEnforcementListener(WorldFolders folders, MembershipCache membership, WorldSettingsCache settingsCache) {
         this.folders = Objects.requireNonNull(folders, "folders");
         this.membership = Objects.requireNonNull(membership, "membership");
+        this.settingsCache = Objects.requireNonNull(settingsCache, "settingsCache");
     }
 
     /** FR-9: a visitor may not break blocks. */
@@ -67,8 +73,7 @@ public final class RoleEnforcementListener implements Listener {
      * <p>{@code InventoryOpenEvent} rather than {@code PlayerInteractEvent}
      * because it covers every route into a container — a right-click, a minecart
      * with a chest, another plugin opening one — where interact only covers the
-     * first. Interact stays permitted: FR-9 gives visitors "interact only", which
-     * is buttons, levers and doors.
+     * first.
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onInventoryOpen(InventoryOpenEvent event) {
@@ -85,34 +90,59 @@ public final class RoleEnforcementListener implements Listener {
         if (location == null) {
             return;
         }
-        Optional<Role> role = roleIn(location, player);
-        if (role.isEmpty()) {
+        Optional<WorldFolders.PlayerWorldDimension> resolved =
+                folders.resolve(location.getWorld().getName());
+        if (resolved.isEmpty()) {
             return;
         }
-        // Per-world visitor container access is FR-9e and lives in
-        // player_world.settings, which arrives with milestone 9. Until then the
-        // specification's stated default applies: containers are locked to
-        // BUILDER and above.
-        if (!role.get().canOpenContainers(false)) {
+        WorldId worldId = resolved.get().worldId();
+        Role role = membership.effectiveRole(worldId, player.getUniqueId());
+        boolean visitorsMayOpen = settingsCache.get(worldId).visitorsMayOpenContainers();
+        if (!role.canOpenContainers(visitorsMayOpen)) {
             event.setCancelled(true);
             deny(player, "You cannot open containers here.");
         }
     }
 
     /**
-     * Physical interaction that damages the world without being a break — trampling
-     * farmland, and anything else a visitor should not be able to do to a world
-     * they are only visiting.
+     * Physical interaction and mechanism use (FR-9, FR-9e).
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onInteract(PlayerInteractEvent event) {
         Block block = event.getClickedBlock();
-        if (block == null || event.getAction() != org.bukkit.event.block.Action.PHYSICAL) {
+        if (block == null) {
             return;
         }
-        if (!mayBuild(event.getPlayer(), block)) {
-            event.setCancelled(true);
+        Optional<WorldFolders.PlayerWorldDimension> resolved =
+                folders.resolve(block.getWorld().getName());
+        if (resolved.isEmpty()) {
+            return;
         }
+        WorldId worldId = resolved.get().worldId();
+        Role role = membership.effectiveRole(worldId, event.getPlayer().getUniqueId());
+
+        if (role == Role.VISITOR) {
+            if (isInteractiveMechanism(block)) {
+                if (!settingsCache.get(worldId).visitorsMayInteract()) {
+                    event.setCancelled(true);
+                    deny(event.getPlayer(), "Interactions are disabled in this world.");
+                }
+                return;
+            }
+            if (event.getAction() == org.bukkit.event.block.Action.PHYSICAL && !mayBuild(event.getPlayer(), block)) {
+                event.setCancelled(true);
+            }
+        }
+    }
+
+    private static boolean isInteractiveMechanism(Block block) {
+        org.bukkit.Material mat = block.getType();
+        return org.bukkit.Tag.DOORS.isTagged(mat)
+                || org.bukkit.Tag.TRAPDOORS.isTagged(mat)
+                || org.bukkit.Tag.FENCE_GATES.isTagged(mat)
+                || org.bukkit.Tag.BUTTONS.isTagged(mat)
+                || org.bukkit.Tag.PRESSURE_PLATES.isTagged(mat)
+                || mat == org.bukkit.Material.LEVER;
     }
 
     /**

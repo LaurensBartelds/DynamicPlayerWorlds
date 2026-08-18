@@ -35,10 +35,12 @@ import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
+import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.model.WorldSettings;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
@@ -53,6 +55,7 @@ class WorldCommandTest {
     private PluginExecutors executors;
     private PlayerWorldRepository worlds;
     private MembershipRepository membership;
+    private WorldBanRepository bans;
     private PlayerNameRepository names;
     private NodeRepository nodeRepo;
     private NodeRegistry registry;
@@ -80,6 +83,7 @@ class WorldCommandTest {
 
         worlds = new PlayerWorldRepository(database);
         membership = new MembershipRepository(database);
+        bans = new WorldBanRepository(database);
         names = new PlayerNameRepository(database);
         nodeRepo = new NodeRepository(database);
         registry = new NodeRegistry(proxy, nodeRepo);
@@ -91,6 +95,7 @@ class WorldCommandTest {
                 executors,
                 worlds,
                 membership,
+                bans,
                 names,
                 transfers,
                 registry,
@@ -487,6 +492,182 @@ class WorldCommandTest {
         assertThat(transfers.claim(ownerUuid, policy.transferExpiry())).isEmpty();
     }
 
+    @Test
+    void listShowsOwnedAndMemberWorlds() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        List<Component> messages = Collections.synchronizedList(new ArrayList<>());
+        Player player = mockPlayer(ownerUuid, "Alice", messages);
+        playersByUuid.put(ownerUuid, player);
+        playersByName.put("Alice", player);
+        names.remember(ownerUuid, "Alice");
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "alice-world", 123L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+
+        dispatcher.execute("world list", player);
+
+        awaitCondition(() -> messages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("alice-world")));
+    }
+
+    @Test
+    void browseShowsPublicWorlds() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        List<Component> messages = Collections.synchronizedList(new ArrayList<>());
+        Player player = mockPlayer(ownerUuid, "Alice", messages);
+        playersByUuid.put(ownerUuid, player);
+        playersByName.put("Alice", player);
+        names.remember(ownerUuid, "Alice");
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "public-park", 123L, 5000, Visibility.PUBLIC);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+        worlds.updateVisibility(w1, Visibility.PUBLIC, "A beautiful public park");
+
+        dispatcher.execute("world browse", player);
+
+        awaitCondition(() -> messages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("public-park") && text.contains("A beautiful public park")));
+    }
+
+    @Test
+    void setPublicTogglesVisibility() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        List<Component> messages = Collections.synchronizedList(new ArrayList<>());
+        Player player = mockPlayer(ownerUuid, "Alice", messages);
+        playersByUuid.put(ownerUuid, player);
+        playersByName.put("Alice", player);
+        names.remember(ownerUuid, "Alice");
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "my-world", 123L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+
+        dispatcher.execute("world public on Welcome everyone", player);
+
+        awaitCondition(() -> messages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("now PUBLIC")));
+
+        PlayerWorld updated = worlds.findById(w1).orElseThrow();
+        assertThat(updated.visibility()).isEqualTo(Visibility.PUBLIC);
+        assertThat(updated.description()).isEqualTo("Welcome everyone");
+    }
+
+    @Test
+    void setSettingAndShowSettings() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        List<Component> messages = Collections.synchronizedList(new ArrayList<>());
+        Player player = mockPlayer(ownerUuid, "Alice", messages);
+        playersByUuid.put(ownerUuid, player);
+        playersByName.put("Alice", player);
+        names.remember(ownerUuid, "Alice");
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "pvp-arena", 123L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+
+        dispatcher.execute("world set pvp on", player);
+
+        awaitCondition(() -> messages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("set pvp = true")));
+
+        PlayerWorld updated = worlds.findById(w1).orElseThrow();
+        WorldSettings settings = WorldSettings.fromJson(updated.settingsJson());
+        assertThat(settings.pvp()).isTrue();
+
+        dispatcher.execute("world settings", player);
+        awaitCondition(() -> messages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("PVP: on")));
+    }
+
+    @Test
+    void banAndUnbanPlayer() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID targetUuid = UUID.randomUUID();
+
+        List<Component> ownerMessages = Collections.synchronizedList(new ArrayList<>());
+        Player owner = mockPlayer(ownerUuid, "Alice", ownerMessages);
+        playersByUuid.put(ownerUuid, owner);
+        playersByName.put("Alice", owner);
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> targetMessages = Collections.synchronizedList(new ArrayList<>());
+        Player target = mockPlayer(targetUuid, "Bob", targetMessages);
+        playersByUuid.put(targetUuid, target);
+        playersByName.put("Bob", target);
+        names.remember(targetUuid, "Bob");
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "alice-world", 123L, 5000, Visibility.PUBLIC);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+        membership.addVisitorIfAbsent(w1, targetUuid);
+
+        dispatcher.execute("world ban Bob Griefing", owner);
+
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("banned Bob")));
+
+        assertThat(bans.isBanned(w1, targetUuid)).isTrue();
+        assertThat(membership.findMember(w1, targetUuid)).isEmpty();
+
+        // Banned player cannot join
+        dispatcher.execute("world join Alice alice-world", target);
+        awaitCondition(() -> targetMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("banned from 'alice-world'")));
+
+        // Unban
+        dispatcher.execute("world unban Bob", owner);
+        awaitCondition(() -> ownerMessages.stream()
+                .map(c -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(c))
+                .anyMatch(text -> text.contains("unbanned Bob")));
+        assertThat(bans.isBanned(w1, targetUuid)).isFalse();
+    }
+
+    @Test
+    void joinPublicWorldAutoEnrollsVisitor() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        UUID visitorUuid = UUID.randomUUID();
+
+        registerPlayer(ownerUuid, "Alice");
+        names.remember(ownerUuid, "Alice");
+
+        List<Component> visitorMessages = Collections.synchronizedList(new ArrayList<>());
+        Player visitor = mockPlayer(visitorUuid, "Bob", visitorMessages);
+        playersByUuid.put(visitorUuid, visitor);
+        playersByName.put("Bob", visitor);
+        names.remember(visitorUuid, "Bob");
+
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25565", 0, 0, 10, 20.0, false, 3000, "1.21.4");
+        registry.sync(policy.deadAfter());
+
+        WorldId w1 = WorldId.random();
+        worlds.create(w1, ownerUuid, "public-hub", 123L, 5000, Visibility.PUBLIC);
+        worlds.transitionState(w1, WorldState.CREATING, WorldState.READY);
+
+        dispatcher.execute("world join Alice public-hub", visitor);
+
+        awaitCondition(
+                () -> transfers.claim(visitorUuid, policy.transferExpiry()).isPresent());
+        assertThat(membership.findMember(w1, visitorUuid)).isPresent();
+        assertThat(membership.findMember(w1, visitorUuid).get().role()).isEqualTo(Role.VISITOR);
+    }
+
     private void setDataVersion(WorldId worldId, int dataVersion) throws Exception {
         database.inTransaction(connection -> {
             try (var statement = connection.prepareStatement("UPDATE player_world SET data_version = ? WHERE id = ?")) {
@@ -570,6 +751,9 @@ class WorldCommandTest {
                             receivedMessages.add(comp);
                         }
                         return null;
+                    }
+                    if ("hasPermission".equals(method.getName())) {
+                        return true;
                     }
                     if ("toString".equals(method.getName())) {
                         return "MockPlayer[" + username + "]";

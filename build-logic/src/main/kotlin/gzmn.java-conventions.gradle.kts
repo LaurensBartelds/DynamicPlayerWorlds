@@ -16,10 +16,12 @@ java {
 val libs = versionCatalogs.named("libs")
 
 dependencies {
-    // JSpecify annotations are compile-only: they carry no runtime behaviour
-    // and must not be shaded into a plugin jar.
+    // JSpecify and Checker Framework annotations are compile-only: they carry
+    // no runtime behaviour and must not be shaded into a plugin jar.
     compileOnly(libs.findLibrary("jspecify").orElseThrow())
     testCompileOnly(libs.findLibrary("jspecify").orElseThrow())
+    compileOnly(libs.findLibrary("checker-qual").orElseThrow())
+    testCompileOnly(libs.findLibrary("checker-qual").orElseThrow())
 
     testImplementation(platform(libs.findLibrary("junit-bom").orElseThrow()))
     testImplementation(libs.findLibrary("junit-jupiter").orElseThrow())
@@ -30,12 +32,22 @@ dependencies {
 tasks.withType<JavaCompile>().configureEach {
     options.encoding = "UTF-8"
     options.compilerArgs.addAll(
-        listOf("-Xlint:all", "-Xlint:-serial", "-Xlint:-processing", "-Xlint:-this-escape"),
+        listOf(
+            "-Xlint:all",
+            "-Xlint:-serial",
+            "-Xlint:-processing",
+            "-Xlint:-this-escape",
+            "-Xlint:-classfile",
+        ),
     )
 }
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    jvmArgs(
+        "--enable-native-access=ALL-UNNAMED",
+        "--sun-misc-unsafe-memory-access=allow",
+    )
     testLogging {
         events("failed", "skipped")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL

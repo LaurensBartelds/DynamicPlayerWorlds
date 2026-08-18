@@ -73,11 +73,24 @@ public final class LoadedWorld {
     /** Sweeps still to wait before retrying a failed unload (FR-25a). Main-thread only. */
     private int retryWaitSweeps;
 
+    private final String settingsJson;
+
     public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius) {
-        this(id, ownerUuid, name, seed, borderRadius, 0L);
+        this(id, ownerUuid, name, seed, borderRadius, 0L, PlayerWorld.EMPTY_SETTINGS);
     }
 
     public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, long generation) {
+        this(id, ownerUuid, name, seed, borderRadius, generation, PlayerWorld.EMPTY_SETTINGS);
+    }
+
+    public LoadedWorld(
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            long seed,
+            int borderRadius,
+            long generation,
+            String settingsJson) {
         this.id = Objects.requireNonNull(id, "id");
         this.ownerUuid = Objects.requireNonNull(ownerUuid, "ownerUuid");
         this.name = Objects.requireNonNull(name, "name");
@@ -87,6 +100,7 @@ public final class LoadedWorld {
         }
         this.borderRadius = borderRadius;
         this.generation = generation;
+        this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
         this.lastHeartbeatNanoTime = System.nanoTime();
     }
 
@@ -94,7 +108,13 @@ public final class LoadedWorld {
     public static LoadedWorld of(PlayerWorld row) {
         Objects.requireNonNull(row, "row");
         LoadedWorld world = new LoadedWorld(
-                row.id(), row.ownerUuid(), row.name(), row.seed(), row.borderRadius(), row.generation());
+                row.id(),
+                row.ownerUuid(),
+                row.name(),
+                row.seed(),
+                row.borderRadius(),
+                row.generation(),
+                row.settingsJson());
         if (row.leaseExpires() != null) {
             world.recordLeaseGrant(row.leaseExpires());
         }
@@ -111,6 +131,10 @@ public final class LoadedWorld {
 
     public String name() {
         return name;
+    }
+
+    public String settingsJson() {
+        return settingsJson;
     }
 
     /** Shared by all three dimensions, so one materialised later matches (FR-2). */

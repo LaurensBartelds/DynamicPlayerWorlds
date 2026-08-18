@@ -221,6 +221,18 @@ public final class MembershipRepository extends Repository {
         });
     }
 
+    /**
+     * Grants {@link Role#VISITOR} membership to a player joining a public world (FR-9c).
+     *
+     * <p>If the player is already a member (e.g. BUILDER or OWNER), their existing role
+     * is left untouched.
+     */
+    public boolean addVisitorIfAbsent(WorldId worldId, UUID uuid) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(uuid, "uuid");
+        return database.inTransaction(connection -> insertMember(connection, worldId, uuid, Role.VISITOR, null) == 1);
+    }
+
     public Optional<WorldMember> findMember(WorldId worldId, UUID uuid) throws SQLException {
         return database.withConnection(connection -> findMember(connection, worldId, uuid));
     }

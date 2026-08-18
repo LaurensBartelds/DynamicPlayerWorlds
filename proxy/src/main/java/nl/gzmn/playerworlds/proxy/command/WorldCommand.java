@@ -8,7 +8,9 @@ import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -30,11 +32,14 @@ import nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
+import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldMember;
+import nl.gzmn.playerworlds.core.model.WorldSettings;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.placement.PlacementDecision;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
@@ -48,15 +53,12 @@ import org.slf4j.LoggerFactory;
  * <p>Registering this claims the whole namespace, which is why
  * {@link #BACKEND_SUBCOMMANDS} exists: section 6 keeps {@code /world leave} and
  * {@code /world report} on the backend, and they are only reachable if this
- * handler forwards them. The list is empty until those land (milestones 5 and
- * 9), but the mechanism is designed in rather than discovered — which is what
- * OQ-15 asked for.
+ * handler forwards them. Resolves OQ-15.
  *
- * <p>Milestone 2 implemented the membership half: invite, accept, kick, members
- * and promote. Milestone 5 added {@code create} and {@code join} over the
- * transfer handoff, and milestone 8 gave both a real placement service (MN-14 to
- * MN-16, MN-28) and added the {@code admin} subtree. {@code browse} waits for
- * milestone 9.
+ * <p>Milestone 2 implemented membership (invite, accept, kick, members, promote).
+ * Milestone 5 added {@code create} and {@code join} over the transfer handoff,
+ * milestone 8 added placement and {@code admin}, and milestone 9 adds public
+ * worlds, browsing, world listing, per-world settings, and bans.
  *
  * <p>Every handler returns immediately and does its database work on the pool.
  */
@@ -65,10 +67,31 @@ public final class WorldCommand {
     private static final Logger log = LoggerFactory.getLogger(WorldCommand.class);
 
     /** Implemented here, for the enable log line and for tests. */
-    public static final List<String> SUBCOMMANDS =
-            List.of("create", "join", "delete", "restore", "invite", "accept", "kick", "members", "promote", "admin");
+    public static final List<String> SUBCOMMANDS = List.of(
+            "create",
+            "join",
+            "delete",
+            "restore",
+            "invite",
+            "accept",
+            "kick",
+            "members",
+            "promote",
+            "list",
+            "browse",
+            "public",
+            "set",
+            "settings",
+            "ban",
+            "unban",
+            "bans",
+            "admin");
 
-    /** {@code gzmn.worlds.admin}, which section 6 puts on every {@code /world admin} entry. */
+    /** Permissions per specification section 6. */
+    public static final String CREATE_PERMISSION = "gzmn.worlds.create";
+
+    public static final String JOIN_PERMISSION = "gzmn.worlds.join";
+    public static final String PUBLIC_PERMISSION = "gzmn.worlds.public";
     public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
@@ -81,12 +104,13 @@ public final class WorldCommand {
      * milestone 9; naming the list is what stops either from being silently
      * unreachable when it arrives.
      */
-    public static final List<String> BACKEND_SUBCOMMANDS = List.of("leave");
+    public static final List<String> BACKEND_SUBCOMMANDS = List.of("leave", "report");
 
     private final ProxyServer proxy;
     private final PluginExecutors executors;
     private final PlayerWorldRepository worlds;
     private final MembershipRepository membership;
+    private final WorldBanRepository bans;
     private final PlayerNameRepository names;
     private final PendingTransferRepository transfers;
     private final NodeRegistry registry;
@@ -99,6 +123,7 @@ public final class WorldCommand {
             PluginExecutors executors,
             PlayerWorldRepository worlds,
             MembershipRepository membership,
+            WorldBanRepository bans,
             PlayerNameRepository names,
             PendingTransferRepository transfers,
             NodeRegistry registry,
@@ -109,6 +134,7 @@ public final class WorldCommand {
         this.executors = Objects.requireNonNull(executors, "executors");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
         this.membership = Objects.requireNonNull(membership, "membership");
+        this.bans = Objects.requireNonNull(bans, "bans");
         this.names = Objects.requireNonNull(names, "names");
         this.transfers = Objects.requireNonNull(transfers, "transfers");
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -132,6 +158,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("accept")
+                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     accept(context, StringArgumentType.getString(context, "owner"));
@@ -150,6 +177,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
+                        .requires(source -> source.hasPermission(CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {
                                     create(context, StringArgumentType.getString(context, "name"), null);
@@ -181,6 +209,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
+                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     join(context, StringArgumentType.getString(context, "owner"), null);
@@ -196,6 +225,76 @@ public final class WorldCommand {
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("members").executes(context -> {
                     members(context);
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
+                .then(BrigadierCommand.literalArgumentBuilder("list").executes(context -> {
+                    list(context);
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
+                .then(BrigadierCommand.literalArgumentBuilder("browse")
+                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
+                        .executes(context -> {
+                            browse(context);
+                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                        }))
+                .then(BrigadierCommand.literalArgumentBuilder("public")
+                        .requires(source -> source.hasPermission(PUBLIC_PERMISSION))
+                        .then(BrigadierCommand.literalArgumentBuilder("on")
+                                .executes(context -> {
+                                    setPublic(context, true, null);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder(
+                                                "description", StringArgumentType.greedyString())
+                                        .executes(context -> {
+                                            setPublic(
+                                                    context,
+                                                    true,
+                                                    StringArgumentType.getString(context, "description"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.literalArgumentBuilder("off").executes(context -> {
+                            setPublic(context, false, null);
+                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                        })))
+                .then(BrigadierCommand.literalArgumentBuilder("set")
+                        .then(BrigadierCommand.requiredArgumentBuilder("setting", StringArgumentType.word())
+                                .then(BrigadierCommand.requiredArgumentBuilder("value", StringArgumentType.word())
+                                        .executes(context -> {
+                                            setSetting(
+                                                    context,
+                                                    StringArgumentType.getString(context, "setting"),
+                                                    StringArgumentType.getString(context, "value"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("settings").executes(context -> {
+                    showSettings(context);
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
+                .then(BrigadierCommand.literalArgumentBuilder("ban")
+                        .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                .suggests(this::suggestOnlinePlayers)
+                                .executes(context -> {
+                                    ban(context, StringArgumentType.getString(context, "player"), null);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder(
+                                                "reason", StringArgumentType.greedyString())
+                                        .executes(context -> {
+                                            ban(
+                                                    context,
+                                                    StringArgumentType.getString(context, "player"),
+                                                    StringArgumentType.getString(context, "reason"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("unban")
+                        .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                .executes(context -> {
+                                    unban(context, StringArgumentType.getString(context, "player"));
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })))
+                .then(BrigadierCommand.literalArgumentBuilder("bans").executes(context -> {
+                    listBans(context);
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(adminTree());
@@ -507,15 +606,30 @@ public final class WorldCommand {
                     .filter(world -> world.state() == nl.gzmn.playerworlds.core.model.WorldState.READY
                             || world.state() == nl.gzmn.playerworlds.core.model.WorldState.CREATING)
                     .findFirst();
-            if (target.isEmpty()
-                    || membership
-                            .findMember(target.get().id(), caller.getUniqueId())
-                            .isEmpty()) {
+            if (target.isEmpty()) {
                 error(caller, "no world you can join matches that");
                 return;
             }
 
             PlayerWorld world = target.get();
+
+            if (bans.isBanned(world.id(), caller.getUniqueId())) {
+                Optional<WorldBan> ban = bans.findBan(world.id(), caller.getUniqueId());
+                String reason = ban.flatMap(b -> Optional.ofNullable(b.reason()))
+                        .map(r -> ": " + r)
+                        .orElse("");
+                error(caller, "you are banned from '" + world.name() + "'" + reason);
+                return;
+            }
+
+            if (membership.findMember(world.id(), caller.getUniqueId()).isEmpty()) {
+                if (world.visibility() == Visibility.PUBLIC) {
+                    membership.addVisitorIfAbsent(world.id(), caller.getUniqueId());
+                } else {
+                    error(caller, "no world you can join matches that");
+                    return;
+                }
+            }
 
             // MN-14, in its order: if the world holds a live lease, route to that
             // node; only if it does not is a node selected and the lease acquired.
@@ -734,6 +848,291 @@ public final class WorldCommand {
                 String display =
                         resolved.getOrDefault(member.uuid(), member.uuid().toString());
                 info(caller, "  " + display + "  " + member.role());
+            }
+        });
+    }
+
+    /** {@code /world list} — lists owned and member worlds. */
+    private void list(CommandContext<CommandSource> context) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            UUID callerUuid = caller.getUniqueId();
+            List<PlayerWorld> owned = worlds.listOwnedBy(callerUuid);
+            List<WorldMember> memberships = membership.membershipsOf(callerUuid).stream()
+                    .filter(m -> m.role() != Role.OWNER)
+                    .toList();
+
+            if (owned.isEmpty() && memberships.isEmpty()) {
+                info(caller, "You do not own or belong to any worlds yet. Use /world create <name> to create one.");
+                return;
+            }
+
+            info(caller, "Your worlds:");
+            if (owned.isEmpty()) {
+                info(caller, "  (none)");
+            } else {
+                for (PlayerWorld world : owned) {
+                    info(
+                            caller,
+                            "  • " + world.name() + " [" + world.state() + "] (visibility: " + world.visibility()
+                                    + ")");
+                }
+            }
+
+            info(caller, "");
+            info(caller, "Shared worlds (member):");
+            if (memberships.isEmpty()) {
+                info(caller, "  (none)");
+            } else {
+                List<UUID> ownerUuids = new ArrayList<>();
+                List<PlayerWorld> sharedWorlds = new ArrayList<>();
+                for (WorldMember m : memberships) {
+                    Optional<PlayerWorld> pw = worlds.findById(m.worldId());
+                    if (pw.isPresent()) {
+                        sharedWorlds.add(pw.get());
+                        ownerUuids.add(pw.get().ownerUuid());
+                    }
+                }
+                Map<UUID, String> ownerNames = names.namesOf(ownerUuids);
+                for (int i = 0; i < sharedWorlds.size(); i++) {
+                    PlayerWorld sw = sharedWorlds.get(i);
+                    WorldMember m = memberships.get(i);
+                    String ownerDisplayName = ownerNames.getOrDefault(
+                            sw.ownerUuid(), sw.ownerUuid().toString());
+                    info(caller, "  • " + sw.name() + " (Owner: " + ownerDisplayName + ") - " + m.role());
+                }
+            }
+        });
+    }
+
+    /** {@code /world browse} — FR-9b. */
+    private void browse(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        runAsAdmin(source, () -> {
+            List<PlayerWorld> publicWorlds = worlds.listPublicWorlds();
+            if (publicWorlds.isEmpty()) {
+                info(source, "There are no public worlds available right now.");
+                return;
+            }
+            List<UUID> owners =
+                    publicWorlds.stream().map(PlayerWorld::ownerUuid).toList();
+            Map<UUID, String> ownerNames = names.namesOf(owners);
+
+            info(source, "Public worlds:");
+            for (PlayerWorld w : publicWorlds) {
+                String ownerName =
+                        ownerNames.getOrDefault(w.ownerUuid(), w.ownerUuid().toString());
+                String desc = w.description() != null ? " - \"" + w.description() + "\"" : "";
+                String status = (w.assignedNode() != null && w.leaseExpires() != null)
+                        ? "[LOADED on " + w.assignedNode() + "]"
+                        : "[UNLOADED]";
+                info(source, "  • " + w.name() + " (Owner: " + ownerName + ") " + status + desc);
+            }
+        });
+    }
+
+    /** {@code /world public on|off [description]} — FR-9a, FR-9f, FR-9h. */
+    private void setPublic(
+            CommandContext<CommandSource> context,
+            boolean isPublic,
+            @org.jspecify.annotations.Nullable String description) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            Visibility visibility = isPublic ? Visibility.PUBLIC : Visibility.PRIVATE;
+            String desc =
+                    isPublic ? (description != null ? description : world.get().description()) : null;
+
+            if (!worlds.updateVisibility(world.get().id(), visibility, desc)) {
+                error(caller, "could not update world visibility; try again");
+                return;
+            }
+            enqueueToWorldOrAliveNodes(world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+
+            if (isPublic) {
+                success(
+                        caller,
+                        "'" + world.get().name() + "' is now PUBLIC"
+                                + (desc != null ? " (\"" + desc + "\")" : "")
+                                + "; strangers can now browse and join as visitors");
+            } else {
+                success(caller, "'" + world.get().name() + "' is now PRIVATE; existing members are still members");
+            }
+        });
+    }
+
+    /** {@code /world set <setting> <value>} — FR-9e. */
+    private void setSetting(CommandContext<CommandSource> context, String settingName, String valueStr) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            WorldSettings settings = WorldSettings.fromJson(world.get().settingsJson());
+            WorldSettings updated;
+            String normKey = settingName.toLowerCase(Locale.ROOT);
+            String normVal = valueStr.toLowerCase(Locale.ROOT);
+            boolean boolVal = normVal.equals("on")
+                    || normVal.equals("true")
+                    || normVal.equals("allow")
+                    || normVal.equals("yes")
+                    || normVal.equals("enable");
+
+            switch (normKey) {
+                case "pvp" -> updated = settings.withPvp(boolVal);
+                case "containers" -> updated = settings.withVisitorsMayOpenContainers(boolVal);
+                case "interact", "redstone", "doors" -> updated = settings.withVisitorsMayInteract(boolVal);
+                case "mob-griefing", "mobgriefing" -> updated = settings.withMobGriefing(boolVal);
+                default -> {
+                    error(
+                            caller,
+                            "unknown setting '" + settingName
+                                    + "'; valid settings: pvp, containers, interact, mob-griefing");
+                    return;
+                }
+            }
+
+            if (!worlds.updateSettings(world.get().id(), updated.toJson())) {
+                error(caller, "could not update world settings; try again");
+                return;
+            }
+            enqueueToWorldOrAliveNodes(world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+            success(
+                    caller,
+                    "set " + normKey + " = " + boolVal + " for '" + world.get().name() + "'");
+        });
+    }
+
+    /** {@code /world settings} — displays current settings (FR-9e). */
+    private void showSettings(CommandContext<CommandSource> context) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            WorldSettings settings = WorldSettings.fromJson(world.get().settingsJson());
+            info(caller, "Settings for '" + world.get().name() + "':");
+            info(caller, "  PVP: " + (settings.pvp() ? "on" : "off"));
+            info(caller, "  Visitors may open containers: " + (settings.visitorsMayOpenContainers() ? "on" : "off"));
+            info(
+                    caller,
+                    "  Visitors may interact (doors/buttons/redstone): "
+                            + (settings.visitorsMayInteract() ? "on" : "off"));
+            info(caller, "  Mob griefing: " + (settings.mobGriefing() ? "on" : "off"));
+        });
+    }
+
+    /** {@code /world ban <player> [reason]} — FR-9d. */
+    private void ban(
+            CommandContext<CommandSource> context,
+            String targetName,
+            @org.jspecify.annotations.Nullable String reason) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        NetworkPolicy current = policy.get();
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            Optional<UUID> target = resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                error(caller, "no player called '" + targetName + "' has been seen on this network");
+                return;
+            }
+            if (target.get().equals(world.get().ownerUuid())) {
+                error(caller, "you cannot ban yourself from your own world");
+                return;
+            }
+
+            bans.ban(world.get().id(), target.get(), caller.getUniqueId(), reason);
+            membership.revokeInvite(world.get().id(), target.get());
+            membership.removeMember(world.get().id(), target.get());
+
+            enqueueToWorldOrAliveNodes(world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+            String ejectReason = "Banned from world" + (reason != null ? ": " + reason : "");
+            enqueueToWorldOrAliveNodes(
+                    world.get(), CommandKind.KICK_MEMBER, EjectPayload.format(target.get(), ejectReason), current);
+
+            success(caller, "banned " + targetName + " from '" + world.get().name() + "'");
+        });
+    }
+
+    /** {@code /world unban <player>} — FR-9d. */
+    private void unban(CommandContext<CommandSource> context, String targetName) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            Optional<UUID> target = resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                error(caller, "no player called '" + targetName + "' has been seen on this network");
+                return;
+            }
+            if (bans.unban(world.get().id(), target.get())) {
+                success(
+                        caller,
+                        "unbanned " + targetName + " from '" + world.get().name() + "'");
+            } else {
+                error(
+                        caller,
+                        targetName + " was not banned from '" + world.get().name() + "'");
+            }
+        });
+    }
+
+    /** {@code /world bans} — lists bans (FR-9d). */
+    private void listBans(CommandContext<CommandSource> context) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return;
+        }
+        run(caller, () -> {
+            Optional<PlayerWorld> world = soleOwnedWorld(caller);
+            if (world.isEmpty()) {
+                return;
+            }
+            List<WorldBan> list = bans.listBans(world.get().id());
+            if (list.isEmpty()) {
+                info(
+                        caller,
+                        "No players are currently banned from '" + world.get().name() + "'.");
+                return;
+            }
+            List<UUID> targets = list.stream().map(WorldBan::uuid).toList();
+            Map<UUID, String> resolved = names.namesOf(targets);
+
+            info(caller, "Bans for '" + world.get().name() + "':");
+            for (WorldBan b : list) {
+                String name = resolved.getOrDefault(b.uuid(), b.uuid().toString());
+                String r = b.reason() != null ? " (" + b.reason() + ")" : "";
+                info(caller, "  • " + name + r);
             }
         });
     }

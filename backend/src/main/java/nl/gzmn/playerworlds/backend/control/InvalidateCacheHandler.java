@@ -3,6 +3,7 @@ package nl.gzmn.playerworlds.backend.control;
 import java.util.Objects;
 import java.util.concurrent.Executor;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
+import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
@@ -21,12 +22,22 @@ public final class InvalidateCacheHandler implements CommandHandler {
 
     private final @Nullable NetworkSettings networkSettings;
     private final MembershipCache membershipCache;
+    private final @Nullable WorldSettingsCache settingsCache;
     private final Executor dbExecutor;
 
     public InvalidateCacheHandler(
             @Nullable NetworkSettings networkSettings, MembershipCache membershipCache, Executor dbExecutor) {
+        this(networkSettings, membershipCache, null, dbExecutor);
+    }
+
+    public InvalidateCacheHandler(
+            @Nullable NetworkSettings networkSettings,
+            MembershipCache membershipCache,
+            @Nullable WorldSettingsCache settingsCache,
+            Executor dbExecutor) {
         this.networkSettings = networkSettings;
         this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
+        this.settingsCache = settingsCache;
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor");
     }
 
@@ -45,8 +56,14 @@ public final class InvalidateCacheHandler implements CommandHandler {
         WorldId worldId = command.worldId();
         if (worldId != null) {
             membershipCache.invalidate(worldId);
+            if (settingsCache != null) {
+                settingsCache.invalidate(worldId);
+            }
         } else {
             membershipCache.clear();
+            if (settingsCache != null) {
+                settingsCache.clear();
+            }
         }
         return CommandResult.ok();
     }

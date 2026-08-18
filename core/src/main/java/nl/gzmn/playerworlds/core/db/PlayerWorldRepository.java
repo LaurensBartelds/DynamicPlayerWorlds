@@ -464,6 +464,56 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Lists all PUBLIC worlds in READY state for {@code /world browse} (FR-9b).
+     *
+     * <p>Ordered by {@code last_played DESC NULLS LAST}, using the {@code player_world_public_idx} index.
+     */
+    public List<PlayerWorld> listPublicWorlds() throws SQLException {
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS
+                        + " FROM player_world WHERE visibility = 'PUBLIC' AND state = 'READY' ORDER BY last_played DESC NULLS LAST",
+                StatementBinder.NONE,
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Updates visibility and description of a world (FR-9a, FR-9f).
+     *
+     * @return true if the world was updated
+     */
+    public boolean updateVisibility(WorldId id, Visibility visibility, @Nullable String description)
+            throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(visibility, "visibility");
+        return database.inTransaction(connection -> execute(
+                        connection,
+                        "UPDATE player_world SET visibility = ?, description = ? WHERE id = ?",
+                        statement -> {
+                            statement.setString(1, visibility.wire());
+                            statement.setString(2, description);
+                            statement.setObject(3, id.value());
+                        })
+                == 1);
+    }
+
+    /**
+     * Updates per-world owner settings (FR-9e).
+     *
+     * @return true if the world was updated
+     */
+    public boolean updateSettings(WorldId id, String settingsJson) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(settingsJson, "settingsJson");
+        return database.inTransaction(connection ->
+                execute(connection, "UPDATE player_world SET settings = ?::jsonb WHERE id = ?", statement -> {
+                            statement.setString(1, settingsJson);
+                            statement.setObject(2, id.value());
+                        })
+                        == 1);
+    }
+
+    /**
      * Worlds counting against {@code worlds.max-per-player} (FR-1).
      *
      * <p>{@code ARCHIVED} worlds are excluded, and that follows from FR-27 rather

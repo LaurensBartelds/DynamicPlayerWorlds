@@ -18,6 +18,7 @@ class MdcContextTest {
 
     @Test
     @DisplayName("open puts keys and close restores prior values")
+    @SuppressWarnings("try")
     void restoresPreviousValues() {
         MDC.put(MdcKeys.NODE_ID, "outer");
         try (MdcContext ignored = MdcContext.open().nodeId("inner").op("sync")) {
@@ -30,6 +31,7 @@ class MdcContextTest {
 
     @Test
     @DisplayName("world and player helpers write stable string forms")
+    @SuppressWarnings("try")
     void typedHelpers() {
         UUID world = UUID.fromString("11111111-1111-1111-1111-111111111111");
         UUID player = UUID.fromString("22222222-2222-2222-2222-222222222222");

@@ -34,10 +34,16 @@ public final class VisibilityListener implements Listener {
 
     private final Plugin plugin;
     private final VisibilityGroups groups;
+    private final @Nullable GroupChatBuffer chatBuffer;
 
     public VisibilityListener(Plugin plugin, VisibilityGroups groups) {
+        this(plugin, groups, null);
+    }
+
+    public VisibilityListener(Plugin plugin, VisibilityGroups groups, @Nullable GroupChatBuffer chatBuffer) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
         this.groups = Objects.requireNonNull(groups, "groups");
+        this.chatBuffer = chatBuffer;
     }
 
     // -----------------------------------------------------------------------
@@ -141,6 +147,13 @@ public final class VisibilityListener implements Listener {
     @EventHandler(priority = EventPriority.HIGH)
     public void onChat(AsyncChatEvent event) {
         Player sender = event.getPlayer();
+        if (chatBuffer != null) {
+            groups.groupOf(sender).ifPresent(worldId -> {
+                String text = net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(event.message());
+                chatBuffer.record(worldId, sender.getUniqueId(), sender.getName(), text);
+            });
+        }
         event.viewers().removeIf(viewer -> {
             if (!(viewer instanceof Player recipient)) {
                 // The console is not in a group and is not a leak: it is already

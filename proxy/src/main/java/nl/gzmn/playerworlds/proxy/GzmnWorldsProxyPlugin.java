@@ -11,6 +11,7 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -34,6 +35,7 @@ import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
+import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
@@ -184,6 +186,7 @@ public final class GzmnWorldsProxyPlugin {
                 pools,
                 worldRepository,
                 new MembershipRepository(openedDatabase),
+                new WorldBanRepository(openedDatabase),
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
@@ -207,6 +210,23 @@ public final class GzmnWorldsProxyPlugin {
                 config.lobbyServer(),
                 WorldCommand.SUBCOMMANDS.size(),
                 pools.dbThreads());
+    }
+
+    /**
+     * Forwards backend-scoped /world subcommands (such as /world leave and /world report)
+     * directly to the backend server (OQ-15).
+     */
+    @Subscribe
+    public void onCommandExecute(com.velocitypowered.api.event.command.CommandExecuteEvent event) {
+        String raw = event.getCommand();
+        String lower = raw.trim().toLowerCase(Locale.ROOT);
+        for (String backendSub : WorldCommand.BACKEND_SUBCOMMANDS) {
+            if (lower.equals("world " + backendSub) || lower.startsWith("world " + backendSub + " ")) {
+                event.setResult(
+                        com.velocitypowered.api.event.command.CommandExecuteEvent.CommandResult.forwardToServer());
+                return;
+            }
+        }
     }
 
     /**

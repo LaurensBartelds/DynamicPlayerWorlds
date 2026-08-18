@@ -236,6 +236,28 @@ class MembershipRepositoryTest {
         assertThat(membership.revokeInvite(worldId, target)).isFalse();
     }
 
+    @Test
+    @DisplayName("addVisitorIfAbsent adds VISITOR role and does not downgrade BUILDER (FR-9c)")
+    void addVisitorIfAbsent() throws Exception {
+        UUID visitor = UUID.randomUUID();
+        boolean added = membership.addVisitorIfAbsent(worldId, visitor);
+        assertThat(added).isTrue();
+        assertThat(membership.findMember(worldId, visitor).orElseThrow().role()).isEqualTo(Role.VISITOR);
+
+        // Second call is idempotent
+        boolean addedAgain = membership.addVisitorIfAbsent(worldId, visitor);
+        assertThat(addedAgain).isFalse();
+
+        // If member is BUILDER, addVisitorIfAbsent leaves them as BUILDER
+        UUID builder = UUID.randomUUID();
+        membership.invite(worldId, builder, owner, Duration.ofMinutes(10));
+        membership.acceptInvite(worldId, builder);
+        assertThat(membership.findMember(worldId, builder).orElseThrow().role()).isEqualTo(Role.BUILDER);
+
+        membership.addVisitorIfAbsent(worldId, builder);
+        assertThat(membership.findMember(worldId, builder).orElseThrow().role()).isEqualTo(Role.BUILDER);
+    }
+
     private void expireInvite(UUID target) throws SQLException {
         database.inTransaction(connection -> {
             try (var statement = connection.prepareStatement(

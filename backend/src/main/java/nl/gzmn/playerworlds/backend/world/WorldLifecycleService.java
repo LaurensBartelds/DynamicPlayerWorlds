@@ -29,6 +29,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.model.WorldSettings;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.EventLogger;
 import nl.gzmn.playerworlds.core.obs.LogEvent;
@@ -82,12 +83,49 @@ public final class WorldLifecycleService {
     private final WorldsMetrics metrics;
     private final Supplier<NetworkPolicy> policy;
     private final Path worldContainer;
+    private final @Nullable WorldSettingsCache settingsCache;
     private final @Nullable String nodeId;
     private final int nodeDataVersion;
     private final @Nullable WorldDownloader worldDownloader;
     private final @Nullable ObjectStore objectStore;
     private final @Nullable WorldCommitService commitService;
     private final @Nullable LocalObjectCache cache;
+
+    public WorldLifecycleService(
+            PlayerWorldRepository worlds,
+            MembershipRepository membership,
+            MembershipCache membershipCache,
+            @Nullable WorldSettingsCache settingsCache,
+            PluginExecutors executors,
+            Platform platform,
+            WorldFolders folders,
+            WorldRegistry registry,
+            WorldsMetrics metrics,
+            Supplier<NetworkPolicy> policy,
+            Path worldContainer,
+            @Nullable String nodeId,
+            @Nullable WorldDownloader worldDownloader,
+            @Nullable ObjectStore objectStore,
+            @Nullable WorldCommitService commitService,
+            @Nullable LocalObjectCache cache) {
+        this.worlds = Objects.requireNonNull(worlds, "worlds");
+        this.membership = Objects.requireNonNull(membership, "membership");
+        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
+        this.settingsCache = settingsCache;
+        this.executors = Objects.requireNonNull(executors, "executors");
+        this.platform = Objects.requireNonNull(platform, "platform");
+        this.folders = Objects.requireNonNull(folders, "folders");
+        this.registry = Objects.requireNonNull(registry, "registry");
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
+        this.policy = Objects.requireNonNull(policy, "policy");
+        this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
+        this.nodeId = nodeId;
+        this.nodeDataVersion = platform.identity().dataVersion();
+        this.worldDownloader = worldDownloader;
+        this.objectStore = objectStore;
+        this.commitService = commitService;
+        this.cache = cache;
+    }
 
     public WorldLifecycleService(
             PlayerWorldRepository worlds,
@@ -105,22 +143,23 @@ public final class WorldLifecycleService {
             @Nullable ObjectStore objectStore,
             @Nullable WorldCommitService commitService,
             @Nullable LocalObjectCache cache) {
-        this.worlds = Objects.requireNonNull(worlds, "worlds");
-        this.membership = Objects.requireNonNull(membership, "membership");
-        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
-        this.executors = Objects.requireNonNull(executors, "executors");
-        this.platform = Objects.requireNonNull(platform, "platform");
-        this.folders = Objects.requireNonNull(folders, "folders");
-        this.registry = Objects.requireNonNull(registry, "registry");
-        this.metrics = Objects.requireNonNull(metrics, "metrics");
-        this.policy = Objects.requireNonNull(policy, "policy");
-        this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
-        this.nodeId = nodeId;
-        this.nodeDataVersion = platform.identity().dataVersion();
-        this.worldDownloader = worldDownloader;
-        this.objectStore = objectStore;
-        this.commitService = commitService;
-        this.cache = cache;
+        this(
+                worlds,
+                membership,
+                membershipCache,
+                null,
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                policy,
+                worldContainer,
+                nodeId,
+                worldDownloader,
+                objectStore,
+                commitService,
+                cache);
     }
 
     public WorldLifecycleService(
@@ -726,10 +765,12 @@ public final class WorldLifecycleService {
         WorldRuntime runtime = platform.worldRuntime();
         runtime.applyBorder(world, dimension, loaded.borderRadius(), current.netherBorderDivisor());
         runtime.disableAlwaysLoadedSpawnChunks(world);
-        // FR-9e: safe defaults. Per-world overrides live in player_world.settings
-        // and arrive with milestone 9; until then every world gets the default the
-        // specification names, rather than whatever level.dat carried.
-        runtime.setPvp(world, false);
+        WorldSettings settings = WorldSettings.fromJson(loaded.settingsJson());
+        if (settingsCache != null) {
+            settingsCache.put(loaded.id(), settings);
+        }
+        runtime.setPvp(world, settings.pvp());
+        runtime.setMobGriefing(world, settings.mobGriefing());
     }
 
     /**

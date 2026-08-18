@@ -684,6 +684,46 @@ class PlayerWorldRepositoryTest {
                 .isPresent();
     }
 
+    @Test
+    @DisplayName("listPublicWorlds lists only READY PUBLIC worlds in last_played order (FR-9b)")
+    void listPublicWorlds() throws Exception {
+        WorldId w1 = WorldId.random();
+        WorldId w2 = WorldId.random();
+        WorldId w3 = WorldId.random();
+        UUID owner = UUID.randomUUID();
+
+        create(w1, owner, "private-ready", 1L);
+        setState(w1, WorldState.READY);
+
+        create(w2, owner, "public-ready", 2L);
+        setState(w2, WorldState.READY);
+        worlds.updateVisibility(w2, Visibility.PUBLIC, "A cool public world");
+
+        create(w3, owner, "public-creating", 3L);
+        worlds.updateVisibility(w3, Visibility.PUBLIC, "Still creating");
+
+        List<PlayerWorld> pub = worlds.listPublicWorlds();
+        assertThat(pub).hasSize(1);
+        assertThat(pub.getFirst().id()).isEqualTo(w2);
+        assertThat(pub.getFirst().description()).isEqualTo("A cool public world");
+        assertThat(pub.getFirst().visibility()).isEqualTo(Visibility.PUBLIC);
+    }
+
+    @Test
+    @DisplayName("updateSettings updates the settings column (FR-9e)")
+    void updateSettings() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "settings-world", 1L);
+
+        String customJson = "{\"pvp\":true,\"visitorsMayOpenContainers\":true}";
+        boolean updated = worlds.updateSettings(id, customJson);
+        assertThat(updated).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.settingsJson()).contains("\"pvp\": true");
+    }
+
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {
         return database.inTransaction(connection ->
                 worlds.insertCreating(connection, id, owner, name, id.folder(), seed, 5000, Visibility.PRIVATE));

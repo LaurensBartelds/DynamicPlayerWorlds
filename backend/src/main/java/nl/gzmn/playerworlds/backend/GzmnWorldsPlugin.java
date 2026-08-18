@@ -12,6 +12,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import nl.gzmn.playerworlds.backend.command.BackendWorldCommand;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
 import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
@@ -31,14 +32,18 @@ import nl.gzmn.playerworlds.backend.profile.ProfileListener;
 import nl.gzmn.playerworlds.backend.profile.ProfileService;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
+import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
+import nl.gzmn.playerworlds.backend.world.VisibilityGroups;
+import nl.gzmn.playerworlds.backend.world.VisibilityListener;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
+import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.concurrent.BoundedOperations;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
@@ -56,6 +61,7 @@ import nl.gzmn.playerworlds.core.db.NodeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
+import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
@@ -403,6 +409,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         leases.start(pools.sched());
 
         MembershipCache membershipCache = new MembershipCache();
+        WorldSettingsCache settingsCache = new WorldSettingsCache();
+        GroupChatBuffer chatBuffer = new GroupChatBuffer();
         PendingTransferRepository transferRepository = new PendingTransferRepository(openedDatabase);
         NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
 
@@ -410,6 +418,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldRepository,
                 membershipRepository,
                 membershipCache,
+                settingsCache,
                 pools,
                 selected,
                 worldFolders,
@@ -428,7 +437,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .registerEvents(
                         new PortalListener(selected, worldFolders, worldRegistry, lifecycle, this::policy), this);
         // FR-9 in world: OWNER and BUILDER build, VISITOR does not.
-        getServer().getPluginManager().registerEvents(new RoleEnforcementListener(worldFolders, membershipCache), this);
+        getServer()
+                .getPluginManager()
+                .registerEvents(new RoleEnforcementListener(worldFolders, membershipCache, settingsCache), this);
+        // FR-18/19/20: Visibility and group chat buffer
+        getServer()
+                .getPluginManager()
+                .registerEvents(new VisibilityListener(this, new VisibilityGroups(worldFolders), chatBuffer), this);
         // FR-11: routed join listener
         getServer()
                 .getPluginManager()
@@ -475,6 +490,27 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + " (default: op, so grant it or /op yourself)");
         }
 
+        BackendWorldCommand backendWorldHandler = new BackendWorldCommand(
+                worldFolders,
+                new ReportRepository(openedDatabase),
+                new nl.gzmn.playerworlds.core.db.PlayerNameRepository(openedDatabase),
+                chatBuffer,
+                nodeCommands,
+                pools,
+                this::policy);
+        getServer().getCommandMap().register("gzmn-worlds", new org.bukkit.command.Command("world") {
+            @Override
+            public boolean execute(org.bukkit.command.CommandSender sender, String commandLabel, String[] args) {
+                return backendWorldHandler.onCommand(sender, this, commandLabel, args);
+            }
+
+            @Override
+            public List<String> tabComplete(org.bukkit.command.CommandSender sender, String alias, String[] args) {
+                return backendWorldHandler.onTabComplete(sender, this, alias, args);
+            }
+        });
+        getLogger().info("/world (backend) registered dynamically for leave and report");
+
         // FR-25 orders it commit, unload, release. Without the commit hook the
         // unload discards up to storage.sync-minutes of play for the world and
         // every profile in it (FR-15), so it is wired whenever object storage is.
@@ -505,6 +541,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 lifecycle,
                 worldFolders,
                 membershipCache,
+                settingsCache,
                 openedDatabase,
                 nodeCommands,
                 pools,
@@ -551,6 +588,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldLifecycleService lifecycle,
             WorldFolders worldFolders,
             MembershipCache membershipCache,
+            WorldSettingsCache settingsCache,
             Database openedDatabase,
             NodeCommandRepository nodeCommands,
             PluginExecutors pools,
@@ -582,7 +620,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         plane.register(CommandKind.DRAIN_NODE, new DrainNodeHandler(worldRegistry, handoff, heartbeat, this::policy));
         plane.register(
                 CommandKind.INVALIDATE_CACHE,
-                new InvalidateCacheHandler(new NetworkSettings(openedDatabase), membershipCache, pools.db()));
+                new InvalidateCacheHandler(
+                        new NetworkSettings(openedDatabase), membershipCache, settingsCache, pools.db()));
         EjectPlayerHandler ejectHandler =
                 new EjectPlayerHandler(membershipCache, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);
