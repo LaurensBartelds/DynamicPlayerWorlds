@@ -56,6 +56,31 @@ public interface ObjectStore extends Closeable {
      */
     boolean exists(String key);
 
+    /**
+     * Deletes an object from storage if it exists.
+     *
+     * @param key object storage key to delete
+     * @throws StorageException if deletion fails
+     */
+    void deleteObject(String key);
+
+    /**
+     * Deletes all objects matching the given key prefix.
+     *
+     * @param prefix object key prefix to delete
+     * @throws StorageException if deletion fails
+     */
+    void deletePrefix(String prefix);
+
+    /**
+     * Returns the size of an object in bytes.
+     *
+     * @param key object storage key
+     * @return size in bytes
+     * @throws StorageException if size lookup fails or object does not exist
+     */
+    long getObjectSize(String key);
+
     @Override
     void close();
 }

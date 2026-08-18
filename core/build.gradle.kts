@@ -31,6 +31,7 @@ dependencies {
     }
     implementation(libs.awssdk.urlconnection)
     implementation(libs.zstd)
+    implementation(libs.commons.compress)
     implementation(libs.micrometer.core)
     implementation(libs.micrometer.prometheus)
 

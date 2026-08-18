@@ -9,6 +9,8 @@ base.archivesName.set("gzmn-worlds")
 dependencies {
     compileOnly(libs.paper.api)
     implementation(project(":core"))
+    implementation(libs.zstd)
+    implementation(libs.commons.compress)
     implementation(libs.logstash.encoder)
 
     // MockBukkit before paper-api so the mock implementation wins on the test

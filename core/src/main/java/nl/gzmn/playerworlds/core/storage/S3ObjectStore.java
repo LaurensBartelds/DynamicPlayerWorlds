@@ -5,6 +5,7 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
@@ -15,9 +16,16 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.Delete;
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
+import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 
@@ -138,6 +146,57 @@ public final class S3ObjectStore implements ObjectStore {
                 return false;
             }
             throw new StorageException("Failed to check existence for: " + key, e);
+        }
+    }
+
+    @Override
+    public void deleteObject(String key) {
+        Objects.requireNonNull(key, "key");
+        try {
+            client.deleteObject(
+                    DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+        } catch (Exception e) {
+            throw new StorageException("Failed to delete object: " + key, e);
+        }
+    }
+
+    @Override
+    public void deletePrefix(String prefix) {
+        Objects.requireNonNull(prefix, "prefix");
+        try {
+            ListObjectsV2Request listReq =
+                    ListObjectsV2Request.builder().bucket(bucket).prefix(prefix).build();
+            ListObjectsV2Response listRes = client.listObjectsV2(listReq);
+            List<ObjectIdentifier> toDelete = listRes.contents().stream()
+                    .map(s3Obj -> ObjectIdentifier.builder().key(s3Obj.key()).build())
+                    .toList();
+            if (!toDelete.isEmpty()) {
+                client.deleteObjects(DeleteObjectsRequest.builder()
+                        .bucket(bucket)
+                        .delete(Delete.builder().objects(toDelete).build())
+                        .build());
+            }
+        } catch (Exception e) {
+            throw new StorageException("Failed to delete prefix: " + prefix, e);
+        }
+    }
+
+    @Override
+    public long getObjectSize(String key) {
+        Objects.requireNonNull(key, "key");
+        try {
+            HeadObjectResponse head = client.headObject(
+                    HeadObjectRequest.builder().bucket(bucket).key(key).build());
+            return head.contentLength();
+        } catch (NoSuchKeyException e) {
+            throw new StorageException("Object does not exist: " + key, e);
+        } catch (S3Exception e) {
+            if (e.statusCode() == 404) {
+                throw new StorageException("Object does not exist: " + key, e);
+            }
+            throw new StorageException("Failed to get size for: " + key, e);
+        } catch (Exception e) {
+            throw new StorageException("Failed to get size for: " + key, e);
         }
     }
 

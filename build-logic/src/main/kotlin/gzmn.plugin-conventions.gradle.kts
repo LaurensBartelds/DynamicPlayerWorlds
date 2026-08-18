@@ -86,6 +86,7 @@ tasks.named<ShadowJar>("shadowJar") {
     relocate("org.postgresql", "$shadePrefix.postgresql")
     relocate("io.micrometer", "$shadePrefix.micrometer")
     relocate("com.github.luben.zstd", "$shadePrefix.zstd")
+    relocate("org.apache.commons", "$shadePrefix.commons")
     // Relocating this means a logback configuration must name the encoder by
     // its relocated class, not net.logstash.logback.encoder.LogstashEncoder.
     // See config/logback/ for the class names F8 documents.

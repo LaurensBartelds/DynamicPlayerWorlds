@@ -21,6 +21,7 @@ logstashEncoder = "9.0"
 micrometer = "1.17.0"
 awsSdk = "2.53.1"
 zstd = "1.5.7-15"
+commonsCompress = "1.28.0"
 jspecify = "1.0.1"
 # Proxy config.toml (specification section 7). Velocity parses its own
 # velocity.toml with this, so an operator meets one TOML dialect, not two.
@@ -65,6 +66,7 @@ micrometer-prometheus = { module = "io.micrometer:micrometer-registry-prometheus
 awssdk-s3 = { module = "software.amazon.awssdk:s3", version.ref = "awsSdk" }
 awssdk-urlconnection = { module = "software.amazon.awssdk:url-connection-client", version.ref = "awsSdk" }
 zstd = { module = "com.github.luben:zstd-jni", version.ref = "zstd" }
+commons-compress = { module = "org.apache.commons:commons-compress", version.ref = "commonsCompress" }
 jspecify = { module = "org.jspecify:jspecify", version.ref = "jspecify" }
 checker-qual = { module = "org.checkerframework:checker-qual", version.ref = "checkerQual" }
 toml4j = { module = "com.moandjiezana.toml:toml4j", version.ref = "toml4j" }
