@@ -836,6 +836,124 @@ class PlayerWorldRepositoryTest {
                 .isInstanceOf(NullPointerException.class);
     }
 
+    @Test
+    @DisplayName("totalStorageUsedBy calculates sum of storage_bytes for an owner")
+    void totalStorageUsedByCalculatesSum() throws Exception {
+        UUID owner = UUID.randomUUID();
+        UUID other = UUID.randomUUID();
+        WorldId w1 = WorldId.random();
+        WorldId w2 = WorldId.random();
+        WorldId w3 = WorldId.random();
+
+        create(w1, owner, "w1", 1L);
+        create(w2, owner, "w2", 2L);
+        create(w3, other, "w3", 3L);
+
+        worlds.updateStorageBytes(w1, 1024L);
+        worlds.updateStorageBytes(w2, 2048L);
+        worlds.updateStorageBytes(w3, 4096L);
+
+        assertThat(worlds.totalStorageUsedBy(owner)).isEqualTo(3072L);
+        assertThat(worlds.totalStorageUsedBy(other)).isEqualTo(4096L);
+        assertThat(worlds.totalStorageUsedBy(UUID.randomUUID())).isZero();
+    }
+
+    @Test
+    @DisplayName("updateStorageBytes updates world storage footprint")
+    void updateStorageBytesUpdatesValue() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "storage-world", 1L);
+
+        boolean updated = worlds.updateStorageBytes(id, 5000000L);
+        assertThat(updated).isTrue();
+
+        long stored = database.withConnection(connection -> {
+            try (var statement = connection.prepareStatement("SELECT storage_bytes FROM player_world WHERE id = ?")) {
+                statement.setObject(1, id.value());
+                try (var rs = statement.executeQuery()) {
+                    rs.next();
+                    return rs.getLong(1);
+                }
+            }
+        });
+        assertThat(stored).isEqualTo(5000000L);
+    }
+
+    @Test
+    @DisplayName("transitionToArchived sets state to ARCHIVED and records archive entry atomically")
+    void transitionToArchivedRecordsEntryAndUpdatesState() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "archive-me", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+
+        boolean transitioned =
+                worlds.transitionToArchived(id, "worlds/" + id + "/archive/test.tar.zst", 123456L, "sha256hash", 3953);
+        assertThat(transitioned).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.ARCHIVED);
+        assertThat(world.assignedNode()).isNull();
+        assertThat(world.leaseExpires()).isNull();
+        assertThat(world.manifestKey()).isNull();
+
+        ArchiveRepository archiveRepository = new ArchiveRepository(database);
+        var archive = archiveRepository.findLatestByWorld(id);
+        assertThat(archive).isPresent();
+        assertThat(archive.get().sizeBytes()).isEqualTo(123456L);
+        assertThat(archive.get().checksum()).isEqualTo("sha256hash");
+        assertThat(archive.get().dataVersion()).isEqualTo(3953);
+    }
+
+    @Test
+    @DisplayName("transitionToRestoring acquires lease and advances state to RESTORING")
+    void transitionToRestoringAcquiresLease() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "restore-me", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
+        assertThat(archived).isTrue();
+
+        boolean restoring = worlds.transitionToRestoring(id, "node-restore", Duration.ofMinutes(5));
+        assertThat(restoring).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.RESTORING);
+        assertThat(world.assignedNode()).isEqualTo("node-restore");
+        assertThat(world.generation()).isGreaterThanOrEqualTo(1L);
+        assertThat(world.leaseExpires()).isNotNull();
+
+        // Second transition while active lease is held returns false
+        boolean second = worlds.transitionToRestoring(id, "other-node", Duration.ofMinutes(5));
+        assertThat(second).isFalse();
+    }
+
+    @Test
+    @DisplayName("completeRestore transitions state to READY and commits new snapshot metadata")
+    void completeRestoreCommitsSnapshotAndSetsReady() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "complete-world", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
+        assertThat(archived).isTrue();
+        boolean restoring = worlds.transitionToRestoring(id, "node-1", Duration.ofMinutes(5));
+        assertThat(restoring).isTrue();
+
+        boolean completed = worlds.completeRestore(id, "worlds/" + id + "/manifest/0-1.json", 987654L, 3953, "1.21.4");
+        assertThat(completed).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.READY);
+        assertThat(world.manifestKey()).isEqualTo("worlds/" + id + "/manifest/0-1.json");
+        assertThat(world.dataVersion()).isEqualTo(3953);
+        assertThat(world.mcVersion()).isEqualTo("1.21.4");
+        assertThat(world.assignedNode()).isNull();
+        assertThat(world.leaseExpires()).isNull();
+        assertThat(world.lastPlayed()).isNotNull();
+    }
+
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {
         return database.inTransaction(connection ->
                 worlds.insertCreating(connection, id, owner, name, id.folder(), seed, 5000, Visibility.PRIVATE));

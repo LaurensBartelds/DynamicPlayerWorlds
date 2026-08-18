@@ -826,6 +826,171 @@ public final class PlayerWorldRepository extends Repository {
                 row -> new WorldId(Objects.requireNonNull(row.getObject("id", UUID.class), "id"))));
     }
 
+    /**
+     * Returns the total storage bytes used by all worlds owned by the specified player (FR-34, FR-35, FR-36).
+     */
+    public long totalStorageUsedBy(Connection connection, UUID ownerUuid) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(ownerUuid, "ownerUuid");
+        return queryOne(
+                        connection,
+                        "SELECT COALESCE(SUM(storage_bytes), 0) FROM player_world WHERE owner_uuid = ?",
+                        statement -> statement.setObject(1, ownerUuid),
+                        row -> row.getLong(1))
+                .orElse(0L);
+    }
+
+    public long totalStorageUsedBy(UUID ownerUuid) throws SQLException {
+        Objects.requireNonNull(ownerUuid, "ownerUuid");
+        return database.withConnection(connection -> totalStorageUsedBy(connection, ownerUuid));
+    }
+
+    /**
+     * Updates the storage footprint in bytes for a world.
+     */
+    public boolean updateStorageBytes(Connection connection, WorldId worldId, long storageBytes) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        if (storageBytes < 0) {
+            throw new IllegalArgumentException("storageBytes must not be negative: " + storageBytes);
+        }
+        return execute(connection, "UPDATE player_world SET storage_bytes = ? WHERE id = ?", statement -> {
+                    statement.setLong(1, storageBytes);
+                    statement.setObject(2, worldId.value());
+                })
+                == 1;
+    }
+
+    public boolean updateStorageBytes(WorldId worldId, long storageBytes) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        return database.inTransaction(connection -> updateStorageBytes(connection, worldId, storageBytes));
+    }
+
+    /**
+     * Moves a world to {@link WorldState#ARCHIVED}, clears its lease and manifest pointers,
+     * updates its storage footprint, and records the archive entry in a single transaction (FR-35).
+     *
+     * @return true if the world was transitioned and the archive entry recorded
+     */
+    public boolean transitionToArchived(
+            Connection connection, WorldId worldId, String objectKey, long sizeBytes, String checksum, int dataVersion)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(objectKey, "objectKey");
+        Objects.requireNonNull(checksum, "checksum");
+        if (sizeBytes < 0) {
+            throw new IllegalArgumentException("sizeBytes must not be negative: " + sizeBytes);
+        }
+        int updated = execute(connection, """
+                UPDATE player_world
+                   SET state = 'ARCHIVED',
+                       storage_bytes = ?,
+                       manifest_key = NULL,
+                       assigned_node = NULL,
+                       lease_expires = NULL
+                 WHERE id = ?
+                   AND state IN ('ARCHIVING', 'READY')
+                """, statement -> {
+            statement.setLong(1, sizeBytes);
+            statement.setObject(2, worldId.value());
+        });
+        if (updated != 1) {
+            return false;
+        }
+        ArchiveRepository archiveRepository = new ArchiveRepository(database);
+        archiveRepository.recordArchive(connection, worldId, objectKey, sizeBytes, checksum, dataVersion);
+        return true;
+    }
+
+    public boolean transitionToArchived(
+            WorldId worldId, String objectKey, long sizeBytes, String checksum, int dataVersion) throws SQLException {
+        return database.inTransaction(
+                connection -> transitionToArchived(connection, worldId, objectKey, sizeBytes, checksum, dataVersion));
+    }
+
+    /**
+     * Acquires a lease on an archived world and moves its state to {@link WorldState#RESTORING} (FR-36).
+     *
+     * @return true if the world was transitioned and the lease granted to {@code node}
+     */
+    public boolean transitionToRestoring(Connection connection, WorldId worldId, String node, Duration leaseDuration)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+        return execute(connection, """
+                        UPDATE player_world
+                           SET state = 'RESTORING',
+                               assigned_node = ?,
+                               lease_expires = now() + (? * interval '1 second'),
+                               generation = generation + 1
+                         WHERE id = ?
+                           AND state IN ('ARCHIVED', 'RESTORING')
+                           AND (assigned_node IS NULL OR lease_expires < now())
+                        """, statement -> {
+                    statement.setString(1, node);
+                    statement.setLong(2, leaseDuration.toSeconds());
+                    statement.setObject(3, worldId.value());
+                })
+                == 1;
+    }
+
+    public boolean transitionToRestoring(WorldId worldId, String node, Duration leaseDuration) throws SQLException {
+        return database.inTransaction(connection -> transitionToRestoring(connection, worldId, node, leaseDuration));
+    }
+
+    /**
+     * Completes a world restore by advancing its state to {@link WorldState#READY}, setting its
+     * manifest pointer and storage bytes, updating versions, and releasing its lease (FR-36).
+     *
+     * @return true if the restore was committed
+     */
+    public boolean completeRestore(
+            Connection connection,
+            WorldId worldId,
+            String manifestKey,
+            long storageBytes,
+            int dataVersion,
+            String mcVersion)
+            throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(manifestKey, "manifestKey");
+        Objects.requireNonNull(mcVersion, "mcVersion");
+        if (storageBytes < 0) {
+            throw new IllegalArgumentException("storageBytes must not be negative: " + storageBytes);
+        }
+        return execute(connection, """
+                        UPDATE player_world
+                           SET state = 'READY',
+                               manifest_key = ?,
+                               storage_bytes = ?,
+                               data_version = ?,
+                              mc_version = ?,
+                               last_played = now(),
+                               assigned_node = NULL,
+                               lease_expires = NULL
+                         WHERE id = ?
+                           AND state = 'RESTORING'
+                        """, statement -> {
+                    statement.setString(1, manifestKey);
+                    statement.setLong(2, storageBytes);
+                    statement.setInt(3, dataVersion);
+                    statement.setString(4, mcVersion);
+                    statement.setObject(5, worldId.value());
+                })
+                == 1;
+    }
+
+    public boolean completeRestore(
+            WorldId worldId, String manifestKey, long storageBytes, int dataVersion, String mcVersion)
+            throws SQLException {
+        return database.inTransaction(
+                connection -> completeRestore(connection, worldId, manifestKey, storageBytes, dataVersion, mcVersion));
+    }
+
     private static PlayerWorld mapRow(ResultSet row) throws SQLException {
         UUID id = Objects.requireNonNull(row.getObject("id", UUID.class), "id");
         UUID ownerUuid = Objects.requireNonNull(row.getObject("owner_uuid", UUID.class), "owner_uuid");
