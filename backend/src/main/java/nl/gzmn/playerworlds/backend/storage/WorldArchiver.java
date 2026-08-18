@@ -161,8 +161,13 @@ public final class WorldArchiver {
                             "Could not acquire lease for archival; held by " + holder.orElse("another node"));
                 }
             }
-            if (world.state() != WorldState.ARCHIVING) {
-                worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVING);
+            // FR-35 is explicit that the state is set with the lease held, and the whole crash
+            // contract rests on it: a run that packed and uploaded without ever reaching
+            // ARCHIVING would leave FR-40's sweep nothing to recognise. A refused transition
+            // means the world moved under us, so stop before anything is written.
+            if (world.state() != WorldState.ARCHIVING
+                    && !worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVING)) {
+                return ArchiveResult.error("World " + worldId + " changed state before archival could start");
             }
         } catch (SQLException e) {
             return ArchiveResult.error("Failed to acquire lease for archival: " + e.getMessage());
