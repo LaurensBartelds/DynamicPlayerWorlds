@@ -31,12 +31,10 @@ public enum WorldState {
     /**
      * FR-35 finished: live folders are gone and the archive is authoritative.
      *
-     * <p>Until milestone 11 writes an archive there is nothing to be
-     * authoritative, so {@code /world delete} moves a world here without packing
-     * or removing anything — the state transition and the FR-1 cap release, with
-     * the folders retained. A world in this state with no
-     * {@code player_world_archive} row is that case, and {@code /world restore}
-     * moves it straight back.
+     * <p>Reached only by the node that packed the archive and verified its checksum, never by
+     * the proxy: FR-35 removes the live folders and the object prefix once this state commits,
+     * so a world that arrived here without a {@code player_world_archive} row would have had
+     * its data deleted with nothing to restore from.
      */
     ARCHIVED,
 

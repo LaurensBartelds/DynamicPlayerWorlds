@@ -554,18 +554,16 @@ public final class WorldCommand {
     }
 
     /**
-     * {@code /world delete <name> [confirm]} - FR-27, in part.
+     * {@code /world delete <name> [confirm]} — FR-27, which is FR-35's archival.
      *
-     * <p>FR-27 performs FR-35's archival: pack all three dimensions to object
-     * storage, verify the checksum, then remove the live folders. Object storage
-     * is milestone 6 and archival is milestone 11, so what this does today is the
-     * half that can be done safely - the state transition and the cap release.
-     * The world folders and every profile stay exactly where they are.
+     * <p>The proxy only asks. Packing the three dimension folders, verifying the checksum and
+     * only then removing the live data is the node's work, and the state does not become
+     * ARCHIVED until that node has committed it — CONTRIBUTING rule 8, a destructive path
+     * verifies before it destroys. A proxy that moved the state itself would be claiming an
+     * archive exists before anything had written one.
      *
-     * <p>That ordering is deliberate and is CONTRIBUTING rule 8: a destructive
-     * path verifies before it destroys. Nothing here has anything to verify
-     * against yet, so nothing here destroys. {@code /world restore} brings the
-     * world straight back.
+     * <p>An incomplete world is the exception: a CREATING world has nothing worth packing, so
+     * the row goes and the owner's slot comes back.
      */
     private void delete(CommandContext<CommandSource> context, String name, boolean confirmed) {
         Player caller = playerOrNull(context);
@@ -661,11 +659,11 @@ public final class WorldCommand {
     }
 
     /**
-     * {@code /world restore <name>} - FR-36, in part.
+     * {@code /world restore <name>} — FR-36.
      *
-     * <p>FR-36 unpacks the archive and verifies its checksum. Until milestone 11
-     * writes one there is nothing to unpack: the folders were never removed, so a
-     * restore is the state transition back.
+     * <p>Checks what the proxy is the right place to check — the owner, the FR-32 world cap and
+     * the storage quota — and hands the rest to the node, which unpacks the archive, verifies
+     * its checksum and the version check in MN-29, and only then makes the world READY.
      */
     private void restore(CommandContext<CommandSource> context, String name) {
         Player caller = playerOrNull(context);
