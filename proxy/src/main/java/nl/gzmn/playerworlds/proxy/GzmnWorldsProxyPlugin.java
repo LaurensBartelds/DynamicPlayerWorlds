@@ -11,6 +11,7 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -19,6 +20,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
@@ -37,6 +40,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
@@ -304,15 +308,17 @@ public final class GzmnWorldsProxyPlugin {
     }
 
     /**
-     * Fills the {@code player_name} cache (V2).
+     * Fills the {@code player_name} cache (V2) and sends transfer request reminders.
      *
      * <p>The proxy is the only component that sees every login on the network,
      * which is what makes it the right place to learn the name-to-UUID mapping
-     * every section 6 command needs for its first argument.
+     * every section 6 command needs for its first argument, and to notify players
+     * of pending ownership transfers when they connect.
      */
     @Subscribe
     public void onPostLogin(PostLoginEvent event) {
         PlayerNameRepository repository = this.playerNames;
+        TransferRequestRepository transferRequests = this.transferRequests;
         PluginExecutors pools = this.executors;
         if (repository == null || pools == null) {
             return;
@@ -321,11 +327,22 @@ public final class GzmnWorldsProxyPlugin {
             try {
                 repository.remember(
                         event.getPlayer().getUniqueId(), event.getPlayer().getUsername());
+                if (transferRequests != null) {
+                    List<TransferRequest> pending = transferRequests.findLiveRequestsFor(
+                            event.getPlayer().getUniqueId());
+                    if (!pending.isEmpty()) {
+                        event.getPlayer()
+                                .sendMessage(Component.text(
+                                        "You have " + pending.size()
+                                                + " pending world ownership transfer request(s)! Use /world transfer accept <owner> to accept.",
+                                        NamedTextColor.GOLD));
+                    }
+                }
             } catch (SQLException e) {
-                // A cache miss degrades a display name to a UUID; it never fails
-                // an operation, so this is a warning and not a disconnect.
+                // A cache miss degrades a display name to a UUID or skips a reminder;
+                // it never fails an operation, so this is a warning and not a disconnect.
                 logger.warn(
-                        "could not cache the name of {}: {}", event.getPlayer().getUsername(), e.getMessage());
+                        "could not process login for {}: {}", event.getPlayer().getUsername(), e.getMessage());
             }
         });
     }
