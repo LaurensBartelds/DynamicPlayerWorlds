@@ -166,6 +166,15 @@ class CoreScreensTest {
         });
         assertThat(menuService.activeScreen(player).get()).isInstanceOf(StorageMenu.class);
 
+        // Click Browse
+        menu.handleClick(player, MainMenu.SLOT_BROWSE, ClickType.LEFT);
+        awaitCondition(() -> {
+            drainMain();
+            return menuService.activeScreen(player).isPresent()
+                    && menuService.activeScreen(player).get() instanceof BrowseMenu;
+        });
+        assertThat(menuService.activeScreen(player).get()).isInstanceOf(BrowseMenu.class);
+
         // Click Close
         player.openInventory(inv);
         menu.handleClick(player, MainMenu.SLOT_CLOSE, ClickType.LEFT);

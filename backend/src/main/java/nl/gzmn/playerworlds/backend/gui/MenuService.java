@@ -15,6 +15,7 @@ import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.gui.screen.BansMenu;
+import nl.gzmn.playerworlds.backend.gui.screen.BrowseMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.ConfirmMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.InvitesMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.MainMenu;
@@ -632,10 +633,68 @@ public class MenuService {
                         executors.main());
     }
 
-    /** Placeholder for public browse screen (Task 8). */
-    public void openBrowseMenu(Player player) {
+    /**
+     * Opens page 0 of the public worlds browse screen.
+     *
+     * @param player the player
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openBrowseMenu(Player player) {
+        return openBrowseMenu(player, 0);
+    }
+
+    /**
+     * Opens a specific page of the public worlds browse screen.
+     *
+     * @param player the player
+     * @param page 0-based page index
+     * @return CompletableFuture completing when opened
+     */
+    public CompletableFuture<Void> openBrowseMenu(Player player, int page) {
         Objects.requireNonNull(player, "player");
-        player.sendMessage(Component.text("Browse menu coming soon...", NamedTextColor.GRAY));
+
+        return CompletableFuture.supplyAsync(
+                        () -> {
+                            MainThread.assertOff();
+                            List<BrowseMenu.PublicWorldEntry> entries = List.of();
+                            try {
+                                if (worldRepository != null) {
+                                    List<PlayerWorld> publicWorlds = worldRepository.listPublicWorlds();
+                                    if (!publicWorlds.isEmpty() && nameRepository != null) {
+                                        List<UUID> ownerUuids = publicWorlds.stream()
+                                                .map(PlayerWorld::ownerUuid)
+                                                .distinct()
+                                                .toList();
+                                        Map<UUID, String> names = nameRepository.namesOf(ownerUuids);
+                                        entries = publicWorlds.stream()
+                                                .map(w -> new BrowseMenu.PublicWorldEntry(
+                                                        w.id(),
+                                                        w.name(),
+                                                        w.ownerUuid(),
+                                                        names.getOrDefault(
+                                                                w.ownerUuid(),
+                                                                w.ownerUuid().toString()),
+                                                        w.description()))
+                                                .toList();
+                                    } else {
+                                        entries = publicWorlds.stream()
+                                                .map(w -> new BrowseMenu.PublicWorldEntry(
+                                                        w.id(),
+                                                        w.name(),
+                                                        w.ownerUuid(),
+                                                        w.ownerUuid().toString(),
+                                                        w.description()))
+                                                .toList();
+                                    }
+                                }
+                            } catch (SQLException e) {
+                                log.warn("Failed to fetch public worlds for browse menu", e);
+                            }
+                            return entries;
+                        },
+                        executors.db())
+                .thenAcceptAsync(
+                        entries -> openScreen(player, new BrowseMenu(this, channel, entries, page)), executors.main());
     }
 
     /** Cleans up active screen reference when a player closes an inventory. */

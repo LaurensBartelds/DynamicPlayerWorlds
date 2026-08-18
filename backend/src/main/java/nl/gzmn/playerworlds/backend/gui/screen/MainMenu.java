@@ -137,7 +137,9 @@ public final class MainMenu implements GuiScreen {
             case SLOT_INVITES -> {
                 var _ = menuService.openInvitesMenu(player);
             }
-            case SLOT_BROWSE -> menuService.openBrowseMenu(player);
+            case SLOT_BROWSE -> {
+                var _ = menuService.openBrowseMenu(player);
+            }
             case SLOT_CLOSE -> player.closeInventory();
             default -> {
                 // Non-clickable filler
