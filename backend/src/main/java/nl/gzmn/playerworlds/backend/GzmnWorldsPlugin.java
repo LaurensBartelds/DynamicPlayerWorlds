@@ -15,6 +15,7 @@ import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.BackendWorldCommand;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.control.BackendControlHandlers;
 import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
@@ -31,7 +32,10 @@ import nl.gzmn.playerworlds.backend.platform.UnsupportedPlatformException;
 import nl.gzmn.playerworlds.backend.profile.ProfileListener;
 import nl.gzmn.playerworlds.backend.profile.ProfileService;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
+import nl.gzmn.playerworlds.backend.storage.ArchiveStorage;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
+import nl.gzmn.playerworlds.backend.storage.WorldArchiver;
+import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
@@ -53,6 +57,7 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.ControlPlane;
+import nl.gzmn.playerworlds.core.db.ArchiveRepository;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
@@ -134,6 +139,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
     private @Nullable NodeConfig nodeConfig;
+    private @Nullable WorldArchiver archiver;
+    private @Nullable WorldRestorer restorer;
 
     /**
      * Last policy read from the database.
@@ -548,7 +555,10 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 node,
                 this.policy,
                 worldCommitService,
-                heartbeat);
+                heartbeat,
+                snapshotEngine,
+                store,
+                selected.identity());
     }
 
     /** Publishes this node's heartbeat row (MN-17, MN-18). */
@@ -595,7 +605,10 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             NodeConfig node,
             NetworkPolicy loadedPolicy,
             WorldCommitService commits,
-            NodeHeartbeat heartbeat) {
+            NodeHeartbeat heartbeat,
+            @Nullable SnapshotEngine snapshotEngine,
+            @Nullable ObjectStore store,
+            ServerIdentity identity) {
         ExecutorService listen = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "gzmn-backend-listen");
             thread.setDaemon(true);
@@ -626,6 +639,35 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new EjectPlayerHandler(membershipCache, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);
         plane.register(CommandKind.EJECT_PLAYER, ejectHandler);
+
+        ArchiveStorage archiveStorage = store != null
+                ? ArchiveStorage.s3(store)
+                : ArchiveStorage.filesystem(node.scratchPath().resolve("archives"));
+        WorldArchiver worldArchiver = new WorldArchiver(
+                new PlayerWorldRepository(openedDatabase),
+                openedDatabase,
+                archiveStorage,
+                node.scratchPath(),
+                store,
+                worldRegistry,
+                handoff,
+                this::policy,
+                node.nodeId(),
+                identity.dataVersion());
+        WorldRestorer worldRestorer = new WorldRestorer(
+                new PlayerWorldRepository(openedDatabase),
+                new ArchiveRepository(openedDatabase),
+                archiveStorage,
+                snapshotEngine,
+                store,
+                node.scratchPath(),
+                this::policy,
+                node.nodeId(),
+                identity.dataVersion(),
+                identity.minecraftVersion());
+        this.archiver = worldArchiver;
+        this.restorer = worldRestorer;
+        BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer);
 
         plane.start(pools.sched(), listen);
         this.controlPlane = plane;
@@ -706,6 +748,16 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
+    }
+
+    /** World archiver service, or {@code null} when enable refused. */
+    public @Nullable WorldArchiver archiver() {
+        return archiver;
+    }
+
+    /** World restorer service, or {@code null} when enable refused. */
+    public @Nullable WorldRestorer restorer() {
+        return restorer;
     }
 
     /**

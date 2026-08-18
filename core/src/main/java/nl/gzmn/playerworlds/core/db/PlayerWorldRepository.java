@@ -942,6 +942,46 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Returns a failed restore to {@link WorldState#ARCHIVED} and releases the lease (FR-36).
+     *
+     * <p>FR-36 leaves a <em>crashed</em> restore at RESTORING with an expired lease, which the
+     * FR-40 sweep retries. A restore that fails cleanly is a different case: this node knows the
+     * attempt is over, so the world goes back to the state it was in and the lease is dropped at
+     * once, rather than making the owner wait out the lease for a failure already diagnosed.
+     * Safe at any point in the flow, because restore never deletes the archive it reads.
+     *
+     * <p>Fenced on {@code assigned_node}: a node whose lease has already been taken over must not
+     * rewrite the state underneath whoever holds it now.
+     *
+     * @return true when this node held the world and the rollback was applied
+     */
+    public boolean abandonRestore(Connection connection, WorldId worldId, String node) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        return execute(connection, """
+                UPDATE player_world
+                   SET state = 'ARCHIVED',
+                       assigned_node = NULL,
+                       lease_expires = NULL
+                 WHERE id = ?
+                   AND state = 'RESTORING'
+                   AND assigned_node = ?
+                """, statement -> {
+                    statement.setObject(1, worldId.value());
+                    statement.setString(2, node);
+                })
+                == 1;
+    }
+
+    /** {@link #abandonRestore(Connection, WorldId, String)} in its own transaction. */
+    public boolean abandonRestore(WorldId worldId, String node) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        return database.inTransaction(connection -> abandonRestore(connection, worldId, node));
+    }
+
+    /**
      * Completes a world restore by advancing its state to {@link WorldState#READY}, setting its
      * manifest pointer and storage bytes, updating versions, and releasing its lease (FR-36).
      *

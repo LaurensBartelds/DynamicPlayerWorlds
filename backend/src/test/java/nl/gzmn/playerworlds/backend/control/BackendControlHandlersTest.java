@@ -437,4 +437,78 @@ class BackendControlHandlersTest {
         String message = PlainTextComponentSerializer.plainText().serialize(player.nextComponentMessage());
         assertThat(message).contains("Custom kick reason");
     }
+
+    @Test
+    void archiveWorldHandlerReturnsErrorWhenWorldIdMissing() throws Exception {
+        nl.gzmn.playerworlds.backend.storage.ArchiveStorage storage =
+                nl.gzmn.playerworlds.backend.storage.ArchiveStorage.filesystem(tempDir.resolve("archives"));
+        nl.gzmn.playerworlds.backend.storage.WorldArchiver archiver =
+                new nl.gzmn.playerworlds.backend.storage.WorldArchiver(
+                        new PlayerWorldRepository(database),
+                        database,
+                        storage,
+                        tempDir.resolve("scratch"),
+                        null,
+                        null,
+                        null,
+                        NetworkPolicy::defaults,
+                        "node-1",
+                        Platform.BUILD_DATA_VERSION);
+        BackendControlHandlers.ArchiveWorldHandler handler = new BackendControlHandlers.ArchiveWorldHandler(archiver);
+
+        NodeCommand command = new NodeCommand(
+                7L,
+                "node-1",
+                null,
+                null,
+                CommandKind.ARCHIVE_WORLD.name(),
+                "{}",
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+
+        CommandResult result = handler.handle(command);
+        assertFalse(result.isOk());
+        assertEquals("ERROR:missing world_id", result.wire());
+    }
+
+    @Test
+    void restoreWorldHandlerReturnsErrorWhenWorldIdMissing() throws Exception {
+        nl.gzmn.playerworlds.backend.storage.ArchiveStorage storage =
+                nl.gzmn.playerworlds.backend.storage.ArchiveStorage.filesystem(tempDir.resolve("archives"));
+        nl.gzmn.playerworlds.backend.storage.WorldRestorer restorer =
+                new nl.gzmn.playerworlds.backend.storage.WorldRestorer(
+                        new PlayerWorldRepository(database),
+                        new nl.gzmn.playerworlds.core.db.ArchiveRepository(database),
+                        storage,
+                        null,
+                        null,
+                        tempDir.resolve("scratch"),
+                        NetworkPolicy::defaults,
+                        "node-1",
+                        Platform.BUILD_DATA_VERSION,
+                        "26.2");
+        BackendControlHandlers.RestoreWorldHandler handler = new BackendControlHandlers.RestoreWorldHandler(restorer);
+
+        NodeCommand command = new NodeCommand(
+                8L,
+                "node-1",
+                null,
+                null,
+                CommandKind.RESTORE_WORLD.name(),
+                "{}",
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+
+        CommandResult result = handler.handle(command);
+        assertFalse(result.isOk());
+        assertEquals("ERROR:missing world_id", result.wire());
+    }
 }

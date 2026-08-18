@@ -17,7 +17,9 @@ public enum CommandKind {
     UNLOAD_WORLD,
     MIGRATE_WORLD,
     DRAIN_NODE,
-    INVALIDATE_CACHE;
+    INVALIDATE_CACHE,
+    ARCHIVE_WORLD,
+    RESTORE_WORLD;
 
     /**
      * Parses a stored command name. Empty when the string is not a known kind —
