@@ -26,6 +26,7 @@ class NetworkPolicyTest {
         assertThat(policy.archiveWarnDays()).containsExactly(14, 3);
         assertThat(policy.excludeGlobs()).containsExactly("session.lock", "uid.dat");
         assertThat(policy.defaultVisibility()).isEqualTo("PRIVATE");
+        assertThat(policy.defaultStorageLimitBytes()).isEqualTo(5L * 1024 * 1024 * 1024);
     }
 
     @Test
@@ -36,13 +37,15 @@ class NetworkPolicyTest {
                 NetworkPolicy.KEY_DEFAULT_VISIBILITY, "\"PUBLIC\"",
                 NetworkPolicy.KEY_ARCHIVE_WARN_DAYS, "[7, 1]",
                 NetworkPolicy.KEY_ALLOWED_COMMANDS, "[\"spawn\", \"home\"]",
-                NetworkPolicy.KEY_VERIFY_REGION_STRUCTURE, "false"));
+                NetworkPolicy.KEY_VERIFY_REGION_STRUCTURE, "false",
+                NetworkPolicy.KEY_DEFAULT_STORAGE_LIMIT_GB, "10"));
 
         assertThat(policy.maxWorldsPerPlayer()).isEqualTo(5);
         assertThat(policy.defaultVisibility()).isEqualTo("PUBLIC");
         assertThat(policy.archiveWarnDays()).containsExactly(7, 1);
         assertThat(policy.allowedCommands()).containsExactly("spawn", "home");
         assertThat(policy.verifyRegionStructure()).isFalse();
+        assertThat(policy.defaultStorageLimitBytes()).isEqualTo(10L * 1024 * 1024 * 1024);
         // Untouched keys keep defaults.
         assertThat(policy.leaseDuration()).isEqualTo(Duration.ofMinutes(3));
         assertThat(policy.manifestRetentionCount()).isEqualTo(3);

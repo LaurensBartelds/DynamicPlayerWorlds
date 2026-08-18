@@ -72,7 +72,8 @@ public record NetworkPolicy(
         long localCacheMaxBytes,
         long quarantineMaxBytes,
         int quarantineRetainDays,
-        List<String> excludeGlobs) {
+        List<String> excludeGlobs,
+        long defaultStorageLimitBytes) {
 
     // --- key names (the network_setting primary key) -----------------------
 
@@ -128,6 +129,7 @@ public record NetworkPolicy(
     public static final String KEY_QUARANTINE_MAX_GB = "storage.quarantine-max-gb";
     public static final String KEY_QUARANTINE_RETAIN_DAYS = "storage.quarantine-retain-days";
     public static final String KEY_EXCLUDE_GLOBS = "storage.exclude-globs";
+    public static final String KEY_DEFAULT_STORAGE_LIMIT_GB = "storage.default-limit-gb";
 
     // --- defaults (specification sections 7 and 12.8) ----------------------
 
@@ -171,6 +173,7 @@ public record NetworkPolicy(
     public static final long DEFAULT_QUARANTINE_MAX_BYTES = 50L * 1024 * 1024 * 1024;
     public static final int DEFAULT_QUARANTINE_RETAIN_DAYS = 7;
     public static final List<String> DEFAULT_EXCLUDE_GLOBS = List.of("session.lock", "uid.dat");
+    public static final long DEFAULT_STORAGE_LIMIT_BYTES = 5L * 1024 * 1024 * 1024;
 
     public NetworkPolicy {
         Objects.requireNonNull(idleUnload, "idleUnload");
@@ -197,6 +200,10 @@ public record NetworkPolicy(
         Objects.requireNonNull(commitTimeout, "commitTimeout");
         Objects.requireNonNull(coldLoadBudget, "coldLoadBudget");
         Objects.requireNonNull(excludeGlobs, "excludeGlobs");
+        if (defaultStorageLimitBytes < 0) {
+            throw new IllegalArgumentException(
+                    "defaultStorageLimitBytes must not be negative: " + defaultStorageLimitBytes);
+        }
         allowedCommands = List.copyOf(allowedCommands);
         archiveWarnDays = List.copyOf(archiveWarnDays);
         excludeGlobs = List.copyOf(excludeGlobs);
@@ -244,7 +251,8 @@ public record NetworkPolicy(
                 DEFAULT_LOCAL_CACHE_MAX_BYTES,
                 DEFAULT_QUARANTINE_MAX_BYTES,
                 DEFAULT_QUARANTINE_RETAIN_DAYS,
-                DEFAULT_EXCLUDE_GLOBS);
+                DEFAULT_EXCLUDE_GLOBS,
+                DEFAULT_STORAGE_LIMIT_BYTES);
     }
 
     /**
@@ -305,7 +313,8 @@ public record NetworkPolicy(
                 gib(rawJsonByKey, KEY_LOCAL_CACHE_MAX_GB, DEFAULT_LOCAL_CACHE_MAX_BYTES),
                 gib(rawJsonByKey, KEY_QUARANTINE_MAX_GB, DEFAULT_QUARANTINE_MAX_BYTES),
                 intVal(rawJsonByKey, KEY_QUARANTINE_RETAIN_DAYS, DEFAULT_QUARANTINE_RETAIN_DAYS),
-                stringList(rawJsonByKey, KEY_EXCLUDE_GLOBS, DEFAULT_EXCLUDE_GLOBS));
+                stringList(rawJsonByKey, KEY_EXCLUDE_GLOBS, DEFAULT_EXCLUDE_GLOBS),
+                gib(rawJsonByKey, KEY_DEFAULT_STORAGE_LIMIT_GB, DEFAULT_STORAGE_LIMIT_BYTES));
     }
 
     private static int intVal(Map<String, String> raw, String key, int defaultValue) {
