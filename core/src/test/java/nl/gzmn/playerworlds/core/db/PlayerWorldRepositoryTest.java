@@ -504,6 +504,183 @@ class PlayerWorldRepositoryTest {
         assertThat(worlds.releaseLease(id, "node-1", grant.generation())).isFalse();
     }
 
+    // -----------------------------------------------------------------------
+    // Milestone 8: placement inputs, read in database time (MN-14 to MN-16, MN-28)
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("placementContext reports the lease holder only while the lease is live (MN-14)")
+    void placementContextReportsALiveLeaseHolder() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "placement", 1L);
+
+        assertThat(worlds.placementContext(id).orElseThrow().leaseHolder()).isNull();
+
+        worlds.acquireLease(id, "node-1", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+        assertThat(worlds.placementContext(id).orElseThrow().leaseHolder()).isEqualTo("node-1");
+
+        // Expired in database time. The row still names node-1 in assigned_node,
+        // and placement must not route to it: MN-8 lets anyone take the lease now.
+        updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, id);
+        assertThat(worlds.placementContext(id).orElseThrow().leaseHolder()).isNull();
+        assertThat(worlds.leaseHolder(id)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a snapshot commit records the node that wrote it as the warm copy (MN-15a)")
+    void commitRecordsTheWarmNode() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "warm", 1L);
+        PlayerWorldRepository.LeaseGrant grant = worlds.acquireLease(
+                        id, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+
+        assertThat(worlds.placementContext(id).orElseThrow().warmNode()).isNull();
+
+        boolean committed = worlds.commitSnapshot(
+                id,
+                grant.generation(),
+                "node-1",
+                "manifests/" + id.value() + "/1",
+                4903,
+                "26.2",
+                new ProfileRepository.Snapshot(1L, 1),
+                1,
+                Map.of(),
+                new ProfileRepository(database));
+
+        assertThat(committed).isTrue();
+        assertThat(worlds.placementContext(id).orElseThrow().warmNode()).isEqualTo("node-1");
+    }
+
+    @Test
+    @DisplayName("a fenced commit does not move the warm copy either (MN-3a, MN-15a)")
+    void aFencedCommitDoesNotMoveTheWarmNode() throws Exception {
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "warm-fenced", 1L);
+        PlayerWorldRepository.LeaseGrant first = worlds.acquireLease(
+                        id, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        worlds.commitSnapshot(
+                id,
+                first.generation(),
+                "node-1",
+                "manifests/a",
+                4903,
+                "26.2",
+                new ProfileRepository.Snapshot(1L, 1),
+                1,
+                Map.of(),
+                new ProfileRepository(database));
+
+        // node-2 takes over; node-1 wakes up and tries to finish its commit.
+        updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, id);
+        worlds.acquireLease(id, "node-2", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+
+        boolean stale = worlds.commitSnapshot(
+                id,
+                first.generation(),
+                "node-1",
+                "manifests/b",
+                4903,
+                "26.2",
+                new ProfileRepository.Snapshot(2L, 1),
+                1,
+                Map.of(),
+                new ProfileRepository(database));
+
+        assertThat(stale).isFalse();
+        assertThat(worlds.placementContext(id).orElseThrow().warmNode()).isEqualTo("node-1");
+        assertThat(worlds.findById(id).orElseThrow().manifestKey()).isEqualTo("manifests/a");
+    }
+
+    @Test
+    @DisplayName("occupancy counts live leases per node and splits them by visibility (MN-15a)")
+    void occupancyIsCountedFromLiveLeases() throws Exception {
+        WorldId privateOnOne = WorldId.random();
+        WorldId publicOnOne = WorldId.random();
+        WorldId expiredOnOne = WorldId.random();
+        WorldId privateOnTwo = WorldId.random();
+        create(privateOnOne, UUID.randomUUID(), "p1", 1L);
+        create(publicOnOne, UUID.randomUUID(), "u1", 1L);
+        create(expiredOnOne, UUID.randomUUID(), "e1", 1L);
+        create(privateOnTwo, UUID.randomUUID(), "p2", 1L);
+        updateColumn("UPDATE player_world SET visibility = 'PUBLIC' WHERE id = ?", null, publicOnOne);
+
+        worlds.acquireLease(privateOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        worlds.acquireLease(publicOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        worlds.acquireLease(expiredOnOne, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        worlds.acquireLease(privateOnTwo, "node-2", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        updateColumn(
+                "UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, expiredOnOne);
+
+        Map<String, PlayerWorldRepository.NodeOccupancy> occupancy = worlds.liveLeaseOccupancy();
+
+        // The expired one is not counted: it is not on node-1 any more, whatever
+        // assigned_node still says.
+        assertThat(occupancy.get("node-1")).isEqualTo(new PlayerWorldRepository.NodeOccupancy(1, 1));
+        assertThat(occupancy.get("node-2")).isEqualTo(new PlayerWorldRepository.NodeOccupancy(0, 1));
+    }
+
+    @Test
+    @DisplayName("worldsLeasedTo lists what a drain has to move (MN-22)")
+    void worldsLeasedToListsWhatADrainHasToMove() throws Exception {
+        WorldId held = WorldId.random();
+        WorldId lapsed = WorldId.random();
+        create(held, UUID.randomUUID(), "held", 1L);
+        create(lapsed, UUID.randomUUID(), "lapsed", 1L);
+        worlds.acquireLease(held, "node-1", 4903, java.time.Duration.ofMinutes(3)).orElseThrow();
+        worlds.acquireLease(lapsed, "node-1", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        updateColumn("UPDATE player_world SET lease_expires = now() - interval '1 second' WHERE id = ?", null, lapsed);
+
+        assertThat(worlds.worldsLeasedTo("node-1")).containsExactly(held);
+        assertThat(worlds.worldsLeasedTo("node-2")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("an older node cannot take a world a newer node has committed (MN-26, section 11 milestone 8)")
+    void anOlderNodeCannotTakeAWorldANewerNodeCommitted() throws Exception {
+        // The two-node version-gating case, on the database half. node-new opens a
+        // world and commits; node-old must not be able to acquire it afterwards,
+        // and no supported path returns the chunks to the older format.
+        WorldId id = WorldId.random();
+        create(id, UUID.randomUUID(), "upgraded", 1L);
+
+        PlayerWorldRepository.LeaseGrant onOld = worlds.acquireLease(
+                        id, "node-old", 4189, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        // Before any commit the world has no data version and either node may take
+        // it (MN-27: the version advances only at a commit, never speculatively).
+        assertThat(worlds.findById(id).orElseThrow().dataVersion()).isNull();
+        worlds.releaseLease(id, "node-old", onOld.generation());
+
+        PlayerWorldRepository.LeaseGrant onNew = worlds.acquireLease(
+                        id, "node-new", 4903, java.time.Duration.ofMinutes(3))
+                .orElseThrow();
+        worlds.commitSnapshot(
+                id,
+                onNew.generation(),
+                "node-new",
+                "manifests/new",
+                4903,
+                "26.2",
+                new ProfileRepository.Snapshot(1L, 1),
+                1,
+                Map.of(),
+                new ProfileRepository(database));
+        worlds.releaseLease(id, "node-new", onNew.generation());
+
+        assertThat(worlds.acquireLease(id, "node-old", 4189, java.time.Duration.ofMinutes(3)))
+                .isEmpty();
+        assertThat(worlds.acquireLease(id, "node-new", 4903, java.time.Duration.ofMinutes(3)))
+                .isPresent();
+    }
+
     private PlayerWorld create(WorldId id, UUID owner, String name, long seed) throws SQLException {
         return database.inTransaction(connection ->
                 worlds.insertCreating(connection, id, owner, name, id.folder(), seed, 5000, Visibility.PRIVATE));

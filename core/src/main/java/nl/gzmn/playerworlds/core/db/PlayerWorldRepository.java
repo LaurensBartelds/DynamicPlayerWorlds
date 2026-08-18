@@ -6,6 +6,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -385,7 +386,8 @@ public final class PlayerWorldRepository extends Repository {
                        SET manifest_key = ?,
                            last_played  = now(),
                            data_version = ?,
-                           mc_version   = ?
+                           mc_version   = ?,
+                           last_node    = COALESCE(?, last_node)
                      WHERE id = ?
                        AND (?::text IS NULL OR assigned_node IS NULL OR assigned_node = ?)
                        AND generation = ?
@@ -393,10 +395,11 @@ public final class PlayerWorldRepository extends Repository {
                 statement.setString(1, manifestKey);
                 statement.setInt(2, dataVersion);
                 statement.setString(3, mcVersion);
-                statement.setObject(4, id.value());
-                statement.setString(5, nodeId);
+                statement.setString(4, nodeId);
+                statement.setObject(5, id.value());
                 statement.setString(6, nodeId);
-                statement.setLong(7, generation);
+                statement.setString(7, nodeId);
+                statement.setLong(8, generation);
             });
 
             if (updated != 1) {
@@ -547,6 +550,157 @@ public final class PlayerWorldRepository extends Repository {
                         "DELETE FROM player_world WHERE id = ? AND state = 'CREATING'",
                         statement -> statement.setObject(1, id.value()))
                 == 1;
+    }
+
+    // -----------------------------------------------------------------------
+    // Placement (MN-14, MN-15a, MN-16)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Everything placement needs about one world, read in database time.
+     *
+     * @param leaseHolder the node whose lease on this world is live <em>now</em>,
+     *     or {@code null} when no lease is live. MN-14 routes to it without
+     *     scoring and MN-16 requires that every member resolve to the same node,
+     *     so this is a hard answer rather than a preference.
+     * @param warmNode the node that wrote {@code manifest_key}, and therefore the
+     *     node most likely to hold a matching local copy (MN-15a, MN-5). A
+     *     preference: the copy may have been evicted or quarantined.
+     * @param dataVersion the world's committed chunk {@code DataVersion}, the
+     *     MN-28 hard filter, or {@code null} when it has never been committed
+     * @param visibility drives MN-15a's public/private separation
+     * @param state so a caller can refuse a world that is not enterable without a
+     *     second round trip
+     */
+    public record PlacementContext(
+            @Nullable String leaseHolder,
+            @Nullable String warmNode,
+            @Nullable Integer dataVersion,
+            Visibility visibility,
+            WorldState state) {
+
+        public PlacementContext {
+            Objects.requireNonNull(visibility, "visibility");
+            Objects.requireNonNull(state, "state");
+        }
+    }
+
+    /**
+     * Reads one world's placement context (MN-14, MN-15a, MN-28).
+     *
+     * <p>Lease liveness is evaluated by the database, in the same {@code now()}
+     * that MN-8's acquisition compares against. Comparing {@code lease_expires} to
+     * a node's own clock instead is the bug CONTRIBUTING rule 5 exists to prevent:
+     * the proxy, the holding node and the taking node all have independent clocks,
+     * and the answer to "is this lease live" has to be the same for all three.
+     */
+    public Optional<PlacementContext> placementContext(WorldId id) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        return database.withConnection(connection -> queryOne(
+                connection,
+                """
+                SELECT CASE WHEN lease_expires > now() THEN assigned_node END AS lease_holder,
+                       last_node, data_version, visibility, state
+                  FROM player_world
+                 WHERE id = ?
+                """,
+                statement -> statement.setObject(1, id.value()),
+                row -> {
+                    int dataVersionRaw = row.getInt("data_version");
+                    Integer dataVersion = row.wasNull() ? null : dataVersionRaw;
+                    return new PlacementContext(
+                            row.getString("lease_holder"),
+                            row.getString("last_node"),
+                            dataVersion,
+                            Visibility.fromWire(Objects.requireNonNull(row.getString("visibility"), "visibility")),
+                            WorldState.fromWire(Objects.requireNonNull(row.getString("state"), "state")));
+                }));
+    }
+
+    /**
+     * The node holding a live lease on this world right now, in database time.
+     *
+     * <p>The narrow form of {@link #placementContext(WorldId)}, for the node-side
+     * question "do I still hold this" where nothing else is wanted.
+     */
+    public Optional<String> leaseHolder(WorldId id) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        return database.withConnection(connection -> queryOne(
+                        connection,
+                        """
+                        SELECT assigned_node
+                          FROM player_world
+                         WHERE id = ?
+                           AND assigned_node IS NOT NULL
+                           AND lease_expires > now()
+                        """,
+                        statement -> statement.setObject(1, id.value()),
+                        row -> row.getString("assigned_node"))
+                .filter(node -> node != null));
+    }
+
+    /** How many live-leased worlds of each visibility a node is holding (MN-15a). */
+    public record NodeOccupancy(int publicWorlds, int privateWorlds) {
+
+        public static final NodeOccupancy EMPTY = new NodeOccupancy(0, 0);
+
+        /** Total live-leased worlds on the node. */
+        public int total() {
+            return publicWorlds + privateWorlds;
+        }
+    }
+
+    /**
+     * Live-lease occupancy per node, for MN-15a's public/private separation.
+     *
+     * <p>Counted from the lease rather than from the node heartbeat's
+     * {@code loaded_worlds}, because the heartbeat carries a total and MN-15a
+     * needs the split — and because the lease is the fact the world's placement
+     * was decided against, up to `node.heartbeat-seconds` fresher.
+     */
+    public Map<String, NodeOccupancy> liveLeaseOccupancy() throws SQLException {
+        Map<String, NodeOccupancy> byNode = new HashMap<>();
+        List<Map.Entry<String, NodeOccupancy>> rows = database.withConnection(connection -> queryList(
+                connection,
+                """
+                SELECT assigned_node,
+                       count(*) FILTER (WHERE visibility = 'PUBLIC')  AS public_worlds,
+                       count(*) FILTER (WHERE visibility = 'PRIVATE') AS private_worlds
+                  FROM player_world
+                 WHERE assigned_node IS NOT NULL
+                   AND lease_expires > now()
+                 GROUP BY assigned_node
+                """,
+                StatementBinder.NONE,
+                row -> Map.entry(
+                        Objects.requireNonNull(row.getString("assigned_node"), "assigned_node"),
+                        new NodeOccupancy(row.getInt("public_worlds"), row.getInt("private_worlds")))));
+        for (Map.Entry<String, NodeOccupancy> entry : rows) {
+            byNode.put(entry.getKey(), entry.getValue());
+        }
+        return Map.copyOf(byNode);
+    }
+
+    /**
+     * Worlds a node currently holds a live lease on, for MN-22's drain.
+     *
+     * <p>Read from the lease rather than from the node's own registry so a drain
+     * issued from the proxy can report what it is about to move without a round
+     * trip to the node.
+     */
+    public List<WorldId> worldsLeasedTo(String nodeId) throws SQLException {
+        Objects.requireNonNull(nodeId, "nodeId");
+        return database.withConnection(connection -> queryList(
+                connection,
+                """
+                SELECT id
+                  FROM player_world
+                 WHERE assigned_node = ?
+                   AND lease_expires > now()
+                 ORDER BY id
+                """,
+                statement -> statement.setString(1, nodeId),
+                row -> new WorldId(Objects.requireNonNull(row.getObject("id", UUID.class), "id"))));
     }
 
     private static PlayerWorld mapRow(ResultSet row) throws SQLException {

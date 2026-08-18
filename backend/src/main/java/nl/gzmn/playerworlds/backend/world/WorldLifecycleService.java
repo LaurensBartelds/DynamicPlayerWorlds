@@ -445,28 +445,25 @@ public final class WorldLifecycleService {
                 return Checked.refused(new LoadOutcome.NodeFull(loaded, current.maxWorldsPerNode()));
             }
 
-            // Lease handling (MN-8, MN-14)
+            // Lease handling (MN-8, MN-14).
+            //
+            // Liveness is asked of the database, not derived from the row's
+            // lease_expires against this node's clock. The row was read a moment
+            // ago and the comparison decides whether to skip MN-8's acquisition,
+            // so a node whose clock runs slow would keep loading a world it no
+            // longer holds (CONTRIBUTING.md rule 5, MN-10b).
             if (nodeId != null) {
-                boolean heldByUs = row.assignedNode() != null
-                        && row.assignedNode().equals(nodeId)
-                        && row.leaseExpires() != null
-                        && row.leaseExpires().isAfter(java.time.Instant.now());
+                boolean heldByUs = worlds.leaseHolder(id).filter(nodeId::equals).isPresent();
 
                 if (!heldByUs) {
                     Optional<PlayerWorldRepository.LeaseGrant> grant =
                             worlds.acquireLease(id, nodeId, nodeDataVersion, current.leaseDuration());
                     if (grant.isEmpty()) {
                         metrics.leaseAcquireDenied();
-                        Optional<PlayerWorld> refetched = worlds.findById(id);
-                        if (refetched.isPresent()
-                                && refetched.get().assignedNode() != null
-                                && !refetched.get().assignedNode().equals(nodeId)
-                                && refetched.get().leaseExpires() != null
-                                && refetched.get().leaseExpires().isAfter(java.time.Instant.now())) {
-                            return Checked.refused(new LoadOutcome.Failed(
-                                    id,
-                                    "World is currently leased to node "
-                                            + refetched.get().assignedNode()));
+                        Optional<String> holder = worlds.leaseHolder(id);
+                        if (holder.isPresent() && !holder.get().equals(nodeId)) {
+                            return Checked.refused(
+                                    new LoadOutcome.Failed(id, "World is currently leased to node " + holder.get()));
                         }
                         return Checked.refused(new LoadOutcome.Failed(id, "Could not acquire lease for world"));
                     }

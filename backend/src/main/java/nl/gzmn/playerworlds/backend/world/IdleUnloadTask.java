@@ -1,14 +1,21 @@
 package nl.gzmn.playerworlds.backend.world;
 
 import java.time.Duration;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.WorldLifecycle;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import org.bukkit.World;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -24,6 +31,15 @@ import org.slf4j.LoggerFactory;
  * is node-local policy rather than a lease decision, so a clock would be
  * permitted here, but counting sweeps makes the whole state machine a pure
  * function of {@link LoadedWorld} and therefore testable without a server.
+ *
+ * <p>FR-25 orders the three steps: <em>commit, unload, release</em>. The commit
+ * is not optional and not best-effort — between the last sync and the unload
+ * there is up to {@code storage.sync-minutes} of play that exists only in the
+ * scratch directory, and unloading without committing it discards exactly that
+ * much of the session for the world and every profile in it together (FR-15).
+ * So an unload that cannot commit does not happen: it defers on the FR-25a retry
+ * and the world stays loaded, holding a node slot, until the commit succeeds or
+ * the node is fenced.
  */
 public final class IdleUnloadTask implements Runnable {
 
@@ -42,17 +58,52 @@ public final class IdleUnloadTask implements Runnable {
     private final WorldFolders folders;
     private final Supplier<NetworkPolicy> policy;
 
+    /** FR-25's pre-unload snapshot commit, or {@code null} when object storage is not configured. */
+    private final @Nullable Function<WorldId, CompletableFuture<Void>> preUnloadCommit;
+
+    /** Hops back to the tick thread once a commit completes; unloading needs main. */
+    private final @Nullable Executor main;
+
+    /** Worlds whose pre-unload commit is in flight. Main-thread only. */
+    private final Set<WorldId> committing = new HashSet<>();
+
+    /**
+     * Without a commit hook, for the single-node tests written before object
+     * storage existed. A node wired this way loses the last sync interval on
+     * unload, which is why the production wiring passes one.
+     */
     public IdleUnloadTask(
             WorldRegistry registry,
             WorldLifecycleService lifecycle,
             WorldLifecycle worldLifecycle,
             WorldFolders folders,
             Supplier<NetworkPolicy> policy) {
+        this(registry, lifecycle, worldLifecycle, folders, policy, null, null);
+    }
+
+    /**
+     * @param preUnloadCommit MN-6a's snapshot commit for one world, which FR-25
+     *     requires to complete before the dimensions come down
+     * @param main the tick thread, which the unload has to run back on
+     */
+    public IdleUnloadTask(
+            WorldRegistry registry,
+            WorldLifecycleService lifecycle,
+            WorldLifecycle worldLifecycle,
+            WorldFolders folders,
+            Supplier<NetworkPolicy> policy,
+            @Nullable Function<WorldId, CompletableFuture<Void>> preUnloadCommit,
+            @Nullable Executor main) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.worldLifecycle = Objects.requireNonNull(worldLifecycle, "worldLifecycle");
         this.folders = Objects.requireNonNull(folders, "folders");
         this.policy = Objects.requireNonNull(policy, "policy");
+        if ((preUnloadCommit == null) != (main == null)) {
+            throw new IllegalArgumentException("preUnloadCommit and main are wired together or not at all");
+        }
+        this.preUnloadCommit = preUnloadCommit;
+        this.main = main;
     }
 
     @Override
@@ -80,6 +131,51 @@ public final class IdleUnloadTask implements Runnable {
             return;
         }
 
+        Function<WorldId, CompletableFuture<Void>> commit = preUnloadCommit;
+        Executor tick = main;
+        if (commit == null || tick == null) {
+            unloadNow(world, retryWait);
+            return;
+        }
+
+        // A commit already running for this world. The idle counter stays at its
+        // threshold, so the next sweep asks again rather than restarting the
+        // grace period.
+        if (!committing.add(world.id())) {
+            return;
+        }
+        var _ = commit.apply(world.id()).whenComplete((ignored, failure) -> tick.execute(() -> {
+            committing.remove(world.id());
+            if (failure != null) {
+                // Not unloading is the safe direction: the world keeps ticking and
+                // the next sync or the next sweep tries again. Losing it here would
+                // discard the very state the commit failed to save.
+                log.error(
+                        "pre-unload snapshot commit failed for world {}; leaving it loaded and retrying "
+                                + "in {} sweeps (FR-25)",
+                        world.id(),
+                        retryWait,
+                        failure);
+                world.unloadDeferred(retryWait);
+                return;
+            }
+            if (registry.find(world.id()).isEmpty()) {
+                // Fenced, migrated or shut down while the commit was in flight.
+                return;
+            }
+            if (hasPlayers(world)) {
+                // FR-25: "any join into any dimension of that world resets the
+                // timer and cancels the pending unload" — including one that
+                // arrived during the commit.
+                log.info("world {} was rejoined during its pre-unload commit; staying loaded (FR-25)", world.id());
+                return;
+            }
+            unloadNow(world, retryWait);
+        }));
+    }
+
+    /** The unload half of FR-25, after the commit has landed. Main thread. */
+    private void unloadNow(LoadedWorld world, int retryWait) {
         UnloadOutcome outcome = lifecycle.unloadOnMain(world);
         if (outcome instanceof UnloadOutcome.Complete complete) {
             log.info(

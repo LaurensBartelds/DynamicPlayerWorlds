@@ -472,8 +472,17 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + " (default: op, so grant it or /op yourself)");
         }
 
-        IdleUnloadTask sweep =
-                new IdleUnloadTask(worldRegistry, lifecycle, selected.worldLifecycle(), worldFolders, this::policy);
+        // FR-25 orders it commit, unload, release. Without the commit hook the
+        // unload discards up to storage.sync-minutes of play for the world and
+        // every profile in it (FR-15), so it is wired whenever object storage is.
+        IdleUnloadTask sweep = new IdleUnloadTask(
+                worldRegistry,
+                lifecycle,
+                selected.worldLifecycle(),
+                worldFolders,
+                this::policy,
+                worldCommitService::requestCommit,
+                pools.main());
         this.idleUnload = sweep;
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
@@ -509,7 +518,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 node,
                 identity,
                 worldRegistry::size,
-                () -> getServer().getOnlinePlayers().size());
+                () -> getServer().getOnlinePlayers().size(),
+                // MN-15 excludes on TPS, so it has to be reported. getTPS()[0] is
+                // the one-minute average: the five- and fifteen-minute figures lag
+                // a node going bad by longer than a lease.
+                () -> {
+                    double[] tps = getServer().getTPS();
+                    return tps.length == 0 ? Double.NaN : tps[0];
+                });
         this.nodeHeartbeat = heartbeat;
         // First heartbeat immediately so the proxy can discover this node right away (MN-17)
         pools.db().execute(heartbeat);

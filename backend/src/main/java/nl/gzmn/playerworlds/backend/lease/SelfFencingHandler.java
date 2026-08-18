@@ -88,6 +88,28 @@ public final class SelfFencingHandler {
     }
 
     /**
+     * A world on this node that is not part of the one being fenced.
+     *
+     * <p>The holding area of FR-11: somewhere to put a player for the moment
+     * between losing their world and the proxy transferring them to the lobby.
+     * Null only on a node whose every world belongs to the fenced one, which
+     * cannot happen while the server has a primary world.
+     */
+    private @Nullable World holdingWorld(WorldId worldId) {
+        for (World candidate : Bukkit.getWorlds()) {
+            if (!folders.isPlayerWorld(candidate.getName())) {
+                return candidate;
+            }
+        }
+        for (World candidate : Bukkit.getWorlds()) {
+            if (!candidate.getName().startsWith(worldId.folder())) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
      * Triggers self-fencing for the specified world.
      */
     public void selfFence(WorldId worldId, FenceReason reason) {
@@ -131,21 +153,46 @@ public final class SelfFencingHandler {
         executors.main().execute(() -> {
             List<Player> ejectedPlayers = new ArrayList<>();
 
+            // Players first, and out of the world rather than merely told, because
+            // Bukkit refuses to unload a world that still holds one. Leaving them
+            // where they are would fail every unload below and leave a fenced world
+            // ticking — which is the single thing MN-10a exists to stop. The proxy
+            // transfer that follows is asynchronous and may not arrive before the
+            // unload, so the holding world is what makes the unload possible.
+            World holding = holdingWorld(worldId);
             for (DimensionKind dim : DimensionKind.values()) {
                 String bukkitName = folders.bukkitWorldName(worldId, dim);
                 World bukkitWorld = Bukkit.getWorld(bukkitName);
-                if (bukkitWorld != null) {
-                    for (Player player : bukkitWorld.getPlayers()) {
-                        ejectedPlayers.add(player);
-                        player.sendMessage(Component.text(
-                                "You have been moved to the lobby because the server lost its lease on this world.",
-                                NamedTextColor.RED));
+                if (bukkitWorld == null) {
+                    continue;
+                }
+                for (Player player : List.copyOf(bukkitWorld.getPlayers())) {
+                    ejectedPlayers.add(player);
+                    player.sendMessage(Component.text(
+                            "You have been moved to the lobby because the server lost its lease on this world.",
+                            NamedTextColor.RED));
+                    if (holding != null) {
+                        player.teleport(holding.getSpawnLocation());
                     }
-                    try {
-                        platform.worldLifecycle().unload(bukkitName, false);
-                    } catch (Exception e) {
-                        log.error("Failed to unload Bukkit dimension {} during self-fencing", bukkitName, e);
+                }
+            }
+
+            for (DimensionKind dim : DimensionKind.values()) {
+                String bukkitName = folders.bukkitWorldName(worldId, dim);
+                if (Bukkit.getWorld(bukkitName) == null) {
+                    continue;
+                }
+                try {
+                    // save = false: this node's copy has diverged from the last
+                    // committed manifest and is about to be quarantined, so writing
+                    // more of it to disk buys nothing (MN-10, MN-13).
+                    if (!platform.worldLifecycle().unload(bukkitName, false)) {
+                        log.error(
+                                "Bukkit refused to unload dimension {} during self-fencing; it is still ticking",
+                                bukkitName);
                     }
+                } catch (Exception e) {
+                    log.error("Failed to unload Bukkit dimension {} during self-fencing", bukkitName, e);
                 }
             }
 

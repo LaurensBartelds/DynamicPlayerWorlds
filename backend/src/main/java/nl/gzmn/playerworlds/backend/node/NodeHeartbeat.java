@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.node;
 
 import java.sql.SQLException;
 import java.util.Objects;
+import java.util.function.DoubleSupplier;
 import java.util.function.IntSupplier;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
@@ -32,22 +33,46 @@ public final class NodeHeartbeat implements Runnable {
     private final IntSupplier loadedWorlds;
     private final IntSupplier onlinePlayers;
 
+    /**
+     * Ticks per second, one of MN-15's three exclusion terms.
+     *
+     * <p>A supplier rather than a value because it has to be sampled at the
+     * moment the row is written, and one the caller provides because reading it
+     * is a Paper API call and this class stays free of Minecraft. Returns
+     * {@link Double#NaN} when the server has no reading yet, which is published
+     * as NULL — MN-15 excludes on a threshold, and a node with no reading is a
+     * node that has just started, which is the one placement most wants to use.
+     */
+    private final DoubleSupplier ticksPerSecond;
+
     private volatile boolean draining;
 
     /** Set once a failure has been logged, so an outage does not fill the log. */
     private volatile boolean failing;
 
+    /** Without a TPS reading, for tests and for a platform that cannot supply one. */
     public NodeHeartbeat(
             NodeRepository nodes,
             NodeConfig config,
             ServerIdentity identity,
             IntSupplier loadedWorlds,
             IntSupplier onlinePlayers) {
+        this(nodes, config, identity, loadedWorlds, onlinePlayers, () -> Double.NaN);
+    }
+
+    public NodeHeartbeat(
+            NodeRepository nodes,
+            NodeConfig config,
+            ServerIdentity identity,
+            IntSupplier loadedWorlds,
+            IntSupplier onlinePlayers,
+            DoubleSupplier ticksPerSecond) {
         this.nodes = Objects.requireNonNull(nodes, "nodes");
         this.config = Objects.requireNonNull(config, "config");
         this.identity = Objects.requireNonNull(identity, "identity");
         this.loadedWorlds = Objects.requireNonNull(loadedWorlds, "loadedWorlds");
         this.onlinePlayers = Objects.requireNonNull(onlinePlayers, "onlinePlayers");
+        this.ticksPerSecond = Objects.requireNonNull(ticksPerSecond, "ticksPerSecond");
     }
 
     @Override
@@ -59,7 +84,7 @@ public final class NodeHeartbeat implements Runnable {
                     loadedWorlds.getAsInt(),
                     onlinePlayers.getAsInt(),
                     heapPercent(),
-                    null,
+                    tps(),
                     draining,
                     identity.dataVersion(),
                     identity.minecraftVersion());
@@ -102,6 +127,22 @@ public final class NodeHeartbeat implements Runnable {
         } catch (SQLException e) {
             log.warn("could not deregister node {}; it will age out instead", config.nodeId(), e);
         }
+    }
+
+    /**
+     * The one-minute TPS average, or {@code null} when the server has no reading.
+     *
+     * <p>Clamped to the {@code NUMERIC(4,1)} the heartbeat column declares. Paper
+     * reports slightly above 20 on an idle server and the column would reject a
+     * value of four digits, so a stall in the reporting path is not allowed to
+     * become a failed heartbeat — which MN-18 would then read as a dead node.
+     */
+    private @Nullable Double tps() {
+        double reading = ticksPerSecond.getAsDouble();
+        if (Double.isNaN(reading) || Double.isInfinite(reading)) {
+            return null;
+        }
+        return Math.max(0.0, Math.min(999.9, reading));
     }
 
     /** Heap in use as a percentage of the maximum, for MN-15's exclusion term. */
