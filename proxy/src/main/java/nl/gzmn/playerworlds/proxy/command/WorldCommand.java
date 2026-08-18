@@ -296,7 +296,27 @@ public final class WorldCommand {
                                                         caller, StringArgumentType.getString(context, "name"), true);
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
+                                        }))
+                                .then(BrigadierCommand.literalArgumentBuilder("hard")
+                                        .executes(context -> {
+                                            Player caller = playerOrNull(context);
+                                            if (caller != null) {
+                                                var _ = actions.deleteHard(
+                                                        caller, StringArgumentType.getString(context, "name"), false);
+                                            }
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })
+                                        .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                                .executes(context -> {
+                                                    Player caller = playerOrNull(context);
+                                                    if (caller != null) {
+                                                        var _ = actions.deleteHard(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                true);
+                                                    }
+                                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                                })))))
                 .then(BrigadierCommand.literalArgumentBuilder("restore")
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {

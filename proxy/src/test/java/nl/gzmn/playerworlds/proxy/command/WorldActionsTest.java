@@ -163,6 +163,77 @@ class WorldActionsTest {
     }
 
     @Test
+    void deleteHardArchivedWorldSucceeds() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "archivedworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        ActionResult result = actions.deleteHard(player, "archivedworld", true).get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("Permanently deleted world 'archivedworld'");
+        assertThat(worlds.findById(worldId)).isEmpty();
+    }
+
+    @Test
+    void deleteHardActiveWorldFailsWithConflict() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "readyworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        ActionResult result = actions.deleteHard(player, "readyworld", true).get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("must be archived before it can be permanently deleted");
+        assertThat(worlds.findById(worldId)).isPresent();
+    }
+
+    @Test
+    void deleteHardUnconfirmedRequiresConfirmation() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "archivedworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        ActionResult result = actions.deleteHard(player, "archivedworld", false).get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("/world delete archivedworld hard confirm");
+        assertThat(worlds.findById(worldId)).isPresent();
+    }
+
+    @Test
+    void deleteHardByIdSucceeds() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "archivedworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        ActionResult result = actions.deleteHard(player, worldId).get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("Permanently deleted world 'archivedworld'");
+        assertThat(worlds.findById(worldId)).isEmpty();
+    }
+
+    @Test
     void restoreWorldNotArchivedFails() throws Exception {
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");

@@ -287,6 +287,39 @@ class MenuChannelListenerTest {
     }
 
     @Test
+    void hardDeleteWorldIntentDispatchesAndSendsOkResult() throws Exception {
+        UUID playerId = UUID.randomUUID();
+        Player player = mockPlayer(playerId, "Alice");
+        playersByUuid.put(playerId, player);
+        playersByName.put("Alice", player);
+        names.remember(playerId, "Alice");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, playerId, "archivedworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVED);
+
+        List<byte[]> sentMessages = Collections.synchronizedList(new ArrayList<>());
+        ServerConnection connection = mockServerConnection(player, sentMessages);
+
+        byte[] payload = MenuCodec.encodeIntent(99L, new MenuIntent.HardDeleteWorld(worldId));
+        PluginMessageEvent event =
+                new PluginMessageEvent(connection, player, MenuChannelListener.CHANNEL_IDENTIFIER, payload);
+
+        listener.onPluginMessage(event);
+
+        awaitCondition(() -> !sentMessages.isEmpty());
+
+        assertThat(sentMessages).hasSize(1);
+        MenuResult result = MenuCodec.decodeResult(sentMessages.getFirst());
+        assertThat(result).isInstanceOf(MenuResult.Ok.class);
+        MenuResult.Ok ok = (MenuResult.Ok) result;
+        assertThat(ok.correlationId()).isEqualTo(99L);
+        assertThat(ok.message()).contains("Permanently deleted world 'archivedworld'");
+        assertThat(worlds.findById(worldId)).isEmpty();
+    }
+
+    @Test
     void bareWorldsCommandWithServerConnectionSendsOpenMenu() throws Exception {
         UUID playerId = UUID.randomUUID();
         List<byte[]> sentMessages = Collections.synchronizedList(new ArrayList<>());

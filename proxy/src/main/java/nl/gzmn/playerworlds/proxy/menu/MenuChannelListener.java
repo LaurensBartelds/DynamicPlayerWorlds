@@ -133,6 +133,7 @@ public final class MenuChannelListener {
             case MenuIntent.DeclineTransfer declineTransfer ->
                 actions.transferDecline(player, declineTransfer.ownerName());
             case MenuIntent.AcceptInvite acceptInvite -> actions.accept(player, acceptInvite.ownerName());
+            case MenuIntent.HardDeleteWorld hardDelete -> actions.deleteHard(player, hardDelete.worldId());
         };
     }
 

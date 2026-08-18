@@ -289,6 +289,84 @@ public final class WorldActions {
                 executors.db());
     }
 
+    public static final String HARD_DELETE_PERMISSION = "gzmn.worlds.delete.hard";
+
+    /**
+     * Permanently destroys an archived world by name.
+     */
+    public CompletableFuture<ActionResult> deleteHard(Player caller, String name, boolean confirmed) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(name, "name");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Optional<PlayerWorld> worldOpt = worlds.findByOwnerAndName(caller.getUniqueId(), name);
+                        if (worldOpt.isEmpty()) {
+                            return ActionResult.failure(
+                                    "WORLD_NOT_FOUND", error(caller, "you own no world called '" + name + "'"));
+                        }
+                        return executeDeleteHard(caller, worldOpt.get(), confirmed);
+                    } catch (SQLException e) {
+                        log.error("deleteHard failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * Permanently destroys an archived world by WorldId (already confirmed via GUI modal).
+     */
+    public CompletableFuture<ActionResult> deleteHard(Player caller, WorldId worldId) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(worldId, "worldId");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Optional<PlayerWorld> worldOpt = worlds.findById(worldId);
+                        if (worldOpt.isEmpty()) {
+                            return ActionResult.failure("WORLD_NOT_FOUND", error(caller, "world not found"));
+                        }
+                        PlayerWorld world = worldOpt.get();
+                        if (!world.ownerUuid().equals(caller.getUniqueId())) {
+                            return ActionResult.failure(
+                                    "PERMISSION_DENIED", error(caller, "you are not the owner of this world"));
+                        }
+                        return executeDeleteHard(caller, world, true);
+                    } catch (SQLException e) {
+                        log.error("deleteHard by id failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                    }
+                },
+                executors.db());
+    }
+
+    private ActionResult executeDeleteHard(Player caller, PlayerWorld world, boolean confirmed) throws SQLException {
+        if (!caller.hasPermission(HARD_DELETE_PERMISSION)) {
+            return ActionResult.failure(
+                    "PERMISSION_DENIED", error(caller, "you do not have permission to permanently delete worlds"));
+        }
+        if (world.state() != WorldState.ARCHIVED) {
+            return ActionResult.failure(
+                    "STATE_CONFLICT",
+                    error(caller, "'" + world.name() + "' must be archived before it can be permanently deleted"));
+        }
+        if (!confirmed) {
+            info(caller, "this permanently destroys '" + world.name() + "' and all backup archives. This cannot be undone.");
+            return ActionResult.failure(
+                    "UNCONFIRMED", info(caller, "type /world delete " + world.name() + " hard confirm to permanently delete"));
+        }
+        if (!worlds.deleteHard(world.id())) {
+            return ActionResult.failure(
+                    "STATE_CHANGED", error(caller, "'" + world.name() + "' changed while you were confirming; try again"));
+        }
+        log.info("world {} ('{}') permanently deleted by owner {}", world.id(), world.name(), caller.getUsername());
+        return ActionResult.success(
+                Component.text("Permanently deleted world '" + world.name() + "'.", NamedTextColor.GREEN));
+    }
+
     /**
      * Restores an archived world (FR-36).
      */
