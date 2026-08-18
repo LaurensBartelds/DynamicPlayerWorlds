@@ -164,18 +164,26 @@ public final class S3ObjectStore implements ObjectStore {
     public void deletePrefix(String prefix) {
         Objects.requireNonNull(prefix, "prefix");
         try {
-            ListObjectsV2Request listReq =
-                    ListObjectsV2Request.builder().bucket(bucket).prefix(prefix).build();
-            ListObjectsV2Response listRes = client.listObjectsV2(listReq);
-            List<ObjectIdentifier> toDelete = listRes.contents().stream()
-                    .map(s3Obj -> ObjectIdentifier.builder().key(s3Obj.key()).build())
-                    .toList();
-            if (!toDelete.isEmpty()) {
-                client.deleteObjects(DeleteObjectsRequest.builder()
-                        .bucket(bucket)
-                        .delete(Delete.builder().objects(toDelete).build())
-                        .build());
-            }
+            String continuationToken = null;
+            do {
+                ListObjectsV2Request.Builder reqBuilder =
+                        ListObjectsV2Request.builder().bucket(bucket).prefix(prefix);
+                if (continuationToken != null) {
+                    reqBuilder.continuationToken(continuationToken);
+                }
+                ListObjectsV2Response listRes = client.listObjectsV2(reqBuilder.build());
+                List<ObjectIdentifier> toDelete = listRes.contents().stream()
+                        .map(s3Obj ->
+                                ObjectIdentifier.builder().key(s3Obj.key()).build())
+                        .toList();
+                if (!toDelete.isEmpty()) {
+                    client.deleteObjects(DeleteObjectsRequest.builder()
+                            .bucket(bucket)
+                            .delete(Delete.builder().objects(toDelete).build())
+                            .build());
+                }
+                continuationToken = listRes.isTruncated() ? listRes.nextContinuationToken() : null;
+            } while (continuationToken != null);
         } catch (Exception e) {
             throw new StorageException("Failed to delete prefix: " + prefix, e);
         }

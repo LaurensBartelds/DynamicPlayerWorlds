@@ -10,6 +10,7 @@ import java.io.OutputStream;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.FileTime;
 import java.security.DigestOutputStream;
@@ -115,6 +116,17 @@ public final class ArchivePacker {
         long totalUncompressedBytes = 0;
         int fileCount = 0;
 
+        List<PathMatcher> matchers = excludeGlobs.stream()
+                .map(glob -> {
+                    try {
+                        return FileSystems.getDefault().getPathMatcher("glob:" + glob);
+                    } catch (Exception ignored) {
+                        return null;
+                    }
+                })
+                .filter(Objects::nonNull)
+                .toList();
+
         try (OutputStream fos = Files.newOutputStream(targetArchiveFile);
                 BufferedOutputStream bos = new BufferedOutputStream(fos, BUFFER_SIZE);
                 DigestOutputStream dos = new DigestOutputStream(bos, sha256Digest);
@@ -134,7 +146,7 @@ public final class ArchivePacker {
                     List<Path> filesToPack = walk.filter(Files::isRegularFile)
                             .filter(path -> {
                                 Path fileName = path.getFileName();
-                                return fileName != null && !isExcluded(fileName.toString(), excludeGlobs);
+                                return fileName != null && !isExcluded(fileName, excludeGlobs, matchers);
                             })
                             .sorted(Comparator.naturalOrder())
                             .toList();
@@ -292,23 +304,18 @@ public final class ArchivePacker {
         return bis;
     }
 
-    private static boolean isExcluded(String fileName, List<String> excludeGlobs) {
-        String lower = fileName.toLowerCase(Locale.ROOT);
+    private static boolean isExcluded(
+            Path fileName, List<String> excludeGlobs, List<java.nio.file.PathMatcher> matchers) {
+        String nameStr = fileName.toString();
+        String lower = nameStr.toLowerCase(Locale.ROOT);
         for (String glob : excludeGlobs) {
-            if (glob.equalsIgnoreCase(lower)) {
+            if (glob.equalsIgnoreCase(nameStr) || glob.equalsIgnoreCase(lower)) {
                 return true;
             }
-            if (glob.contains("*") || glob.contains("?")) {
-                try {
-                    if (FileSystems.getDefault().getPathMatcher("glob:" + glob).matches(Path.of(fileName))
-                            || FileSystems.getDefault()
-                                    .getPathMatcher("glob:" + glob.toLowerCase(Locale.ROOT))
-                                    .matches(Path.of(lower))) {
-                        return true;
-                    }
-                } catch (Exception ignored) {
-                    // Ignore malformed glob
-                }
+        }
+        for (java.nio.file.PathMatcher matcher : matchers) {
+            if (matcher.matches(fileName) || matcher.matches(Path.of(lower))) {
+                return true;
             }
         }
         return false;
