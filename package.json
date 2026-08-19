@@ -1,0 +1,16 @@
+{
+  "name": "dynamic-player-worlds",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "node e2e/cli.mjs",
+    "e2e:up": "node e2e/cli.mjs up",
+    "e2e:down": "node e2e/cli.mjs down",
+    "e2e:build": "node e2e/cli.mjs build",
+    "e2e:deploy": "node e2e/cli.mjs deploy",
+    "e2e:reset": "node e2e/cli.mjs reset",
+    "e2e:status": "node e2e/cli.mjs status",
+    "e2e:test": "node e2e/cli.mjs test",
+    "e2e:run": "node e2e/cli.mjs run"
+  }
+}

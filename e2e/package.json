@@ -1,0 +1,20 @@
+{
+  "name": "gzmn-worlds-e2e",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "cli": "node cli.mjs",
+    "test": "node lib/test-runner.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.750.0",
+    "dotenv": "^16.4.7",
+    "mineflayer": "^4.24.0",
+    "minecraft-protocol": "1.67.0",
+    "pg": "^8.13.3"
+  }
+}

@@ -36,7 +36,10 @@ logs/
 !.env.example
 
 # e2e compose harness (F11): staged runtimes, downloaded server jars, bot deps
+node_modules/
 e2e/runtime/
 e2e/downloads/
 e2e/bot/node_modules/
+e2e/node_modules/
 e2e/**/*.log
+
