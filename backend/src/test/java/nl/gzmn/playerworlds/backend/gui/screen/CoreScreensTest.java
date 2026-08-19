@@ -435,8 +435,8 @@ class CoreScreensTest {
     }
 
     @Test
-    @DisplayName("ConfirmMenu executes onConfirm and onCancel callbacks on matching slots")
-    void confirmMenuExecutesCallbacks() {
+    @DisplayName("ConfirmMenu is the FR-27/FR-37 typed-confirm substitute: only SLOT_CONFIRM runs onConfirm")
+    void confirmMenuIsTypedConfirmationSubstitute_FR27_FR37_R5() {
         PlayerMock player = server.addPlayer();
         AtomicBoolean confirmed = new AtomicBoolean(false);
         AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -453,14 +453,20 @@ class CoreScreensTest {
         assertThat(inv.getItem(ConfirmMenu.SLOT_CONFIRM).getType()).isEqualTo(Material.LIME_CONCRETE);
         assertThat(inv.getItem(ConfirmMenu.SLOT_CANCEL).getType()).isEqualTo(Material.RED_CONCRETE);
 
-        // Click Confirm
-        menu.handleClick(player, ConfirmMenu.SLOT_CONFIRM, ClickType.LEFT);
-        assertThat(confirmed).isTrue();
+        // Filler / info slots must not authorise the destructive action.
+        menu.handleClick(player, ConfirmMenu.SLOT_INFO, ClickType.LEFT);
+        menu.handleClick(player, 0, ClickType.LEFT);
+        assertThat(confirmed).isFalse();
         assertThat(cancelled).isFalse();
 
-        // Click Cancel
+        // Cancel is an explicit refusal — still not a confirmation.
         menu.handleClick(player, ConfirmMenu.SLOT_CANCEL, ClickType.LEFT);
         assertThat(cancelled).isTrue();
+        assertThat(confirmed).isFalse();
+
+        // Only SLOT_CONFIRM is the typed-confirm substitute used before ArchiveWorld / HardDeleteWorld.
+        menu.handleClick(player, ConfirmMenu.SLOT_CONFIRM, ClickType.LEFT);
+        assertThat(confirmed).isTrue();
     }
 
     @Test

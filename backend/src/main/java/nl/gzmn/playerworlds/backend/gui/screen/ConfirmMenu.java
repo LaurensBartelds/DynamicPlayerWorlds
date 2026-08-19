@@ -14,7 +14,18 @@ import org.bukkit.event.inventory.ClickType;
 import org.bukkit.inventory.Inventory;
 
 /**
- * Reusable click-to-confirm modal screen for destructive or impactful actions (FR-27).
+ * Reusable click-to-confirm modal screen for destructive or impactful actions.
+ *
+ * <p>This modal is the GUI substitute for the typed {@code confirm} token that
+ * chat commands require:
+ * <ul>
+ *   <li>FR-27 — archive / soft-delete ({@code /world delete <name> confirm})</li>
+ *   <li>FR-37 — permanent hard-delete of an archived world</li>
+ * </ul>
+ * A click on {@link #SLOT_CONFIRM} is the only path that runs {@code onConfirm},
+ * which is what authorises the backend to emit {@code ArchiveWorld} /
+ * {@code HardDeleteWorld} intents with {@code confirmed = true}. Cancelling or
+ * closing the inventory must not fire the destructive action.
  */
 public final class ConfirmMenu implements GuiScreen {
 

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.event.connection.PluginMessageEvent;
+import com.velocitypowered.api.permission.Tristate;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -20,6 +21,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
@@ -46,6 +48,7 @@ import nl.gzmn.playerworlds.proxy.command.WorldActions;
 import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
+import nl.gzmn.playerworlds.proxy.permission.WorldPermissions;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -219,6 +222,40 @@ class MenuChannelListenerTest {
     }
 
     @Test
+    void setPublicViaMenuRefusesCallerWithoutPublicPermission_FR9h_R5() throws Exception {
+        // D14: permission is a property of the action. The GUI path must not bypass
+        // gzmn.worlds.public the way Brigadier .requires once gated only the command tree.
+        UUID playerId = UUID.randomUUID();
+        Player player = mockPlayer(playerId, "Alice", permission -> Tristate.UNDEFINED);
+        playersByUuid.put(playerId, player);
+        playersByName.put("Alice", player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, playerId, "private-world", 1L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        List<byte[]> sentMessages = Collections.synchronizedList(new ArrayList<>());
+        ServerConnection connection = mockServerConnection(player, sentMessages);
+
+        byte[] payload = MenuCodec.encodeIntent(77L, new MenuIntent.SetVisibility(worldId, Visibility.PUBLIC));
+        PluginMessageEvent event =
+                new PluginMessageEvent(connection, player, MenuChannelListener.CHANNEL_IDENTIFIER, payload);
+
+        listener.onPluginMessage(event);
+
+        awaitCondition(() -> !sentMessages.isEmpty());
+
+        MenuResult result = MenuCodec.decodeResult(sentMessages.getFirst());
+        assertThat(result).isInstanceOf(MenuResult.Failed.class);
+        MenuResult.Failed failed = (MenuResult.Failed) result;
+        assertThat(failed.correlationId()).isEqualTo(77L);
+        assertThat(failed.code()).isEqualTo(FailureCode.PERMISSION_DENIED);
+        assertThat(failed.message()).containsIgnoringCase("permission");
+        assertThat(worlds.findById(worldId).orElseThrow().visibility()).isEqualTo(Visibility.PRIVATE);
+        assertThat(WorldPermissions.allows(player, WorldPermissions.PUBLIC)).isFalse();
+    }
+
+    @Test
     void serverSourcedArchiveWorldDispatchesWithConfirmation() throws Exception {
         UUID playerId = UUID.randomUUID();
         Player player = mockPlayer(playerId, "Alice");
@@ -374,12 +411,22 @@ class MenuChannelListenerTest {
     }
 
     private Player mockPlayer(UUID uuid, String name) {
+        return mockPlayer(uuid, name, permission -> Tristate.TRUE);
+    }
+
+    private Player mockPlayer(UUID uuid, String name, Function<String, Tristate> permissions) {
         ConnectionRequestBuilder reqBuilder = mockConnectionRequestBuilder();
         return (Player) Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getUniqueId")) return uuid;
                     if (method.getName().equals("getUsername")) return name;
-                    if (method.getName().equals("hasPermission")) return true;
+                    if (method.getName().equals("getPermissionValue")) {
+                        Tristate value = permissions.apply((String) args[0]);
+                        return value != null ? value : Tristate.UNDEFINED;
+                    }
+                    if (method.getName().equals("hasPermission")) {
+                        return permissions.apply((String) args[0]) == Tristate.TRUE;
+                    }
                     if (method.getName().equals("getCurrentServer")) return Optional.empty();
                     if (method.getName().equals("createConnectionRequest")) return reqBuilder;
                     if (method.getName().equals("sendMessage")) {
@@ -399,6 +446,7 @@ class MenuChannelListenerTest {
                 getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getUniqueId")) return uuid;
                     if (method.getName().equals("getUsername")) return name;
+                    if (method.getName().equals("getPermissionValue")) return Tristate.TRUE;
                     if (method.getName().equals("hasPermission")) return true;
                     if (method.getName().equals("getCurrentServer")) return Optional.of(connection);
                     if (method.getName().equals("createConnectionRequest")) return reqBuilder;

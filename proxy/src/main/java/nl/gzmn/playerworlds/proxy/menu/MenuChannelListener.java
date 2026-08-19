@@ -109,7 +109,8 @@ public final class MenuChannelListener {
             case MenuIntent.JoinWorld joinWorld -> actions.join(player, joinWorld.worldId());
             case MenuIntent.CreateWorld createWorld -> actions.create(player, createWorld.name(), createWorld.seed());
             case MenuIntent.ArchiveWorld archiveWorld ->
-                // GUI click in ConfirmMenu is already confirmed
+                // ConfirmMenu is FR-27's typed-confirmation substitute: the backend only
+                // emits this intent after the owner clicks confirm in the modal.
                 actions.delete(player, archiveWorld.worldName(), true);
             case MenuIntent.RestoreWorld restoreWorld -> actions.restore(player, restoreWorld.worldName());
             case MenuIntent.InviteMember inviteMember ->
@@ -133,7 +134,9 @@ public final class MenuChannelListener {
             case MenuIntent.DeclineTransfer declineTransfer ->
                 actions.transferDecline(player, declineTransfer.ownerName());
             case MenuIntent.AcceptInvite acceptInvite -> actions.accept(player, acceptInvite.ownerName());
-            case MenuIntent.HardDeleteWorld hardDelete -> actions.deleteHard(player, hardDelete.worldId());
+            case MenuIntent.HardDeleteWorld hardDelete ->
+                // ConfirmMenu is FR-37's confirmation substitute (admin hard-delete).
+                actions.deleteHard(player, hardDelete.worldId());
         };
     }
 

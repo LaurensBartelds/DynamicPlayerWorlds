@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.proxy.command;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.velocitypowered.api.permission.Tristate;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -399,6 +400,21 @@ class WorldActionsTest {
     }
 
     @Test
+    void setPublicRefusesWithoutPublicPermission_FR9h_R5() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice", permission -> !WorldCommand.PUBLIC_PERMISSION.equals(permission));
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+
+        ActionResult result = actions.setPublic(player, true, "nope").get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo("PERMISSION_DENIED");
+        assertThat(worlds.findById(worldId).orElseThrow().visibility()).isEqualTo(Visibility.PRIVATE);
+    }
+
+    @Test
     void showSettingsDisplaysCurrentSettings() throws Exception {
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");
@@ -439,6 +455,9 @@ class WorldActionsTest {
                 getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getUniqueId")) return uuid;
                     if (method.getName().equals("getUsername")) return name;
+                    if (method.getName().equals("getPermissionValue")) {
+                        return permissions.test((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;
+                    }
                     if (method.getName().equals("hasPermission")) {
                         return permissions.test((String) args[0]);
                     }

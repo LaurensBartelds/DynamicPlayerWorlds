@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — R0, R1, R2, R3 and R4 landed; R5 still open in phase A.
+Status: in progress — Phase A complete (R0–R5). Next is Phase B starting at R6.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -467,31 +467,37 @@ Verified end to end by e2e scenario 08 against a deliberately reverted build:
 Alice breaks a block, runs `/world set pvp on`, and is then refused
 server-side. With the fix, both breaks succeed.
 
-#### R5 — Permission checks move into `WorldActions` (D14)
+#### R5 — Permission checks move into `WorldActions` (D14) — DONE
 
 **Requirement:** FR-1, FR-9h, FR-10, FR-27, FR-37, OQ-7.
-**Files:** `proxy/command/WorldActions.java`, `proxy/command/WorldCommand.java`,
-`backend/gui/screen/ConfirmMenu.java`.
+**Files:** `proxy/permission/WorldPermissions.java`,
+`proxy/command/WorldActions.java`, `proxy/command/WorldCommand.java`,
+`proxy/menu/MenuChannelListener.java`, `backend/gui/screen/ConfirmMenu.java`.
 
-`create`, `join`, `setPublic` and the admin actions check their own permission
-against the `Player` they already hold. `WorldCommand`'s `.requires(...)` stays
-as a completion hint. Pick one semantic for an `UNDEFINED` permission value and
-apply it everywhere; the audit's reading is that FR-9h wants strict deny and
-FR-1/FR-10 were written assuming a permission plugin is present, so strict deny
-plus documented default grants is the honest version of what runs today.
+**Landed.** Decision confirmed by owner: `UNDEFINED` is **deny**, except
+`gzmn.worlds.create` and `gzmn.worlds.join` which ship granted by default.
+`gzmn.worlds.public`, `gzmn.worlds.admin` and `gzmn.worlds.delete.hard` stay
+ungranted. One helper (`WorldPermissions.allows`) is the single semantic.
 
-Settle the two confirmation bypasses the GUI introduced in the same task:
-`MenuIntent.ArchiveWorld` passes `confirmed = true` (FR-27) and
-`MenuIntent.HardDeleteWorld` passes `confirmed = true` (FR-37). A GUI modal is a
-reasonable substitute for typed confirmation, but that equivalence belongs in
-`ConfirmMenu` with a test asserting it, not implied by a comment in a `switch`
-arm — particularly for hard delete, which FR-37 makes an admin action.
+`WorldActions` now checks permission on `create`, `join`, `accept`, `browse`,
+`setPublic` and `deleteHard` before any side effect. Brigadier `.requires(...)`
+remains only as a completion hint (`WorldCommand.maySee`). The GUI path that
+previously bypassed FR-9h entirely
+(`MenuChannelListener` → `SetVisibility` → `setPublic`) now returns
+`PERMISSION_DENIED`.
 
-**Failing test first:** a proxy test asserting `setPublic` refuses a caller
-without `gzmn.worlds.public`, driven through `MenuChannelListener.dispatch`
-rather than the command tree.
-**Acceptance:** no `WorldActions` entry point can be reached with fewer checks
-from the menu channel than from `/world`.
+`ConfirmMenu` documents and tests the FR-27 / FR-37 equivalence: only
+`SLOT_CONFIRM` runs `onConfirm`; filler and cancel do not. That is what
+authorises `MenuIntent.ArchiveWorld` / `HardDeleteWorld` with `confirmed = true`.
+
+**Failing test first (proven by temporary revert):**
+`MenuChannelListenerTest#setPublicViaMenuRefusesCallerWithoutPublicPermission_FR9h_R5`
+— without the `WorldActions.setPublic` gate the menu path returns `Ok` and the
+world becomes PUBLIC; with the gate it returns `Failed(PERMISSION_DENIED)` and
+visibility stays PRIVATE.
+**Also:** `WorldPermissionsTest` (UNDEFINED / FALSE / TRUE matrix),
+`WorldActionsTest#setPublicRefusesWithoutPublicPermission_FR9h_R5`,
+`CoreScreensTest#confirmMenuIsTypedConfirmationSubstitute_FR27_FR37_R5`.
 
 ### Phase B — the commit path
 
@@ -1036,7 +1042,6 @@ the answer is confirmed, because each changes observable behaviour:
 
 | Task | Question |
 | --- | --- |
-| R5 | Should an `UNDEFINED` permission be allowed or denied, and which of the three permissions ship granted by default? |
 | R10 | Is the `latestSnapshot` fallback only for the no-object-storage mode, or is it deliberate elsewhere? |
 | R16 | Confirm D18: is a cleanly unloaded world's scratch directory a warm cache to keep, or crash debris to quarantine? |
 | R20 | FR-34's warnings need a delivery channel. Is a `gzmn_proxy` command delivered on next login acceptable, or is the Discord DM path in FR-34 the intended one? |
@@ -1112,12 +1117,10 @@ duplicated as a task here.
 
 ## 8. Sequencing
 
-Phase A is five commits and should go out as one branch — it is the phase where
-every day of delay is a day of the defects in §0 being live.
-
-Everything after that is one branch per task, each with its failing test first,
-in the order given. R7 before R12, R21 before R20's GC half, R16 after R21's
-marker. Nothing else has a hard ordering constraint.
+Phase A (R0–R5) is complete. Remaining work is one branch per task from Phase B
+onwards, each with its failing test first, in the order given. R7 before R12,
+R21 before R20's GC half, R16 after R21's marker. Nothing else has a hard
+ordering constraint.
 
 Each commit references the requirement it closes, per CONTRIBUTING. Where a
 task closes a spec *gap* rather than a spec requirement, the commit body should

@@ -347,6 +347,9 @@ class GzmnWorldsProxyPluginTest {
                         }
                         return null;
                     }
+                    if ("getPermissionValue".equals(method.getName())) {
+                        return com.velocitypowered.api.permission.Tristate.TRUE;
+                    }
                     if ("hasPermission".equals(method.getName())) {
                         return true;
                     }

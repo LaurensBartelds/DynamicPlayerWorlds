@@ -44,6 +44,7 @@ import nl.gzmn.playerworlds.core.placement.PlacementDecision;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
+import nl.gzmn.playerworlds.proxy.permission.WorldPermissions;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -133,6 +134,9 @@ public final class WorldActions {
 
     /**
      * Creates a new world (FR-1, FR-1a).
+     *
+     * <p>Permission is checked here rather than only in Brigadier so the GUI path
+     * cannot bypass {@code gzmn.worlds.create} (D14 / R5).
      */
     public CompletableFuture<ActionResult> create(Player caller, String name, @Nullable String seedText) {
         Objects.requireNonNull(caller, "caller");
@@ -140,6 +144,10 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.CREATE);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         NetworkPolicy current = policy.get();
                         UUID owner = caller.getUniqueId();
                         int owned = worlds.countOwnedBy(owner);
@@ -289,7 +297,8 @@ public final class WorldActions {
                 executors.db());
     }
 
-    public static final String HARD_DELETE_PERMISSION = "gzmn.worlds.delete.hard";
+    /** Alias of {@link WorldPermissions#HARD_DELETE} for existing call sites. */
+    public static final String HARD_DELETE_PERMISSION = WorldPermissions.HARD_DELETE;
 
     /**
      * Permanently destroys an archived world by name.
@@ -316,7 +325,10 @@ public final class WorldActions {
     }
 
     /**
-     * Permanently destroys an archived world by WorldId (already confirmed via GUI modal).
+     * Permanently destroys an archived world by WorldId.
+     *
+     * <p>The GUI path reaches this only after {@code ConfirmMenu} has run (FR-37):
+     * the modal is the typed-confirmation substitute, so {@code confirmed} is true.
      */
     public CompletableFuture<ActionResult> deleteHard(Player caller, WorldId worldId) {
         Objects.requireNonNull(caller, "caller");
@@ -333,6 +345,7 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     "PERMISSION_DENIED", error(caller, "you are not the owner of this world"));
                         }
+                        // ConfirmMenu on the backend is FR-37's confirmation substitute.
                         return executeDeleteHard(caller, world, true);
                     } catch (SQLException e) {
                         log.error("deleteHard by id failed for {}", caller.getUsername(), e);
@@ -344,7 +357,7 @@ public final class WorldActions {
     }
 
     private ActionResult executeDeleteHard(Player caller, PlayerWorld world, boolean confirmed) throws SQLException {
-        if (!caller.hasPermission(HARD_DELETE_PERMISSION)) {
+        if (!WorldPermissions.allows(caller, WorldPermissions.HARD_DELETE)) {
             return ActionResult.failure(
                     "PERMISSION_DENIED", error(caller, "you do not have permission to permanently delete worlds"));
         }
@@ -430,6 +443,8 @@ public final class WorldActions {
 
     /**
      * Joins a world by owner name and optional world name (FR-10).
+     *
+     * <p>Permission checked here so the menu channel cannot bypass {@code gzmn.worlds.join} (D14).
      */
     public CompletableFuture<ActionResult> join(Player caller, String ownerName, @Nullable String worldName) {
         Objects.requireNonNull(caller, "caller");
@@ -437,6 +452,10 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.JOIN);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         NetworkPolicy current = policy.get();
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
@@ -466,6 +485,8 @@ public final class WorldActions {
 
     /**
      * Joins a world by its {@link WorldId}.
+     *
+     * <p>Permission checked here so the menu channel cannot bypass {@code gzmn.worlds.join} (D14).
      */
     public CompletableFuture<ActionResult> join(Player caller, WorldId worldId) {
         Objects.requireNonNull(caller, "caller");
@@ -473,6 +494,10 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.JOIN);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         NetworkPolicy current = policy.get();
                         Optional<PlayerWorld> target = worlds.findById(worldId);
                         if (target.isEmpty()
@@ -606,6 +631,8 @@ public final class WorldActions {
 
     /**
      * Accepts an invitation (FR-7).
+     *
+     * <p>Requires {@code gzmn.worlds.join} (section 6), checked here for the menu path (D14).
      */
     public CompletableFuture<ActionResult> accept(Player caller, String ownerName) {
         Objects.requireNonNull(caller, "caller");
@@ -613,6 +640,10 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.JOIN);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
                             return ActionResult.failure(
@@ -1015,6 +1046,9 @@ public final class WorldActions {
 
     /**
      * Toggles visibility between PUBLIC and PRIVATE (FR-9a, FR-9f, FR-9h).
+     *
+     * <p>{@code gzmn.worlds.public} is enforced here — not only in Brigadier — so the
+     * menu channel cannot open a world to strangers without the node (D14 / FR-9h / OQ-7).
      */
     public CompletableFuture<ActionResult> setPublic(
             Player caller, boolean isPublic, @Nullable String description, @Nullable WorldId worldId) {
@@ -1022,6 +1056,10 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.PUBLIC);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         NetworkPolicy current = policy.get();
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
@@ -1438,12 +1476,19 @@ public final class WorldActions {
 
     /**
      * Lists public worlds across the network (FR-9b) for any CommandSource.
+     *
+     * <p>Requires {@code gzmn.worlds.join} (section 6), checked here for parity with
+     * the command tree (D14).
      */
     public CompletableFuture<ActionResult> browse(CommandSource source) {
         Objects.requireNonNull(source, "source");
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        Optional<ActionResult> denied = requirePermission(source, WorldPermissions.JOIN);
+                        if (denied.isPresent()) {
+                            return denied.get();
+                        }
                         List<PlayerWorld> publicWorlds = worlds.listPublicWorlds();
                         if (publicWorlds.isEmpty()) {
                             Component msg = info(source, "There are no public worlds available right now.");
@@ -1491,7 +1536,7 @@ public final class WorldActions {
                                 resolved.quota(),
                                 worlds.listOwnedBy(caller.getUniqueId()));
                         if (resolved.source() == StorageTiers.Source.PROBED
-                                && caller.hasPermission(WorldCommand.ADMIN_PERMISSION)
+                                && WorldPermissions.allows(caller, WorldPermissions.ADMIN)
                                 && !current.storageQuotaTiers().isEmpty()) {
                             info(
                                     caller,
@@ -1513,6 +1558,19 @@ public final class WorldActions {
     // -----------------------------------------------------------------------
     // Internal & Helper methods
     // -----------------------------------------------------------------------
+
+    /**
+     * Shared permission refusal for every surface that reaches an action (D14).
+     *
+     * @return empty when allowed; a failed {@link ActionResult} when denied
+     */
+    private static Optional<ActionResult> requirePermission(CommandSource source, String permission) {
+        if (WorldPermissions.allows(source, permission)) {
+            return Optional.empty();
+        }
+        return Optional.of(ActionResult.failure(
+                "PERMISSION_DENIED", error(source, "you do not have permission to do that (" + permission + ")")));
+    }
 
     private Optional<PlayerWorld> targetWorld(Player caller, @Nullable WorldId worldId) throws SQLException {
         if (worldId != null) {

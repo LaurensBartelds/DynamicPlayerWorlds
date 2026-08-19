@@ -45,6 +45,7 @@ import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
+import nl.gzmn.playerworlds.proxy.permission.WorldPermissions;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -87,12 +88,17 @@ public final class WorldCommand {
             "storage",
             "admin");
 
-    /** Permissions per specification section 6. */
-    public static final String CREATE_PERMISSION = "gzmn.worlds.create";
+    /**
+     * Permissions per specification section 6.
+     *
+     * <p>Canonical definitions live in {@link WorldPermissions}. These aliases remain so existing
+     * call sites and tests keep compiling; the real gate is {@link WorldPermissions#allows}.
+     */
+    public static final String CREATE_PERMISSION = WorldPermissions.CREATE;
 
-    public static final String JOIN_PERMISSION = "gzmn.worlds.join";
-    public static final String PUBLIC_PERMISSION = "gzmn.worlds.public";
-    public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
+    public static final String JOIN_PERMISSION = WorldPermissions.JOIN;
+    public static final String PUBLIC_PERMISSION = WorldPermissions.PUBLIC;
+    public static final String ADMIN_PERMISSION = WorldPermissions.ADMIN;
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
     public static final List<String> ADMIN_SUBCOMMANDS =
@@ -168,8 +174,13 @@ public final class WorldCommand {
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
-    private static boolean hasPermissionOrDefault(CommandSource source, String permission) {
-        return source.getPermissionValue(permission) != com.velocitypowered.api.permission.Tristate.FALSE;
+    /**
+     * Brigadier completion hint only (D14). The authoritative check is in {@link WorldActions}
+     * via {@link WorldPermissions#allows}; this keeps the subcommand out of tab-complete for
+     * callers who cannot use it.
+     */
+    private static boolean maySee(CommandSource source, String permission) {
+        return WorldPermissions.allows(source, permission);
     }
 
     private static final AtomicLong CORRELATION_SEQ = new AtomicLong(1);
@@ -192,7 +203,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("accept")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -261,7 +272,7 @@ public final class WorldCommand {
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
-                        .requires(source -> hasPermissionOrDefault(source, CREATE_PERMISSION))
+                        .requires(source -> maySee(source, CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -331,7 +342,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -367,13 +378,13 @@ public final class WorldCommand {
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("browse")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .executes(context -> {
                             var _ = actions.browse(context.getSource());
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                         }))
                 .then(BrigadierCommand.literalArgumentBuilder("public")
-                        .requires(source -> source.hasPermission(PUBLIC_PERMISSION))
+                        .requires(source -> maySee(source, PUBLIC_PERMISSION))
                         .then(BrigadierCommand.literalArgumentBuilder("on")
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -476,7 +487,7 @@ public final class WorldCommand {
      */
     private LiteralArgumentBuilder<CommandSource> adminTree() {
         return BrigadierCommand.literalArgumentBuilder("admin")
-                .requires(source -> source.hasPermission(ADMIN_PERMISSION))
+                .requires(source -> maySee(source, ADMIN_PERMISSION))
                 .executes(context -> {
                     info(context.getSource(), "/world admin <" + String.join("|", ADMIN_SUBCOMMANDS) + ">");
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;

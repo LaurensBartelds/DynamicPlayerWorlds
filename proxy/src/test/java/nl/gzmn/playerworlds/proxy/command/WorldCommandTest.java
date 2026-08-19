@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.mojang.brigadier.CommandDispatcher;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
+import com.velocitypowered.api.permission.Tristate;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -1415,6 +1416,9 @@ class WorldCommandTest {
                             receivedMessages.add(comp);
                         }
                         return null;
+                    }
+                    if ("getPermissionValue".equals(method.getName()) && args != null && args.length == 1) {
+                        return permissions.test((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;
                     }
                     if ("hasPermission".equals(method.getName()) && args != null && args.length == 1) {
                         return permissions.test((String) args[0]);
