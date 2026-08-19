@@ -385,6 +385,13 @@ public final class PlayerWorldRepository extends Repository {
         }
 
         return database.inTransaction(connection -> {
+            // R10: detect the no-storage → object-storage transition before we
+            // overwrite manifest_key. Gen-0 profile rows must ride with the first
+            // real snapshot or FR-15b issues every absent player a fresh inventory.
+            boolean firstManifestCommit = findById(connection, id)
+                    .map(row -> row.manifestKey() == null)
+                    .orElse(false);
+
             // storage_bytes moves with manifest_key, in one statement. The figure describes the
             // manifest, so a commit that wrote one without the other would leave a player's
             // quota measured against a snapshot that is no longer the current one (§4).
@@ -417,6 +424,11 @@ public final class PlayerWorldRepository extends Repository {
 
             if (!profiles.isEmpty()) {
                 profileRepository.saveAll(connection, id, snapshot, profileFormatVersion, profiles);
+            }
+            // Same transaction as the manifest pointer (FR-15a / D17-shaped): live
+            // payloads already written win via ON CONFLICT DO NOTHING inside rekey.
+            if (firstManifestCommit) {
+                profileRepository.rekeyLatestGenerationZero(connection, id, snapshot);
             }
             return true;
         });

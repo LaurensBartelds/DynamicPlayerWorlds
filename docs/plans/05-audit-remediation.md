@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B in progress (R6–R9 landed). Next is R10.
+Status: in progress — Phase A complete; Phase B complete (R6–R10 landed). Next is R11 (Phase C).
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -590,29 +590,31 @@ Also: `applySettingsIsOkWhenWorldNotHeldHere`, `applySettingsRequiresWorldId`,
 **Acceptance:** every setting FR-9e names takes effect on a loaded world without
 an unload.
 
-#### R10 — Decide what `latestSnapshot` is for
+#### R10 — Decide what `latestSnapshot` is for — DONE
 
 **Requirement:** FR-15b, §7's retention warning.
-**Files:** `backend/profile/ProfileListener.java`, `backend/profile/WorldCommitService.java`.
+**Files:** `backend/profile/ProfileListener.java`,
+`core/db/ProfileRepository.java`, `core/db/PlayerWorldRepository.java`.
 
-`enter` falls back to `repository.latestSnapshot(worldId)` when `manifest_key`
-is null or unparseable. FR-15b names `manifest_key` as *the* source, and the
-fallback reads whichever profile snapshot is newest regardless of which world
-state is on disk — FR-15a's skew, reintroduced.
+**Decision (owner):** fallback is only for no-object-storage
+(`manifest_key IS NULL`). A present key is FR-15b's sole source.
 
-The fallback is load-bearing for the no-object-storage mode, where profiles are
-committed at generation 0 and `manifest_key` is null. Scope it there: fall back
-only when `manifest_key IS NULL`, and treat "manifest key present, no profile
-row for its snapshot" as FR-16's refusal (R11) rather than FR-5's fresh profile.
-§7 names this exact failure — *"silent, total inventory loss for that world"* —
-as the thing the retention validation exists to prevent, and the
-storage-enablement transition produces it anyway.
+**Landed.** `ProfileListener.resolveSnapshot` scopes `latestSnapshot` to a null
+manifest key; an unparseable key refuses rather than falling back. When the
+named snapshot has no row but older profile rows exist for the player, enter
+refuses instead of FR-5 fresh (§7 silent wipe). First `commitSnapshot` that
+sets `manifest_key` re-keys each player's newest generation-0 profile onto the
+new snapshot in the same transaction (`rekeyLatestGenerationZero`); live
+payloads win via `ON CONFLICT DO NOTHING`. Subsequent commits do not re-copy
+gen-0.
 
-Add the one-shot migration for that transition: when a world's first snapshot
-commit lands and generation-0 profile rows exist for it, re-key them onto the
-new snapshot in the commit transaction. Same mechanism as D17.
-
-**Failing test first:** `enablingObjectStorageDoesNotOrphanGenerationZeroProfiles`.
+**Failing test first (proven by temporary revert of the re-key call):**
+`PlayerWorldRepositoryTest#enablingObjectStorageDoesNotOrphanGenerationZeroProfiles`
+— without re-key, bob's gen-0 profile is absent at the first storage snapshot
+(`NoSuchElementException`); with it, bob is present and alice's live payload
+wins. Also: `ProfileRepositoryTest#rekeyLatestGenerationZeroCopiesNewestPerPlayer`,
+`WorldCommitServiceTest#resolveSnapshotScopesLatestFallbackToNoStorage_R10`,
+`profileListenerRefusesWhenNamedSnapshotOrphaned_R10`.
 **Acceptance:** no path issues a fresh profile to a player who has a stored
 profile for that world under any snapshot.
 
@@ -1045,7 +1047,6 @@ the answer is confirmed, because each changes observable behaviour:
 
 | Task | Question |
 | --- | --- |
-| R10 | Is the `latestSnapshot` fallback only for the no-object-storage mode, or is it deliberate elsewhere? |
 | R16 | Confirm D18: is a cleanly unloaded world's scratch directory a warm cache to keep, or crash debris to quarantine? |
 | R20 | FR-34's warnings need a delivery channel. Is a `gzmn_proxy` command delivered on next login acceptable, or is the Discord DM path in FR-34 the intended one? |
 | R22 | Confirm D17 before the migration is written. |

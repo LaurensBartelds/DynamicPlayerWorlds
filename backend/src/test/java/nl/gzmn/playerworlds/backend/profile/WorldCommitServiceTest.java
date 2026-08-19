@@ -739,6 +739,147 @@ class WorldCommitServiceTest {
     }
 
     @Test
+    @DisplayName("R10: resolveSnapshot uses latestSnapshot only when manifest_key is null")
+    void resolveSnapshotScopesLatestFallbackToNoStorage_R10() throws Exception {
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "r10-resolve", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        ProfileListener listener =
+                new ProfileListener(folders, profileService, profileRepo, worldRepo, commitService, executors);
+
+        // Gen-0 profiles exist (no-storage era).
+        onDb(() -> {
+            profileRepo.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, Map.of(owner, new byte[] {1}));
+            return null;
+        });
+
+        ProfileListener.SnapshotResolution noKey = onDb(() -> listener.resolveSnapshot(worldId));
+        assertThat(noKey.fromManifestKey()).isFalse();
+        assertThat(noKey.unparseableManifest()).isFalse();
+        assertThat(noKey.snapshot()).contains(new ProfileRepository.Snapshot(0L, 0));
+
+        onDb(() -> worldRepo.commitSnapshot(
+                worldId,
+                0L,
+                "node-test",
+                "worlds/" + worldId.value() + "/manifest/2-3.json",
+                100L,
+                4903,
+                "26.2",
+                new ProfileRepository.Snapshot(2L, 3),
+                ProfileCodec.FORMAT_VERSION,
+                Map.of(),
+                profileRepo));
+
+        ProfileListener.SnapshotResolution named = onDb(() -> listener.resolveSnapshot(worldId));
+        assertThat(named.fromManifestKey()).isTrue();
+        assertThat(named.snapshot()).contains(new ProfileRepository.Snapshot(2L, 3));
+
+        // Unparseable key must not fall back to latest (that was FR-15a skew).
+        onDb(() -> database.inTransaction(connection -> {
+            try (var stmt = connection.prepareStatement("UPDATE player_world SET manifest_key = ? WHERE id = ?")) {
+                stmt.setString(1, "not-a-valid-manifest-key");
+                stmt.setObject(2, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        }));
+        ProfileListener.SnapshotResolution bad = onDb(() -> listener.resolveSnapshot(worldId));
+        assertThat(bad.unparseableManifest()).isTrue();
+        assertThat(bad.snapshot()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("R10: missing named snapshot with older rows refuses rather than restoring latest")
+    void profileListenerRefusesWhenNamedSnapshotOrphaned_R10() throws Exception {
+        WorldId worldId = WorldId.random();
+        UUID worldOwner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, worldOwner, "r10-orphan", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        WorldMock defaultWorld = server.addSimpleWorld("world");
+        WorldMock targetWorld = server.addSimpleWorld(folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD));
+        PlayerMock joiningPlayer = server.addPlayer();
+        UUID playerId = joiningPlayer.getUniqueId();
+
+        ProfileRepository.Snapshot gen0 = new ProfileRepository.Snapshot(0L, 0);
+        ItemStack[] invContents = new ItemStack[41];
+        invContents[0] = new ItemStack(Material.DIAMOND, 3);
+        ItemStack[] ecContents = new ItemStack[27];
+        ProfileEnvelope env = new ProfileEnvelope(
+                PaperItemCodec.INSTANCE.serializeItems(invContents),
+                PaperItemCodec.INSTANCE.serializeItems(ecContents),
+                11,
+                0.5f,
+                1000,
+                20.0,
+                20,
+                5.0f,
+                List.of(),
+                new ProfileEnvelope.StoredLocation(
+                        folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD), 0, 64, 0, 0, 0));
+
+        // Seed gen-0 only, then point manifest at a snapshot with no profile row
+        // without going through commitSnapshot (so re-key does not run) — the
+        // prune / missed-transition failure mode §7 describes.
+        onDb(() -> {
+            database.inTransaction(connection -> {
+                profileRepo.saveAll(
+                        connection,
+                        worldId,
+                        gen0,
+                        ProfileCodec.FORMAT_VERSION,
+                        Map.of(playerId, ProfileCodec.encode(env)));
+                return null;
+            });
+            database.inTransaction(connection -> {
+                try (var stmt = connection.prepareStatement("UPDATE player_world SET manifest_key = ? WHERE id = ?")) {
+                    stmt.setString(1, "worlds/" + worldId.value() + "/manifest/5-1.json");
+                    stmt.setObject(2, worldId.value());
+                    stmt.executeUpdate();
+                }
+                return null;
+            });
+            return null;
+        });
+
+        ProfileListener listener =
+                new ProfileListener(folders, profileService, profileRepo, worldRepo, commitService, executors);
+
+        joiningPlayer.teleport(defaultWorld.getSpawnLocation());
+        joiningPlayer.getInventory().addItem(new ItemStack(Material.STONE, 1));
+
+        joiningPlayer.teleport(targetWorld.getSpawnLocation());
+        listener.onChangedWorld(new PlayerChangedWorldEvent(joiningPlayer, defaultWorld));
+
+        awaitFlush(() -> {
+            // Cleared by applyFresh; refuse must not restore the gen-0 diamond stack.
+            ItemStack[] contents = joiningPlayer.getInventory().getContents();
+            for (ItemStack item : contents) {
+                if (item != null && item.getType() == Material.DIAMOND) {
+                    return false;
+                }
+            }
+            return joiningPlayer.getLevel() == 0;
+        });
+
+        assertThat(joiningPlayer.getLevel())
+                .as("R10: must not restore gen-0 XP when manifest names another snapshot")
+                .isZero();
+        assertThat(joiningPlayer.getInventory().getContents())
+                .as("R10: must not restore gen-0 items via latestSnapshot fallback")
+                .noneMatch(item -> item != null && item.getType() == Material.DIAMOND);
+    }
+
+    @Test
     @DisplayName("ProfileListener loads exact snapshot indicated by manifest_key and restores player")
     void profileListenerLoadsExactSnapshotFromManifestKey() throws Exception {
         WorldId worldId = WorldId.random();

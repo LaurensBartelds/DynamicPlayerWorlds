@@ -117,26 +117,46 @@ public final class ProfileListener implements Listener {
      * <p>Clears first, on the tick the player crosses, so the gap before the
      * database answers holds an empty inventory rather than the one they walked
      * in with — an empty one can lose nothing into the world.
+     *
+     * <p>R10: {@link ProfileRepository#latestSnapshot} is only for the
+     * no-object-storage mode ({@code manifest_key IS NULL}). A present key is
+     * FR-15b's sole source; an unparseable key or a missing row when older
+     * profiles exist refuses rather than inventing a fresh inventory (§7).
      */
     private void enter(Player player, WorldId worldId) {
         profiles.applyFresh(player);
 
         executors.db().execute(() -> {
-            Optional<Snapshot> snapshot = Optional.empty();
             final Optional<StoredProfile> stored;
             try {
-                if (playerWorlds != null) {
-                    Optional<PlayerWorld> pw = playerWorlds.findById(worldId);
-                    if (pw.isPresent() && pw.get().manifestKey() != null) {
-                        snapshot = parseSnapshotFromManifestKey(pw.get().manifestKey());
-                    }
+                SnapshotResolution resolution = resolveSnapshot(worldId);
+                if (resolution.unparseableManifest()) {
+                    log.error(
+                            "manifest_key for world {} is present but unparseable; refusing profile load "
+                                    + "rather than falling back to latestSnapshot (R10 / FR-15b)",
+                            worldId);
+                    executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                    return;
                 }
-                if (snapshot.isEmpty()) {
-                    snapshot = repository.latestSnapshot(worldId);
-                }
+                Optional<Snapshot> snapshot = resolution.snapshot();
                 stored = snapshot.isEmpty()
                         ? Optional.empty()
                         : repository.load(worldId, player.getUniqueId(), snapshot.get());
+
+                if (stored.isEmpty()
+                        && resolution.fromManifestKey()
+                        && repository.hasAnyProfile(worldId, player.getUniqueId())) {
+                    // Named snapshot has no row, but older ones do — FR-5 fresh would
+                    // be the silent wipe §7 warns about (pruned profiles, missed re-key).
+                    log.error(
+                            "profile of {} in world {} missing for manifest snapshot {} but older rows exist; "
+                                    + "refusing rather than granting a fresh inventory (R10 / FR-15b / §7)",
+                            player.getUniqueId(),
+                            worldId,
+                            snapshot.orElse(null));
+                    executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                    return;
+                }
             } catch (SQLException e) {
                 log.error("could not read the profile of {} for world {}", player.getUniqueId(), worldId, e);
                 executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
@@ -173,6 +193,50 @@ public final class ProfileListener implements Listener {
                 }
             });
         });
+    }
+
+    /**
+     * Resolves which profile snapshot to load (R10 / FR-15b).
+     *
+     * <ul>
+     *   <li>{@code manifest_key} present and parseable → that snapshot only
+     *   <li>{@code manifest_key} present and unparseable → refuse (no latest fallback)
+     *   <li>{@code manifest_key} null → {@link ProfileRepository#latestSnapshot}
+     *       (no-object-storage / generation-0 profiles)
+     * </ul>
+     */
+    SnapshotResolution resolveSnapshot(WorldId worldId) throws SQLException {
+        if (playerWorlds == null) {
+            return SnapshotResolution.latest(repository.latestSnapshot(worldId));
+        }
+        Optional<PlayerWorld> pw = playerWorlds.findById(worldId);
+        if (pw.isEmpty()) {
+            return SnapshotResolution.latest(Optional.empty());
+        }
+        String manifestKey = pw.get().manifestKey();
+        if (manifestKey == null) {
+            return SnapshotResolution.latest(repository.latestSnapshot(worldId));
+        }
+        Optional<Snapshot> parsed = parseSnapshotFromManifestKey(manifestKey);
+        if (parsed.isEmpty()) {
+            return SnapshotResolution.unparseable();
+        }
+        return SnapshotResolution.named(parsed.get());
+    }
+
+    /** Outcome of {@link #resolveSnapshot} (R10). */
+    record SnapshotResolution(Optional<Snapshot> snapshot, boolean fromManifestKey, boolean unparseableManifest) {
+        static SnapshotResolution named(Snapshot snapshot) {
+            return new SnapshotResolution(Optional.of(snapshot), true, false);
+        }
+
+        static SnapshotResolution latest(Optional<Snapshot> snapshot) {
+            return new SnapshotResolution(snapshot, false, false);
+        }
+
+        static SnapshotResolution unparseable() {
+            return new SnapshotResolution(Optional.empty(), true, true);
+        }
     }
 
     /**

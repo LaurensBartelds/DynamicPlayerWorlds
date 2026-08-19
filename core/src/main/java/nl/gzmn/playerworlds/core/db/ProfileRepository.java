@@ -116,11 +116,11 @@ public final class ProfileRepository extends Repository {
     /**
      * The newest snapshot this world has profiles for.
      *
-     * <p>Milestone 6 replaces this with "the snapshot named by
-     * {@code player_world.manifest_key}", which is what FR-15b actually specifies
-     * — world and player state coming back from the same instant. Until a
-     * manifest exists there is nothing to name it with, and the newest is the
-     * only snapshot there is.
+     * <p>R10 / FR-15b: this is <em>only</em> for the no-object-storage mode, where
+     * profiles are committed at generation 0 and {@code player_world.manifest_key}
+     * is null. When a manifest key is present the load path must use that named
+     * snapshot — falling back here would reintroduce FR-15a skew (world files from
+     * one instant, inventory from another).
      */
     public Optional<Snapshot> latestSnapshot(WorldId worldId) throws SQLException {
         Objects.requireNonNull(worldId, "worldId");
@@ -139,6 +139,78 @@ public final class ProfileRepository extends Repository {
                 """,
                 statement -> statement.setObject(1, worldId.value()),
                 row -> new Snapshot(row.getLong("generation"), row.getInt("sequence")));
+    }
+
+    /**
+     * Whether this player has any retained profile row for the world (any snapshot).
+     *
+     * <p>R10: used when the manifest names a snapshot with no row for the player —
+     * if older rows exist, FR-5's fresh profile would be silent inventory loss
+     * (§7), so the load path refuses instead (FR-16).
+     */
+    public boolean hasAnyProfile(WorldId worldId, UUID uuid) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(uuid, "uuid");
+        return database.withConnection(connection -> hasAnyProfile(connection, worldId, uuid));
+    }
+
+    public boolean hasAnyProfile(Connection connection, WorldId worldId, UUID uuid) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(uuid, "uuid");
+        return queryOne(
+                        connection,
+                        """
+                        SELECT 1 AS present
+                          FROM player_world_profile
+                         WHERE world_id = ? AND uuid = ?
+                         LIMIT 1
+                        """,
+                        statement -> {
+                            statement.setObject(1, worldId.value());
+                            statement.setObject(2, uuid);
+                        },
+                        row -> Boolean.TRUE)
+                .isPresent();
+    }
+
+    /**
+     * Copies each player's newest generation-0 profile onto {@code target} (R10).
+     *
+     * <p>No-object-storage mode commits profiles at generation 0 with a null
+     * {@code manifest_key}. The first real snapshot commit must re-key those rows
+     * onto the new snapshot in the same transaction, or every player who is not
+     * online for that commit is issued a fresh inventory under FR-15b — the
+     * silent total loss §7's retention warning names.
+     *
+     * <p>{@code ON CONFLICT DO NOTHING}: live payloads already written for
+     * {@code target} by {@link #saveAll} win over the stale gen-0 copy.
+     *
+     * @return rows inserted
+     */
+    public int rekeyLatestGenerationZero(Connection connection, WorldId worldId, Snapshot target) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(target, "target");
+        return execute(connection, """
+                INSERT INTO player_world_profile (
+                  world_id, uuid, generation, sequence, format_version, data
+                )
+                SELECT world_id, uuid, ?, ?, format_version, data
+                  FROM (
+                    SELECT DISTINCT ON (uuid)
+                           world_id, uuid, format_version, data
+                      FROM player_world_profile
+                     WHERE world_id = ?
+                       AND generation = 0
+                     ORDER BY uuid, sequence DESC
+                  ) latest
+                ON CONFLICT (world_id, uuid, generation, sequence) DO NOTHING
+                """, statement -> {
+            statement.setLong(1, target.generation());
+            statement.setInt(2, target.sequence());
+            statement.setObject(3, worldId.value());
+        });
     }
 
     /**

@@ -246,6 +246,76 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("R10: first snapshot commit re-keys generation-0 profiles onto the new snapshot (FR-15b)")
+    void enablingObjectStorageDoesNotOrphanGenerationZeroProfiles() throws Exception {
+        // No-object-storage era: profiles committed at generation 0, manifest_key null.
+        // First real snapshot must carry those rows forward or FR-15b issues a fresh
+        // inventory to every player who was not online for the commit (§7).
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "r10-transition", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        byte[] aliceData = new byte[] {10, 20, 30};
+        byte[] bobData = new byte[] {40, 50};
+        // Two gen-0 sequences; re-key must take the newest per player.
+        database.inTransaction(connection -> {
+            profiles.saveAll(connection, id, new ProfileRepository.Snapshot(0L, 0), 1, Map.of(alice, new byte[] {1}));
+            profiles.saveAll(
+                    connection, id, new ProfileRepository.Snapshot(0L, 1), 1, Map.of(alice, aliceData, bob, bobData));
+            return null;
+        });
+        assertThat(worlds.findById(id).orElseThrow().manifestKey()).isNull();
+
+        ProfileRepository.Snapshot firstStorage = new ProfileRepository.Snapshot(1L, 1);
+        byte[] liveAlice = new byte[] {99}; // online at the transition — live wins
+        boolean committed = worlds.commitSnapshot(
+                id,
+                0L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/1-1.json",
+                2048L,
+                4903,
+                "26.2",
+                firstStorage,
+                1,
+                Map.of(alice, liveAlice),
+                profiles);
+
+        assertThat(committed).isTrue();
+        assertThat(worlds.findById(id).orElseThrow().manifestKey())
+                .isEqualTo("worlds/" + id.value() + "/manifest/1-1.json");
+
+        assertThat(profiles.load(id, alice, firstStorage).orElseThrow().data())
+                .as("R10: live payload on the first storage commit must win over gen-0")
+                .containsExactly(99);
+        assertThat(profiles.load(id, bob, firstStorage).orElseThrow().data())
+                .as("R10: departed player's newest gen-0 profile must be re-keyed onto the first snapshot")
+                .containsExactly(40, 50);
+
+        // Second commit must not re-copy gen-0 (would resurrect stale data).
+        ProfileRepository.Snapshot second = new ProfileRepository.Snapshot(1L, 2);
+        assertThat(worlds.commitSnapshot(
+                        id,
+                        0L,
+                        "node-a",
+                        "worlds/" + id.value() + "/manifest/1-2.json",
+                        4096L,
+                        4903,
+                        "26.2",
+                        second,
+                        1,
+                        Map.of(),
+                        profiles))
+                .isTrue();
+        assertThat(profiles.load(id, bob, second))
+                .as("R10: re-key is one-shot on first manifest only")
+                .isEmpty();
+    }
+
+    @Test
     @DisplayName("commitSnapshot updates manifest, version info, last_played, and profiles atomically")
     void commitsSnapshotAndProfilesInOneTransaction() throws Exception {
         WorldId id = WorldId.random();
