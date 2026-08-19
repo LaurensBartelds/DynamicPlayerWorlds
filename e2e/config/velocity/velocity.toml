@@ -17,11 +17,9 @@ kick-existing-players = true
 ping-passthrough = "DISABLED"
 
 [servers]
-# "lobby" is paper-a: the acceptance criterion is one player joining a lobby.
-# paper-b is registered so multi-node routing has somewhere to go later.
-lobby = "paper-a:25565"
-node-b = "paper-b:25565"
-try = ["lobby"]
+paper-a = "paper-a:25565"
+paper-b = "paper-b:25565"
+try = ["paper-a"]
 
 [forced-hosts]
 

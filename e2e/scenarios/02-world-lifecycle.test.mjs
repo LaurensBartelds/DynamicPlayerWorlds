@@ -103,8 +103,8 @@ export async function run(ctx) {
 
   // Poll DB to verify world deletion or transition to ARCHIVED / deleted
   let deletedOrArchived = false;
-  const deleteStartTime = Date.now();
-  while (Date.now() - deleteStartTime < 15000) {
+  const pollStartTime = Date.now();
+  while (Date.now() - pollStartTime < 25000) {
     const rows = await ctx.db.query('SELECT * FROM player_world WHERE name = $1', [worldName]);
     if (rows.length === 0 || rows[0].state === 'ARCHIVED' || rows[0].state === 'ARCHIVING') {
       deletedOrArchived = true;

@@ -83,7 +83,13 @@ public final class TransferJoinListener implements Listener {
      */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
+        processPlayer(event.getPlayer());
+    }
+
+    /**
+     * Claims and executes any pending transfer for the player.
+     */
+    public void processPlayer(Player player) {
         NetworkPolicy current = policy.get();
 
         executors.db().execute(() -> {

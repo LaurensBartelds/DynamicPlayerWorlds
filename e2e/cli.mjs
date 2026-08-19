@@ -261,7 +261,7 @@ function stageVelocity(downloadsDir, proxyJar) {
   const proxyConfigDir = path.join(dest, 'plugins', 'gzmn-worlds-proxy');
   fs.mkdirSync(proxyConfigDir, { recursive: true });
   const postgresPassword = process.env.E2E_POSTGRES_PASSWORD || 'e2e-postgres-not-for-prod';
-  const proxyConfig = `lobby-server = "lobby"
+  const proxyConfig = `lobby-server = "paper-a"
 
 [database]
 url = "jdbc:postgresql://postgres:5432/gzmn_worlds"

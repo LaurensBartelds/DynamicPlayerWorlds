@@ -498,12 +498,17 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .getPluginManager()
                 .registerEvents(new VisibilityListener(this, new VisibilityGroups(worldFolders), chatBuffer), this);
         // FR-11: routed join listener
-        getServer()
-                .getPluginManager()
-                .registerEvents(
-                        new TransferJoinListener(
-                                node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy),
-                        this);
+        TransferJoinListener transferListener = new TransferJoinListener(
+                node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy);
+        getServer().getPluginManager().registerEvents(transferListener, this);
+
+        getServer().getScheduler().runTaskTimer(this, () -> {
+            for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
+                if (!worldFolders.isPlayerWorld(player.getWorld().getName())) {
+                    transferListener.processPlayer(player);
+                }
+            }
+        }, 10L, 10L);
         // FR-15: profile commit triggers & manifest snapshot restores
         getServer()
                 .getPluginManager()
