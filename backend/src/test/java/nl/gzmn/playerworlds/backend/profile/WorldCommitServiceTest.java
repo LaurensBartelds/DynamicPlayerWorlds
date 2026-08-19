@@ -1,7 +1,9 @@
 package nl.gzmn.playerworlds.backend.profile;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -14,24 +16,30 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.PaperItemCodec;
 import nl.gzmn.playerworlds.backend.platform.PaperWorldRuntime;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.storage.QuiesceWatchdog;
+import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
+import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
@@ -359,6 +367,158 @@ class WorldCommitServiceTest {
         assertThat(envelope.xpLevel()).isEqualTo(11);
         ItemStack[] items = PaperItemCodec.INSTANCE.deserializeItems(envelope.inventory());
         assertThat(items).anyMatch(item -> item != null && item.getType() == Material.EMERALD && item.getAmount() == 9);
+    }
+
+    /**
+     * R8 / MN-3a: a world missing from the registry must abort, not pretend generation is 0.
+     *
+     * <p>Without the explicit abort, phase 2 falls through with {@code generation = 0},
+     * phase 3's {@code commitSnapshot} returns false against a leased row (gen ≥ 1),
+     * and the service raises {@code COMMIT_FENCED} — a destructive response to a
+     * benign cause. Absence is not a fencing token.
+     */
+    @Test
+    @DisplayName("commit without a registered world aborts rather than fencing (R8 / MN-3a)")
+    void commitWithoutARegisteredWorldAbortsRatherThanFencing() throws Exception {
+        Path scratch = tempDir.resolve("scratch");
+        Path quarantine = tempDir.resolve("quarantine");
+        Files.createDirectories(scratch);
+        Files.createDirectories(quarantine);
+
+        WorldId worldId = WorldFixture.materialize(scratch);
+        UUID owner = UUID.randomUUID();
+        // Leased row so generation is 1 — a gen-0 commit would fail the fencing predicate.
+        PlayerWorld row = onDb(() -> {
+            PlayerWorld created = worldRepo.create(
+                    worldId, owner, "r8-world", 1234L, 5000, Visibility.PRIVATE, "node-test", Duration.ofSeconds(60));
+            worldRepo.markReadyAndPlayed(worldId);
+            return created;
+        });
+        assertThat(row.generation()).isEqualTo(1L);
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        server.addSimpleWorld(overworldName);
+        server.addSimpleWorld("lobby");
+
+        AtomicInteger uploads = new AtomicInteger();
+        ObjectStore countingStore = new ObjectStore() {
+            @Override
+            public void putObject(String key, Path sourceFile) {
+                uploads.incrementAndGet();
+                objectStore.putObject(key, sourceFile);
+            }
+
+            @Override
+            public void putBytes(String key, byte[] bytes, String contentType) {
+                uploads.incrementAndGet();
+                objectStore.putBytes(key, bytes, contentType);
+            }
+
+            @Override
+            public void getObject(String key, Path destinationFile) {
+                objectStore.getObject(key, destinationFile);
+            }
+
+            @Override
+            public byte[] getBytes(String key) {
+                return objectStore.getBytes(key);
+            }
+
+            @Override
+            public boolean exists(String key) {
+                return objectStore.exists(key);
+            }
+
+            @Override
+            public void deleteObject(String key) {
+                objectStore.deleteObject(key);
+            }
+
+            @Override
+            public void deletePrefix(String prefix) {
+                objectStore.deletePrefix(prefix);
+            }
+
+            @Override
+            public long getObjectSize(String key) {
+                return objectStore.getObjectSize(key);
+            }
+
+            @Override
+            public void close() {
+                // underlying store closed in tearDown
+            }
+        };
+
+        SnapshotEngine countingEngine =
+                new SnapshotEngine(countingStore, objectCache, new SnapshotCopier(PlainFileCloner.INSTANCE));
+        WorldCommitService service = new WorldCommitService(
+                profileRepo,
+                worldRepo,
+                profileService,
+                folders,
+                platform,
+                executors,
+                countingEngine,
+                NetworkPolicy::defaults,
+                scratch,
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
+
+        WorldRegistry registry = new WorldRegistry();
+        // Registry wired but empty: pre-R8 treated that as generation = 0.
+        service.setRegistry(registry);
+        assertThat(registry.find(worldId)).isEmpty();
+
+        WorldsMetrics metrics = WorldsMetrics.create();
+        SelfFencingHandler fencing = new SelfFencingHandler(
+                registry,
+                folders,
+                platform,
+                executors,
+                service,
+                new NodeCommandRepository(database),
+                metrics,
+                scratch,
+                quarantine,
+                NetworkPolicy::defaults);
+        service.setFencingHandler(fencing);
+
+        // Keep LoadedWorld construction reachable for the "registered" contrast, but
+        // do not register — generation 0 on the DB would be legitimate; gen 1 is not.
+        assertThat(LoadedWorld.of(row).generation()).isEqualTo(1L);
+        assertThat(service.isFenced(worldId)).isFalse();
+        assertThat(service.cachedManifest(worldId)).isEmpty();
+
+        var orphan = service.requestCommit(worldId);
+        flushExecutors();
+
+        assertThatThrownBy(orphan::join)
+                .as("R8: missing registration aborts; it must not look like MN-3a fencing")
+                .hasCauseInstanceOf(StorageException.class)
+                .cause()
+                .hasMessageContaining("not registered")
+                .hasMessageContaining("R8");
+
+        assertThat(service.isFenced(worldId))
+                .as("R8: abort must not call forget via COMMIT_FENCED")
+                .isFalse();
+        assertThat(uploads.get())
+                .as("R8: no SnapshotEngine work after the abort (old path uploaded with gen 0 first)")
+                .isZero();
+        assertThat(service.cachedManifest(worldId)).isEmpty();
+
+        // Scratch still present — COMMIT_FENCED quarantine did not run.
+        Path worldScratch = WorldFixture.dimensionFolder(scratch, worldId.folder());
+        assertThat(Files.exists(worldScratch))
+                .as("R8: unregistered commit must not quarantine the scratch dir")
+                .isTrue();
+
+        PlayerWorld after = onDb(() -> worldRepo.findById(worldId)).orElseThrow();
+        assertThat(after.generation()).isEqualTo(1L);
+        assertThat(after.manifestKey())
+                .as("R8: DB pointer untouched — commit never reached phase 3")
+                .isNull();
     }
 
     /**

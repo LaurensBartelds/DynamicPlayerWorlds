@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B in progress (R6–R7 landed). Next is R8.
+Status: in progress — Phase A complete; Phase B in progress (R6–R8 landed). Next is R9.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -542,22 +542,26 @@ reload commit again.
 **Acceptance:** a fence with players inside performs zero uploads after
 `forget`; quarantine remains a single move owned by `SelfFencingHandler`.
 
-#### R8 — `generation` stops doubling as a "not found" sentinel
+#### R8 — `generation` stops doubling as a "not found" sentinel — DONE
 
 **Requirement:** MN-3, MN-3a.
 **Files:** `backend/profile/WorldCommitService.java`.
 
-`phase2IoThread` uses `generation = 0L` for both "created without a lease" and
-"the registry does not know this world", and the second routes into a
-`commitSnapshot` that returns false and a `selfFence(COMMIT_FENCED)` that
-quarantines the scratch directory — a destructive response to a benign cause.
+**Landed.** `resolveCommitGeneration` is consulted at the start of phase 2,
+before DirtyScanner / SnapshotEngine work. When a registry is wired, a missing
+entry aborts with `StorageException("… not registered … (R8)")` — it is not
+mapped to generation `0`. A registered world may still legitimately carry
+generation `0` (unleased create / DB default). When no registry is wired (unit
+tests), the cached baseline generation is used, else `0`. Phase 3's false from
+`commitSnapshot` is now messaged as `lease fenced (MN-3a)` only.
 
-Make the absence explicit: resolve to an `OptionalLong` (or fail fast) and treat
-"no generation" as *abort the commit*, not as generation zero. With R7 in place
-the case should be unreachable; it should still not be silently wrong when it is
-reached.
-
-**Failing test first:** `commitWithoutARegisteredWorldAbortsRatherThanFencing`.
+**Failing test first (proven by temporary revert of `resolveCommitGeneration`'s
+registry miss branch):**
+`WorldCommitServiceTest#commitWithoutARegisteredWorldAbortsRatherThanFencing` —
+registry wired but empty, leased row at generation 1; without the abort the
+commit falls through at generation 0, uploads, then fails as a fence; with the
+abort there are zero uploads, no `forget`/quarantine, and the exception names
+registration not fencing.
 **Acceptance:** `COMMIT_FENCED` is raised only for a genuine MN-3a outcome.
 
 #### R9 — Implement `APPLY_SETTINGS`

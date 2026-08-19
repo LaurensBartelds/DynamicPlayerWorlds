@@ -457,22 +457,18 @@ public final class WorldCommitService {
             Manifest baseline = cachedManifests.get(worldId);
             Map<String, ManifestEntry> baselineEntries = baseline != null ? baseline.entries() : Map.of();
 
+            // R8 / MN-3a: resolve the lease generation before any SnapshotEngine work.
+            // Absence is not generation 0 — that is a real DB default for an unleased
+            // row. A missing registry entry aborts rather than falling through to
+            // commitSnapshot(false) → selfFence(COMMIT_FENCED).
+            long generation = resolveCommitGeneration(worldId, baseline);
+
             List<Path> dirty = DirtyScanner.scanDirty(
                     scratchRoot,
                     folders.relativeDimensionFolders(primaryLevelName, worldId),
                     baselineEntries,
                     policy.excludeGlobs());
 
-            long generation = 0L;
-            if (registry != null) {
-                LoadedWorld loaded = registry.find(worldId).orElse(null);
-                if (loaded != null) {
-                    generation = loaded.generation();
-                }
-            }
-            if (generation == 0L && baseline != null) {
-                generation = baseline.generation();
-            }
             int sequence = baseline != null ? baseline.sequence() + 1 : 1;
 
             SnapshotEngine.SnapshotResult snapshotResult = null;
@@ -507,6 +503,34 @@ public final class WorldCommitService {
         }
     }
 
+    /**
+     * Lease generation for this commit (R8).
+     *
+     * <p>When a {@link WorldRegistry} is wired, the world must be registered: its
+     * {@link LoadedWorld#generation()} is the fencing token, including a legitimate
+     * {@code 0} for an unleased create. Missing registration is not treated as
+     * generation zero — that path used to reach {@code commitSnapshot} with a
+     * wrong token, get {@code false}, and raise {@code COMMIT_FENCED} for a benign
+     * cause (MN-3a only applies to a genuine lease/generation mismatch).
+     *
+     * <p>When no registry is wired (unit tests / early construction), fall back to
+     * the cached baseline generation, else {@code 0} matching the DB default.
+     */
+    private long resolveCommitGeneration(WorldId worldId, @Nullable Manifest baseline) {
+        if (registry != null) {
+            LoadedWorld loaded = registry.find(worldId).orElse(null);
+            if (loaded == null) {
+                throw new StorageException(
+                        "aborting commit for world " + worldId + ": not registered on this node (R8)");
+            }
+            return loaded.generation();
+        }
+        if (baseline != null) {
+            return baseline.generation();
+        }
+        return 0L;
+    }
+
     private Phase3Result phase3DbThread(Phase2Result phase2) {
         WorldId worldId = phase2.worldId();
         Manifest manifestToCommit = phase2.newManifest() != null ? phase2.newManifest() : phase2.baselineManifest();
@@ -532,12 +556,14 @@ public final class WorldCommitService {
                     profiles);
 
             if (!committed) {
+                // MN-3a: only a lease/generation mismatch (or missing row under the
+                // fencing predicate) reaches here. R8 aborts unregistered worlds in
+                // phase 2 so they never look like a fence.
                 if (fencingHandler != null) {
                     fencingHandler.selfFence(
                             worldId, nl.gzmn.playerworlds.backend.lease.SelfFencingHandler.FenceReason.COMMIT_FENCED);
                 }
-                throw new StorageException(
-                        "Failed to commit snapshot for world " + worldId + ": fenced or row missing");
+                throw new StorageException("Failed to commit snapshot for world " + worldId + ": lease fenced (MN-3a)");
             }
             return new Phase3Result(worldId, phase2.takenDepartures(), manifestToCommit);
         } catch (SQLException e) {
