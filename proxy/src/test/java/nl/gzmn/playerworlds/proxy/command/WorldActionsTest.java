@@ -37,6 +37,7 @@ import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class WorldActionsTest {
@@ -396,6 +397,31 @@ class WorldActionsTest {
                 .isEqualTo(nl.gzmn.playerworlds.core.control.CommandKind.APPLY_SETTINGS.name());
         assertThat(cmd.worldId()).isEqualTo(worldId);
         assertThat(cmd.generation()).isEqualTo(created.generation());
+    }
+
+    @Test
+    @DisplayName("R12: join that cannot route releases the lease it acquired (MN-12)")
+    void joinNotRoutableReleasesAcquiredLease_R12() throws Exception {
+        // Placement can select the node from the heartbeat table, but Velocity has
+        // no RegisteredServer — the handoff fails after acquireLease.
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "r12world", 12345L, 5000, Visibility.PUBLIC);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        ActionResult result = actions.join(player, worldId).get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo("NOT_ROUTABLE");
+
+        var placement = worlds.placementContext(worldId).orElseThrow();
+        assertThat(placement.leaseHolder())
+                .as("R12: proxy must release a lease acquired for a join that never left")
+                .isNull();
     }
 
     @Test

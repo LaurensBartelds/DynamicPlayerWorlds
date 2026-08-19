@@ -447,6 +447,12 @@ public final class WorldLifecycleService {
      * <p>Never all three: a world created but never entered through a portal has
      * one folder, and generating the other two here would undo FR-4 in the other
      * direction — the stall would simply move from first transit to first join.
+     *
+     * <p>R12 / MN-12: any terminal non-{@link LoadOutcome.Loaded} outcome (and any
+     * exceptional failure) releases a live lease this node still holds on a
+     * READY/CREATING world that did not enter the registry. The proxy may have
+     * acquired the lease before routing; without this release the world stays
+     * pinned to a node that never loaded it for the full {@code nodes.lease-seconds}.
      */
     public CompletableFuture<LoadOutcome> load(WorldId id) {
         Objects.requireNonNull(id, "id");
@@ -465,7 +471,61 @@ public final class WorldLifecycleService {
                             }
                             return materialiseExisting(row, current);
                         },
-                        executors.io());
+                        executors.io())
+                .handleAsync(
+                        (outcome, failure) -> {
+                            if (failure != null) {
+                                releaseLeaseAfterFailedLoad(id);
+                                if (failure instanceof RuntimeException runtime) {
+                                    throw runtime;
+                                }
+                                if (failure instanceof Error error) {
+                                    throw error;
+                                }
+                                throw new CompletionException(failure);
+                            }
+                            if (!(outcome instanceof LoadOutcome.Loaded)) {
+                                releaseLeaseAfterFailedLoad(id);
+                            }
+                            return outcome;
+                        },
+                        executors.db());
+    }
+
+    /**
+     * R12: drop a lease that did not result in a loaded world (MN-8, MN-12).
+     *
+     * <p>{@link PlayerWorldRepository#releaseLease} is conditional on
+     * {@code (node, generation)}, so a release racing a takeover is a no-op.
+     * Worlds in archival/restore states are left alone — those paths own the
+     * lease deliberately.
+     */
+    private void releaseLeaseAfterFailedLoad(WorldId id) {
+        if (nodeId == null) {
+            return;
+        }
+        if (registry.find(id).isPresent()) {
+            return;
+        }
+        try {
+            Optional<PlayerWorld> found = worlds.findById(id);
+            if (found.isEmpty()) {
+                return;
+            }
+            PlayerWorld row = found.get();
+            if (row.state() != WorldState.READY && row.state() != WorldState.CREATING) {
+                return;
+            }
+            if (!nodeId.equals(row.assignedNode())) {
+                return;
+            }
+            boolean released = worlds.releaseLease(id, nodeId, row.generation());
+            if (released) {
+                events.info(LogEvent.LEASE_RELEASE, "released lease after failed load gen " + row.generation(), id);
+            }
+        } catch (SQLException e) {
+            log.warn("could not release lease for {} after failed load", id, e);
+        }
     }
 
     private Checked readForLoad(WorldId id, NetworkPolicy current) {

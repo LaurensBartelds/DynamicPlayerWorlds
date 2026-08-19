@@ -341,4 +341,49 @@ class WorldLifecycleServiceTest {
         // Verify commitService cached the manifest
         assertThat(commitService.cachedManifest(worldId)).isPresent();
     }
+
+    @Test
+    @DisplayName("R12: a failed cold load releases the lease it acquired (MN-12)")
+    void aFailedColdLoadReleasesTheLeaseItAcquired_MN12() throws Exception {
+        // Default lifecycleService has nodeId=null and never acquires; R12 needs a real node.
+        String nodeId = "node-r12";
+        WorldLifecycleService leasedLifecycle = new WorldLifecycleService(
+                worldRepo,
+                membershipRepo,
+                membershipCache,
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                NetworkPolicy::defaults,
+                scratchDir,
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                nodeId,
+                worldDownloader,
+                objectStore,
+                commitService,
+                objectCache);
+
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "r12-fail", 12345L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        // READY, no folders, no manifest → acquire lease then Fail("no world folder…").
+        CompletableFuture<LoadOutcome> loadFuture = leasedLifecycle.load(worldId);
+        LoadOutcome outcome = awaitFuture(loadFuture);
+
+        assertThat(outcome).isInstanceOf(LoadOutcome.Failed.class);
+        assertThat(((LoadOutcome.Failed) outcome).reason()).contains("no world folder");
+        assertThat(registry.find(worldId)).isEmpty();
+
+        var placement = onDb(() -> worldRepo.placementContext(worldId)).orElseThrow();
+        assertThat(placement.leaseHolder())
+                .as("R12/MN-12: failed load must release so the next join can place normally")
+                .isNull();
+    }
 }

@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B complete; Phase C started (R11 landed). Next is R12.
+Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R12 landed). Next is R13.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -648,7 +648,7 @@ also keeps arrival inventory and ejects.
 **Acceptance:** an undecodable profile produces an eject command and no
 inventory mutation.
 
-#### R12 — Release the lease on every failed load
+#### R12 — Release the lease on every failed load — **DONE**
 
 **Requirement:** MN-8, MN-12, FR-11.
 **Files:** `backend/world/WorldLifecycleService.java`, `proxy/command/WorldActions.java`.
@@ -661,12 +661,24 @@ or a dimension that would not load. The world stays leased for the full
 subsequent join, every retry is routed to the same node, and every one is
 refused. A world becomes unjoinable for three minutes per failed attempt.
 
-Make the acquisition scoped: whichever component acquired releases on any
-non-`Loaded` outcome, using the generation it was granted. `releaseLease` is
-already conditional on `(node, generation)`, so a release racing a takeover is
-a no-op rather than a hazard.
+**Landed.** Acquisition is scoped on both sides:
 
-**Failing test first:** `aFailedColdLoadReleasesTheLeaseItAcquired_MN12`.
+- **Backend `WorldLifecycleService.load`:** any terminal non-`Loaded` outcome
+  (and any exceptional failure) calls `releaseLeaseAfterFailedLoad`. That drops
+  a live lease this node still holds on a READY/CREATING world that did not
+  enter the registry — covering both leases this load acquired and leases the
+  proxy acquired before routing. Archival/restore states are left alone.
+  `releaseLease` stays conditional on `(node, generation)`.
+- **Proxy `WorldActions.doJoin`:** tracks a lease acquired for a `Selected`
+  placement and releases it on `NOT_ROUTABLE` or a routing SQLException before
+  the player is handed off.
+
+**Failing test first (proven by temporary revert):**
+`WorldLifecycleServiceTest#aFailedColdLoadReleasesTheLeaseItAcquired_MN12` —
+without the release, `placementContext.leaseHolder` stays `"node-r12"` after a
+failed load; with it, the holder is null. Proxy
+`WorldActionsTest#joinNotRoutableReleasesAcquiredLease_R12` — without the
+proxy release, holder stays `"paper-a"` after `NOT_ROUTABLE`.
 **Acceptance:** after a load failure, `placementContext` reports no live lease
 and the next join is placed normally.
 

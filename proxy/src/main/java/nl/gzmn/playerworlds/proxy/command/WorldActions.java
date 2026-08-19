@@ -540,6 +540,11 @@ public final class WorldActions {
         }
 
         long routingGeneration = world.generation();
+        // R12: track a lease this join acquired so terminal failures before the
+        // player is handed off release it (MN-12). releaseLease is conditional on
+        // (node, generation), so a racing takeover is a no-op.
+        @Nullable String acquiredForNode = null;
+        long acquiredGeneration = -1L;
         if (decision instanceof PlacementDecision.Selected selected) {
             Optional<PlayerWorldRepository.LeaseGrant> grant =
                     worlds.acquireLease(world.id(), nodeId, selected.node().dataVersion(), current.leaseDuration());
@@ -549,6 +554,8 @@ public final class WorldActions {
                         error(caller, "that world is being opened elsewhere right now; try again in a moment"));
             }
             routingGeneration = grant.get().generation();
+            acquiredForNode = nodeId;
+            acquiredGeneration = routingGeneration;
         } else {
             Optional<PlayerWorld> fresh = worlds.findById(world.id());
             if (fresh.isPresent()) {
@@ -556,14 +563,38 @@ public final class WorldActions {
             }
         }
 
-        transfers.route(caller.getUniqueId(), world.id(), nodeId, routingGeneration);
-        var targetServer = registry.server(nodeId);
-        if (targetServer.isEmpty()) {
-            return ActionResult.failure("NOT_ROUTABLE", error(caller, "that server is not routable right now"));
+        try {
+            transfers.route(caller.getUniqueId(), world.id(), nodeId, routingGeneration);
+            var targetServer = registry.server(nodeId);
+            if (targetServer.isEmpty()) {
+                releaseJoinLease(world.id(), acquiredForNode, acquiredGeneration);
+                return ActionResult.failure("NOT_ROUTABLE", error(caller, "that server is not routable right now"));
+            }
+            Component msg = info(caller, "sending you to '" + world.name() + "'...");
+            caller.createConnectionRequest(targetServer.get()).fireAndForget();
+            return ActionResult.success(msg);
+        } catch (SQLException e) {
+            releaseJoinLease(world.id(), acquiredForNode, acquiredGeneration);
+            throw e;
         }
-        Component msg = info(caller, "sending you to '" + world.name() + "'...");
-        caller.createConnectionRequest(targetServer.get()).fireAndForget();
-        return ActionResult.success(msg);
+    }
+
+    /** R12: drop a lease acquired for a join that never left the proxy (MN-12). */
+    private void releaseJoinLease(WorldId worldId, @Nullable String nodeId, long generation) {
+        if (nodeId == null || generation < 0L) {
+            return;
+        }
+        try {
+            if (worlds.releaseLease(worldId, nodeId, generation)) {
+                log.info(
+                        "released lease for {} on {} gen {} after failed join handoff (R12)",
+                        worldId,
+                        nodeId,
+                        generation);
+            }
+        } catch (SQLException e) {
+            log.warn("could not release lease for {} on {} after failed join handoff", worldId, nodeId, e);
+        }
     }
 
     public CompletableFuture<ActionResult> invite(Player caller, String targetName) {
