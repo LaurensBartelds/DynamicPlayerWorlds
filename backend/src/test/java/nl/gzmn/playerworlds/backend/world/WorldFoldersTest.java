@@ -82,6 +82,11 @@ class WorldFoldersTest {
             }
 
             @Override
+            public Path relativeWorldFolder(String primaryLevelName, String baseFolder, DimensionKind dimension) {
+                return Path.of(bukkitWorldName(baseFolder, dimension));
+            }
+
+            @Override
             public List<String> worldRootFiles() {
                 return List.of("level.dat");
             }

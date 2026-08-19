@@ -1,5 +1,7 @@
 package nl.gzmn.playerworlds.backend.world;
 
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -42,6 +44,36 @@ public final class WorldFolders {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(dimension, "dimension");
         return layout.bukkitWorldName(id.folder(), dimension);
+    }
+
+    /** The layout that owns on-disk path resolution for this server's data version. */
+    public WorldLayout layout() {
+        return layout;
+    }
+
+    /**
+     * Relative paths under the world container for every dimension folder of {@code id}.
+     *
+     * <p>These are the roots {@code DirtyScanner} and archival walk for live Paper 26
+     * worlds ({@code <level>/dimensions/minecraft/<bukkitName>/}).
+     */
+    public List<Path> relativeDimensionFolders(String primaryLevelName, WorldId id) {
+        Objects.requireNonNull(primaryLevelName, "primaryLevelName");
+        Objects.requireNonNull(id, "id");
+        List<Path> roots = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            roots.add(layout.relativeWorldFolder(primaryLevelName, id.folder(), dimension));
+        }
+        return List.copyOf(roots);
+    }
+
+    /** Absolute on-disk folder for one dimension under the world container. */
+    public Path onDiskFolder(Path scratchRoot, String primaryLevelName, WorldId id, DimensionKind dimension) {
+        Objects.requireNonNull(scratchRoot, "scratchRoot");
+        Objects.requireNonNull(primaryLevelName, "primaryLevelName");
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(dimension, "dimension");
+        return layout.bukkitWorldFolder(scratchRoot, primaryLevelName, id.folder(), dimension);
     }
 
     /**

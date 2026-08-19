@@ -429,6 +429,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
         ProfileRepository profileRepository = new ProfileRepository(openedDatabase);
         ProfileService profileService = new ProfileService(selected.itemCodec());
+        // Paper 26 nests every Bukkit world under the primary save (level-name).
+        String primaryLevelName = primaryLevelName();
 
         WorldCommitService worldCommitService = new WorldCommitService(
                 profileRepository,
@@ -440,7 +442,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 snapshotEngine,
                 this::policy,
                 node.scratchPath(),
-                node.nodeId());
+                node.nodeId(),
+                primaryLevelName);
         this.commitService = worldCommitService;
 
         SelfFencingHandler fencing = new SelfFencingHandler(
@@ -486,6 +489,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldsMetrics,
                 this::policy,
                 node.scratchPath(),
+                primaryLevelName,
                 node.nodeId(),
                 worldDownloader,
                 store,
@@ -642,6 +646,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 heartbeat,
                 snapshotEngine,
                 store,
+                selected.worldLayout(),
+                primaryLevelName,
                 selected.identity());
     }
 
@@ -691,6 +697,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             NodeHeartbeat heartbeat,
             @Nullable SnapshotEngine snapshotEngine,
             @Nullable ObjectStore store,
+            nl.gzmn.playerworlds.backend.platform.WorldLayout worldLayout,
+            String primaryLevelName,
             ServerIdentity identity) {
         ExecutorService listen = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "gzmn-backend-listen");
@@ -731,6 +739,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 openedDatabase,
                 archiveStorage,
                 node.scratchPath(),
+                worldLayout,
+                primaryLevelName,
                 store,
                 worldRegistry,
                 handoff,
@@ -851,6 +861,21 @@ public class GzmnWorldsPlugin extends JavaPlugin {
      */
     protected ServerIdentity detectIdentity() {
         return ServerIdentity.detect();
+    }
+
+    /**
+     * Primary save name ({@code level-name} / first loaded world). Paper 26 nests
+     * every Bukkit world under {@code <this>/dimensions/minecraft/<name>/}.
+     *
+     * <p>Overridden in tests that do not load a default world. Production asks
+     * the server for its first world, falling back to {@code world}.
+     */
+    protected String primaryLevelName() {
+        var loaded = getServer().getWorlds();
+        if (!loaded.isEmpty()) {
+            return loaded.getFirst().getName();
+        }
+        return "world";
     }
 
     /**

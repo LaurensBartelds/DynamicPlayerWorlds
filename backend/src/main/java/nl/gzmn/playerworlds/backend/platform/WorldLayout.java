@@ -7,10 +7,12 @@ import java.util.List;
  * How a player world's three dimensions sit on disk (MN-2a).
  *
  * <p>The synced path set is version-sensitive: {@code poi/} appeared in 1.14,
- * {@code entities/} split out in 1.17, and Bukkit's {@code DIM-1}/{@code DIM1}
- * nesting is its own quirk. Hardcoding MN-2a's table once is how the next format
- * change silently drops a directory. A version-keyed layout with a test per
- * version turns that into a failing test instead.
+ * {@code entities/} split out in 1.17, and Paper 26 moved every Bukkit world
+ * under the primary save's {@code dimensions/minecraft/<name>/} tree (no more
+ * top-level {@code <name>/} folders and no {@code DIM-1}/{@code DIM1} nesting).
+ * Hardcoding MN-2a's table once is how the next format change silently drops a
+ * directory. A version-keyed layout with a test per version turns that into a
+ * failing test instead.
  *
  * <p>Anything present under a Bukkit world folder is synced unless it matches
  * {@link #defaultExcludeGlobs()}; the required paths are the ones whose absence
@@ -38,14 +40,16 @@ public interface WorldLayout {
 
     /**
      * Path of the dimension's region data root relative to the Bukkit world
-     * folder. Empty for the overworld; {@code DIM-1} for the nether;
-     * {@code DIM1} for the end.
+     * folder. Empty on Paper 26+: region files sit directly under the world
+     * folder rather than under a {@code DIM-1}/{@code DIM1} segment.
      */
     Path dimensionDataRelativePath(DimensionKind dimension);
 
     /**
-     * Files that live at the Bukkit world root and must be synced. Today that is
-     * {@code level.dat} (spawn, gamerules, dragon fight state — FR-3b).
+     * Files that live at the Bukkit world root and mark a materialised dimension.
+     * On Paper 26+ that is {@code paper-world.yml} (per-dimension settings);
+     * {@code level.dat} lives only on the primary save root, not on each Bukkit
+     * world.
      */
     List<String> worldRootFiles();
 
@@ -62,14 +66,25 @@ public interface WorldLayout {
      */
     List<String> defaultExcludeGlobs();
 
-    /** Absolute Bukkit world folder under the node's scratch root. */
-    default Path bukkitWorldFolder(Path scratchRoot, String baseFolder, DimensionKind dimension) {
-        return scratchRoot.resolve(bukkitWorldName(baseFolder, dimension));
+    /**
+     * Relative path under the world container for one Bukkit world's on-disk folder.
+     *
+     * @param primaryLevelName the server's primary save name ({@code level-name},
+     *     usually {@code world}) — Paper 26 nests every Bukkit world under it
+     * @param baseFolder overworld folder from {@code WorldId#folder()} (FR-2a)
+     */
+    Path relativeWorldFolder(String primaryLevelName, String baseFolder, DimensionKind dimension);
+
+    /** Absolute Bukkit world folder under the node's scratch / world container. */
+    default Path bukkitWorldFolder(
+            Path scratchRoot, String primaryLevelName, String baseFolder, DimensionKind dimension) {
+        return scratchRoot.resolve(relativeWorldFolder(primaryLevelName, baseFolder, dimension));
     }
 
     /** Absolute path of the dimension's region data root under scratch. */
-    default Path dimensionDataRoot(Path scratchRoot, String baseFolder, DimensionKind dimension) {
-        Path worldFolder = bukkitWorldFolder(scratchRoot, baseFolder, dimension);
+    default Path dimensionDataRoot(
+            Path scratchRoot, String primaryLevelName, String baseFolder, DimensionKind dimension) {
+        Path worldFolder = bukkitWorldFolder(scratchRoot, primaryLevelName, baseFolder, dimension);
         Path relative = dimensionDataRelativePath(dimension);
         return relative.toString().isEmpty() ? worldFolder : worldFolder.resolve(relative);
     }

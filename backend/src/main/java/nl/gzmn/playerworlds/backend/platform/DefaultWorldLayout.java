@@ -7,16 +7,29 @@ import java.util.List;
  * World folder layout for the Minecraft version this build targets and anything
  * newer until a more specific layout is registered.
  *
- * <p>Bukkit does not nest dimensions the way vanilla does. For base folder
- * {@code foo}: overworld content is under {@code foo/}; nether regions are at
- * {@code foo_nether/DIM-1/}; end regions are at {@code foo_the_end/DIM1/}; each
- * Bukkit world carries its own {@code level.dat} at its root (MN-2a).
+ * <p>Paper 26+ stores every Bukkit world under the primary save (the server's
+ * {@code level-name}, usually {@code world}):
+ *
+ * <pre>
+ *   &lt;level-name&gt;/dimensions/minecraft/&lt;bukkitWorldName&gt;/
+ *     paper-world.yml
+ *     region/
+ *     entities/
+ *     data/
+ * </pre>
+ *
+ * <p>There is no top-level {@code <bukkitWorldName>/} folder and no
+ * {@code DIM-1}/{@code DIM1} nesting. {@code level.dat} lives only on the
+ * primary save root; each Bukkit world is marked by {@code paper-world.yml}.
+ * Bukkit world names themselves still use the classic {@code _nether} /
+ * {@code _the_end} suffixes (MN-2a).
  */
 public final class DefaultWorldLayout implements WorldLayout {
 
     public static final DefaultWorldLayout INSTANCE = new DefaultWorldLayout();
 
-    private static final List<String> WORLD_ROOT_FILES = List.of("level.dat");
+    /** Per-dimension presence marker written by Paper 26+ under each world folder. */
+    private static final List<String> WORLD_ROOT_FILES = List.of("paper-world.yml");
 
     private static final List<String> DIMENSION_CONTENT_DIRECTORIES = List.of("region", "entities", "poi", "data");
 
@@ -49,11 +62,15 @@ public final class DefaultWorldLayout implements WorldLayout {
 
     @Override
     public Path dimensionDataRelativePath(DimensionKind dimension) {
-        return switch (dimension) {
-            case OVERWORLD -> Path.of("");
-            case NETHER -> Path.of("DIM-1");
-            case END -> Path.of("DIM1");
-        };
+        // Paper 26 nested every former Bukkit world as a flat dimension folder;
+        // region/entities/data sit at the world folder root for all three.
+        return Path.of("");
+    }
+
+    @Override
+    public Path relativeWorldFolder(String primaryLevelName, String baseFolder, DimensionKind dimension) {
+        String level = primaryLevelName == null || primaryLevelName.isBlank() ? "world" : primaryLevelName;
+        return Path.of(level, "dimensions", "minecraft", bukkitWorldName(baseFolder, dimension));
     }
 
     @Override

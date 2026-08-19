@@ -5,6 +5,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -18,34 +19,46 @@ import nl.gzmn.playerworlds.core.model.WorldId;
  *
  * <p>Excludes node-local files (e.g. {@code session.lock}, {@code uid.dat}) configured via {@code excludeGlobs}.
  * Compares file length and last-modified time against {@link ManifestEntry} metadata to identify dirty files.
+ *
+ * <p>Callers supply the dimension folder paths (relative to {@code scratchRoot}) because on-disk layout
+ * is version-sensitive — Paper 26 nests Bukkit worlds under
+ * {@code <level-name>/dimensions/minecraft/<name>/}, while cold archives still unpack to flat
+ * {@code <name>/} folders. {@link #scanDirty(Path, WorldId, Map, List)} keeps the flat layout for
+ * archive extract trees and tests.
  */
 public final class DirtyScanner {
 
     private DirtyScanner() {}
 
     /**
-     * Scans the live world folders under {@code scratchRoot} for files that are new or modified compared to {@code baselineEntries}.
+     * Scans the given dimension folders under {@code scratchRoot} for files that are new or modified
+     * compared to {@code baselineEntries}.
      *
-     * @param scratchRoot root directory containing local world folders
-     * @param worldId world identity to scan
+     * @param scratchRoot root directory that relative paths are resolved against
+     * @param relativeDimensionRoots dimension folder paths relative to {@code scratchRoot}
      * @param baselineEntries map of relative unix path to baseline manifest entry
      * @param excludeGlobs list of file names or glob patterns to omit from the dirty set
      * @return sorted list of relative paths that are new or modified
      * @throws StorageException if scanning the directory hierarchy fails with an IO error
      */
     public static List<Path> scanDirty(
-            Path scratchRoot, WorldId worldId, Map<String, ManifestEntry> baselineEntries, List<String> excludeGlobs) {
+            Path scratchRoot,
+            Collection<Path> relativeDimensionRoots,
+            Map<String, ManifestEntry> baselineEntries,
+            List<String> excludeGlobs) {
         Objects.requireNonNull(scratchRoot, "scratchRoot");
-        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(relativeDimensionRoots, "relativeDimensionRoots");
         Objects.requireNonNull(baselineEntries, "baselineEntries");
         Objects.requireNonNull(excludeGlobs, "excludeGlobs");
 
-        String base = worldId.folder();
-        List<String> folderPrefixes = List.of(base, base + "_nether", base + "_the_end");
         List<Path> dirty = new ArrayList<>();
 
-        for (String prefix : folderPrefixes) {
-            Path root = scratchRoot.resolve(prefix);
+        for (Path relativeRoot : relativeDimensionRoots) {
+            Objects.requireNonNull(relativeRoot, "relativeDimensionRoot");
+            if (relativeRoot.isAbsolute()) {
+                throw new IllegalArgumentException("dimension root must be relative to scratchRoot: " + relativeRoot);
+            }
+            Path root = scratchRoot.resolve(relativeRoot);
             if (!Files.isDirectory(root)) {
                 continue;
             }
@@ -81,6 +94,25 @@ public final class DirtyScanner {
         }
         dirty.sort(Comparator.naturalOrder());
         return List.copyOf(dirty);
+    }
+
+    /**
+     * Scans flat Bukkit world folders ({@code <folder>}, {@code <folder>_nether},
+     * {@code <folder>_the_end}) under {@code scratchRoot}.
+     *
+     * <p>Used for cold-archive extract trees and synthetic fixtures that still use the
+     * classic multi-folder layout. Live Paper 26 nodes must pass layout-resolved roots
+     * via {@link #scanDirty(Path, Collection, Map, List)} instead.
+     */
+    public static List<Path> scanDirty(
+            Path scratchRoot, WorldId worldId, Map<String, ManifestEntry> baselineEntries, List<String> excludeGlobs) {
+        Objects.requireNonNull(worldId, "worldId");
+        String base = worldId.folder();
+        return scanDirty(
+                scratchRoot,
+                List.of(Path.of(base), Path.of(base + "_nether"), Path.of(base + "_the_end")),
+                baselineEntries,
+                excludeGlobs);
     }
 
     private static boolean isExcluded(String fileName, List<String> excludeGlobs) {

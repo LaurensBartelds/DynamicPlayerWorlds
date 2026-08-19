@@ -38,6 +38,19 @@ class RegionStructureTest {
     }
 
     @Test
+    @DisplayName("unpadded trailing sector (Paper Anvil layout) is accepted when payload fits")
+    void unpaddedTrailingSectorAccepted() {
+        byte[] padded = RegionStructure.minimalValidRegion(CHUNK_PAYLOAD);
+        // Trim the last sector the way Paper leaves many live .mca files: location
+        // entry still claims a full sector, but the file is not a multiple of 4096.
+        int trimmedLength = padded.length - 100;
+        byte[] unpadded = new byte[trimmedLength];
+        System.arraycopy(padded, 0, unpadded, 0, trimmedLength);
+        assertThat(unpadded.length % RegionStructure.SECTOR_BYTES).isNotZero();
+        assertThatCode(() -> RegionStructure.validate(unpadded, "unpadded")).doesNotThrowAnyException();
+    }
+
+    @Test
     @DisplayName("file shorter than 8 KiB header is rejected")
     void shortFileRejected() {
         byte[] shortFile = new byte[100];

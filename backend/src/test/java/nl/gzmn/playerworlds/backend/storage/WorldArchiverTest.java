@@ -137,13 +137,7 @@ class WorldArchiverTest {
             return null;
         });
 
-        WorldArchiver archiver = new WorldArchiver(
-                worldRepo,
-                database,
-                archiveStorage,
-                scratchRoot,
-                null,
-                registry,
+        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -176,7 +170,7 @@ class WorldArchiverTest {
         assertThat(archiveStorage.exists(result.archiveKey())).isTrue();
 
         // Check scratch directory deleted
-        assertThat(Files.exists(scratchRoot.resolve(worldId.folder()))).isFalse();
+        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder()))).isFalse();
     }
 
     @Test
@@ -208,6 +202,8 @@ class WorldArchiverTest {
                     database,
                     s3ArchiveStorage,
                     scratchRoot,
+                    platform.worldLayout(),
+                    WorldFixture.PRIMARY_LEVEL_NAME,
                     store,
                     registry,
                     null,
@@ -266,13 +262,7 @@ class WorldArchiverTest {
                 new NodeCommandRepository(database),
                 NetworkPolicy::defaults);
 
-        WorldArchiver archiver = new WorldArchiver(
-                worldRepo,
-                database,
-                archiveStorage,
-                scratchRoot,
-                null,
-                registry,
+        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
                 handoff,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -297,13 +287,7 @@ class WorldArchiverTest {
             return worldRepo.acquireLease(worldId, "node-2", Platform.BUILD_DATA_VERSION, Duration.ofMinutes(5));
         });
 
-        WorldArchiver archiver = new WorldArchiver(
-                worldRepo,
-                database,
-                archiveStorage,
-                scratchRoot,
-                null,
-                registry,
+        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -331,13 +315,7 @@ class WorldArchiverTest {
             return null;
         });
 
-        WorldArchiver archiver = new WorldArchiver(
-                worldRepo,
-                database,
-                archiveStorage,
-                scratchRoot,
-                null,
-                registry,
+        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -367,7 +345,9 @@ class WorldArchiverTest {
                 database,
                 ArchiveStorage.s3(store),
                 scratchRoot,
-                null,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                store,
                 registry,
                 null,
                 NetworkPolicy::defaults,
@@ -381,7 +361,7 @@ class WorldArchiverTest {
 
         // The point of the check: at this moment the archive is the only copy the
         // world would have had, so nothing may have been deleted.
-        assertThat(Files.exists(scratchRoot.resolve(worldId.folder())))
+        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder())))
                 .as("the live overworld folder must survive a failed verification (FR-35)")
                 .isTrue();
 
@@ -414,13 +394,7 @@ class WorldArchiverTest {
         // The old code logged that and packed the live folder anyway, which reads
         // region files the server is still writing (MN-5a) and then deletes them
         // from under a loaded Bukkit world.
-        WorldArchiver archiver = new WorldArchiver(
-                worldRepo,
-                database,
-                archiveStorage,
-                scratchRoot,
-                null,
-                registry,
+        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -429,7 +403,7 @@ class WorldArchiverTest {
         WorldArchiver.ArchiveResult result = onDb(() -> archiver.archiveWorld(worldId, owner));
 
         assertThat(result.success()).isFalse();
-        assertThat(Files.exists(scratchRoot.resolve(worldId.folder())))
+        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder())))
                 .as("a world that is still loaded must not have its folders deleted")
                 .isTrue();
         PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());

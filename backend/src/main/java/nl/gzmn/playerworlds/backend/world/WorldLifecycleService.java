@@ -83,6 +83,7 @@ public final class WorldLifecycleService {
     private final WorldsMetrics metrics;
     private final Supplier<NetworkPolicy> policy;
     private final Path worldContainer;
+    private final String primaryLevelName;
     private final @Nullable WorldSettingsCache settingsCache;
     private final @Nullable String nodeId;
     private final int nodeDataVersion;
@@ -103,6 +104,7 @@ public final class WorldLifecycleService {
             WorldsMetrics metrics,
             Supplier<NetworkPolicy> policy,
             Path worldContainer,
+            String primaryLevelName,
             @Nullable String nodeId,
             @Nullable WorldDownloader worldDownloader,
             @Nullable ObjectStore objectStore,
@@ -119,6 +121,7 @@ public final class WorldLifecycleService {
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.worldContainer = Objects.requireNonNull(worldContainer, "worldContainer");
+        this.primaryLevelName = Objects.requireNonNull(primaryLevelName, "primaryLevelName");
         this.nodeId = nodeId;
         this.nodeDataVersion = platform.identity().dataVersion();
         this.worldDownloader = worldDownloader;
@@ -138,6 +141,7 @@ public final class WorldLifecycleService {
             WorldsMetrics metrics,
             Supplier<NetworkPolicy> policy,
             Path worldContainer,
+            String primaryLevelName,
             @Nullable String nodeId,
             @Nullable WorldDownloader worldDownloader,
             @Nullable ObjectStore objectStore,
@@ -155,6 +159,7 @@ public final class WorldLifecycleService {
                 metrics,
                 policy,
                 worldContainer,
+                primaryLevelName,
                 nodeId,
                 worldDownloader,
                 objectStore,
@@ -188,6 +193,7 @@ public final class WorldLifecycleService {
                 metrics,
                 policy,
                 worldContainer,
+                "world",
                 null,
                 worldDownloader,
                 objectStore,
@@ -233,6 +239,7 @@ public final class WorldLifecycleService {
                 metrics,
                 policy,
                 worldContainer,
+                "world",
                 null,
                 null,
                 null,
@@ -616,16 +623,16 @@ public final class WorldLifecycleService {
      * Which dimension folders exist on disk. Runs off the main thread — this is a
      * filesystem walk and NFR-2 forbids those on the tick thread.
      *
-     * <p>A folder counts only when it carries the layout's root files, which today
-     * means {@code level.dat}. An empty directory left by an interrupted download
-     * or a manual copy is not a world, and treating it as one would load a world
-     * with no data and then save over the real one.
+     * <p>A folder counts only when it carries the layout's root files, which on
+     * Paper 26+ means {@code paper-world.yml}. An empty directory left by an
+     * interrupted download or a manual copy is not a world, and treating it as
+     * one would load a world with no data and then save over the real one.
      */
     private Set<DimensionKind> dimensionsOnDisk(WorldId id) {
         WorldLayout layout = platform.worldLayout();
         EnumSet<DimensionKind> present = EnumSet.noneOf(DimensionKind.class);
         for (DimensionKind dimension : DimensionKind.values()) {
-            Path folder = layout.bukkitWorldFolder(worldContainer, id.folder(), dimension);
+            Path folder = layout.bukkitWorldFolder(worldContainer, primaryLevelName, id.folder(), dimension);
             if (!Files.isDirectory(folder)) {
                 continue;
             }

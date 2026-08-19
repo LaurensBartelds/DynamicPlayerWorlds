@@ -62,6 +62,7 @@ public final class WorldCommitService {
     private final @Nullable Supplier<NetworkPolicy> policySupplier;
     private final Path scratchRoot;
     private final @Nullable String nodeId;
+    private final String primaryLevelName;
     private final int dataVersion;
     private final String mcVersion;
     private final CommitQueue queue;
@@ -83,6 +84,7 @@ public final class WorldCommitService {
             @Nullable Supplier<NetworkPolicy> policySupplier,
             Path scratchRoot,
             @Nullable String nodeId,
+            String primaryLevelName,
             int dataVersion,
             String mcVersion) {
         this.profiles = Objects.requireNonNull(profiles, "profiles");
@@ -96,6 +98,7 @@ public final class WorldCommitService {
         this.policySupplier = policySupplier;
         this.scratchRoot = Objects.requireNonNull(scratchRoot, "scratchRoot");
         this.nodeId = nodeId;
+        this.primaryLevelName = Objects.requireNonNull(primaryLevelName, "primaryLevelName");
         this.dataVersion = dataVersion;
         this.mcVersion = Objects.requireNonNull(mcVersion, "mcVersion");
         this.queue = new CommitQueue(this::runCommit);
@@ -119,7 +122,8 @@ public final class WorldCommitService {
             @Nullable SnapshotEngine snapshotEngine,
             Supplier<NetworkPolicy> policySupplier,
             Path scratchRoot,
-            @Nullable String nodeId) {
+            @Nullable String nodeId,
+            String primaryLevelName) {
         this(
                 profiles,
                 playerWorlds,
@@ -132,6 +136,7 @@ public final class WorldCommitService {
                 policySupplier,
                 scratchRoot,
                 nodeId,
+                primaryLevelName,
                 platform.identity().dataVersion(),
                 platform.identity().minecraftVersion());
     }
@@ -155,6 +160,7 @@ public final class WorldCommitService {
                 null,
                 Path.of("."),
                 null,
+                "world",
                 Platform.BUILD_DATA_VERSION,
                 "26.2");
     }
@@ -294,7 +300,11 @@ public final class WorldCommitService {
             Manifest baseline = cachedManifests.get(worldId);
             Map<String, ManifestEntry> baselineEntries = baseline != null ? baseline.entries() : Map.of();
 
-            List<Path> dirty = DirtyScanner.scanDirty(scratchRoot, worldId, baselineEntries, policy.excludeGlobs());
+            List<Path> dirty = DirtyScanner.scanDirty(
+                                scratchRoot,
+                                folders.relativeDimensionFolders(primaryLevelName, worldId),
+                                baselineEntries,
+                                policy.excludeGlobs());
 
             long generation = 0L;
             if (registry != null) {

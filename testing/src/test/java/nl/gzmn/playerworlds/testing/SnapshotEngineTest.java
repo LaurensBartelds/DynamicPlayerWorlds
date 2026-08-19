@@ -108,16 +108,22 @@ class SnapshotEngineTest {
 
             assertThat(snap1.dirtyCount()).isEqualTo(allPaths.size());
 
-            // Modify only level.dat
-            Path levelDat = scratch.resolve(worldId.folder()).resolve("level.dat");
-            byte[] newContent = "updated-level-dat-bytes-12345".getBytes(StandardCharsets.UTF_8);
-            Files.write(levelDat, newContent);
-            Files.setLastModifiedTime(levelDat, FileTime.fromMillis(9999999L));
+            // Modify only paper-world.yml (Paper 26 dimension marker)
+            Path paperWorldYml =
+                    WorldFixture.dimensionFolder(scratch, worldId.folder()).resolve("paper-world.yml");
+            byte[] newContent = "updated-paper-world-yml-12345".getBytes(StandardCharsets.UTF_8);
+            Files.write(paperWorldYml, newContent);
+            Files.setLastModifiedTime(paperWorldYml, FileTime.fromMillis(9999999L));
 
+            List<Path> dimensionRoots = List.of(
+                    Path.of("world", "dimensions", "minecraft", worldId.folder()),
+                    Path.of("world", "dimensions", "minecraft", worldId.folder() + "_nether"),
+                    Path.of("world", "dimensions", "minecraft", worldId.folder() + "_the_end"));
             List<Path> dirty2 = DirtyScanner.scanDirty(
-                    scratch, worldId, snap1.manifest().entries(), List.of("session.lock", "uid.dat"));
+                    scratch, dimensionRoots, snap1.manifest().entries(), List.of("session.lock", "uid.dat"));
 
-            assertThat(dirty2).containsExactly(Path.of(worldId.folder(), "level.dat"));
+            Path expectedDirty = Path.of("world", "dimensions", "minecraft", worldId.folder(), "paper-world.yml");
+            assertThat(dirty2).containsExactly(expectedDirty);
 
             // Incremental snapshot 2
             SnapshotEngine.SnapshotResult snap2 = engine.executeSnapshot(
@@ -131,16 +137,16 @@ class SnapshotEngineTest {
             assertThat(manifest2.entries()).hasSameSizeAs(allPaths);
 
             // Modified entry matches new content
-            String levelDatKey = worldId.folder() + "/level.dat";
-            ManifestEntry levelDatEntry = manifest2.entries().get(levelDatKey);
-            assertThat(levelDatEntry.sizeBytes()).isEqualTo(newContent.length);
-            assertThat(levelDatEntry.lastModifiedMillis()).isEqualTo(9999999L);
-            assertThat(levelDatEntry.sha256Hex())
-                    .isNotEqualTo(snap1.manifest().entries().get(levelDatKey).sha256Hex());
+            String paperWorldKey = "world/dimensions/minecraft/" + worldId.folder() + "/paper-world.yml";
+            ManifestEntry paperWorldEntry = manifest2.entries().get(paperWorldKey);
+            assertThat(paperWorldEntry.sizeBytes()).isEqualTo(newContent.length);
+            assertThat(paperWorldEntry.lastModifiedMillis()).isEqualTo(9999999L);
+            assertThat(paperWorldEntry.sha256Hex())
+                    .isNotEqualTo(snap1.manifest().entries().get(paperWorldKey).sha256Hex());
 
             // Unmodified entries retain old sha256
             for (String p : allPaths) {
-                if (!p.equals(levelDatKey)) {
+                if (!p.equals(paperWorldKey)) {
                     assertThat(manifest2.entries().get(p).sha256Hex())
                             .isEqualTo(snap1.manifest().entries().get(p).sha256Hex());
                 }
@@ -163,7 +169,9 @@ class SnapshotEngineTest {
             WorldId worldId = WorldFixture.materialize(scratch);
 
             // Corrupt r.0.0.mca header with invalid sector offset inside header
-            Path mca = scratch.resolve(worldId.folder()).resolve("region").resolve("r.0.0.mca");
+            Path mca = WorldFixture.dimensionFolder(scratch, worldId.folder())
+                                .resolve("region")
+                                .resolve("r.0.0.mca");
             byte[] corrupted = new byte[8192];
             corrupted[0] = 0;
             corrupted[1] = 0;
@@ -171,7 +179,8 @@ class SnapshotEngineTest {
             corrupted[3] = 1; // 1 sector
             Files.write(mca, corrupted);
 
-            List<Path> dirty = List.of(Path.of(worldId.folder(), "region", "r.0.0.mca"));
+            List<Path> dirty = List.of(
+                                Path.of("world", "dimensions", "minecraft", worldId.folder(), "region", "r.0.0.mca"));
 
             assertThatThrownBy(
                             () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true))

@@ -483,6 +483,8 @@ class BackendControlHandlersTest {
                         database,
                         storage,
                         tempDir.resolve("scratch"),
+                        platform.worldLayout(),
+                        "world",
                         null,
                         null,
                         null,

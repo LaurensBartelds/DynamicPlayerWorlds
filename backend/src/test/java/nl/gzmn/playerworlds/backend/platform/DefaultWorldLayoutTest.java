@@ -21,9 +21,9 @@ class DefaultWorldLayoutTest {
     }
 
     @Test
-    @DisplayName("level.dat is a required world-root file (FR-3b dragon state lives there)")
-    void levelDatIsRequired() {
-        assertThat(layout.worldRootFiles()).contains("level.dat");
+    @DisplayName("paper-world.yml marks a materialised Paper 26 dimension folder")
+    void paperWorldYmlIsRequired() {
+        assertThat(layout.worldRootFiles()).contains("paper-world.yml");
     }
 
     @Test
@@ -41,25 +41,25 @@ class DefaultWorldLayoutTest {
     }
 
     @Test
-    @DisplayName("nether and end region roots sit under DIM-1 and DIM1 (MN-2a)")
+    @DisplayName("region data sits at the Bukkit world root for every dimension (Paper 26)")
     void dimensionDataRelativePaths() {
         assertThat(layout.dimensionDataRelativePath(DimensionKind.OVERWORLD)).isEqualTo(Path.of(""));
-        assertThat(layout.dimensionDataRelativePath(DimensionKind.NETHER)).isEqualTo(Path.of("DIM-1"));
-        assertThat(layout.dimensionDataRelativePath(DimensionKind.END)).isEqualTo(Path.of("DIM1"));
+        assertThat(layout.dimensionDataRelativePath(DimensionKind.NETHER)).isEqualTo(Path.of(""));
+        assertThat(layout.dimensionDataRelativePath(DimensionKind.END)).isEqualTo(Path.of(""));
     }
 
     @Test
-    @DisplayName("absolute paths under scratch resolve Bukkit folder plus DIM segment")
+    @DisplayName("absolute paths nest under <level>/dimensions/minecraft/<bukkitName> (Paper 26)")
     void absolutePathsUnderScratch() {
         Path scratch = Path.of("/data/scratch");
-        assertThat(layout.dimensionDataRoot(scratch, "pw_abc", DimensionKind.OVERWORLD))
-                .isEqualTo(scratch.resolve("pw_abc"));
-        assertThat(layout.dimensionDataRoot(scratch, "pw_abc", DimensionKind.NETHER))
-                .isEqualTo(scratch.resolve("pw_abc_nether").resolve("DIM-1"));
-        assertThat(layout.dimensionDataRoot(scratch, "pw_abc", DimensionKind.END))
-                .isEqualTo(scratch.resolve("pw_abc_the_end").resolve("DIM1"));
-        assertThat(layout.bukkitWorldFolder(scratch, "pw_abc", DimensionKind.NETHER)
-                        .resolve("level.dat"))
-                .isEqualTo(scratch.resolve("pw_abc_nether").resolve("level.dat"));
+        assertThat(layout.dimensionDataRoot(scratch, "world", "pw_abc", DimensionKind.OVERWORLD))
+                .isEqualTo(scratch.resolve("world/dimensions/minecraft/pw_abc"));
+        assertThat(layout.dimensionDataRoot(scratch, "world", "pw_abc", DimensionKind.NETHER))
+                .isEqualTo(scratch.resolve("world/dimensions/minecraft/pw_abc_nether"));
+        assertThat(layout.dimensionDataRoot(scratch, "world", "pw_abc", DimensionKind.END))
+                .isEqualTo(scratch.resolve("world/dimensions/minecraft/pw_abc_the_end"));
+        assertThat(layout.bukkitWorldFolder(scratch, "world", "pw_abc", DimensionKind.NETHER)
+                        .resolve("paper-world.yml"))
+                .isEqualTo(scratch.resolve("world/dimensions/minecraft/pw_abc_nether/paper-world.yml"));
     }
 }

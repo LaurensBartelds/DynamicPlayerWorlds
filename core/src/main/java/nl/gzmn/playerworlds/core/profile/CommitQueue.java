@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.function.Function;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Single-flight snapshot commits, one queue per world (plan 00 §9).
@@ -29,6 +31,8 @@ import org.jspecify.annotations.Nullable;
  * that actually commits anything.
  */
 public final class CommitQueue {
+
+    private static final Logger log = LoggerFactory.getLogger(CommitQueue.class);
 
     private final Function<WorldId, CompletableFuture<Void>> commit;
     private final ConcurrentMap<WorldId, State> byWorld = new ConcurrentHashMap<>();
@@ -126,6 +130,7 @@ public final class CommitQueue {
         // and completing while holding the lock would deadlock it.
         if (completing != null) {
             if (failure != null) {
+                log.error("world commit failed for {}: {}", worldId, failure.toString(), failure);
                 completing.completeExceptionally(failure);
             } else {
                 completing.complete(null);

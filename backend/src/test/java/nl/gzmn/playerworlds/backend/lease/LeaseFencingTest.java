@@ -121,7 +121,8 @@ class LeaseFencingTest {
                 snapshotEngine,
                 () -> policy,
                 scratchDir,
-                "node-A");
+                "node-A",
+                WorldFixture.PRIMARY_LEVEL_NAME);
 
         fencingHandler = new SelfFencingHandler(
                 registry,
@@ -232,7 +233,7 @@ class LeaseFencingTest {
         assertThat(queuedCommand.payloadJson()).contains(player.getUniqueId().toString());
 
         // - Scratch directory moved to quarantine
-        Path worldScratch = scratchDir.resolve(worldId.folder());
+        Path worldScratch = WorldFixture.dimensionFolder(scratchDir, worldId.folder());
         assertThat(Files.exists(worldScratch)).isFalse();
 
         try (var s = Files.list(quarantineDir)) {
@@ -299,7 +300,7 @@ class LeaseFencingTest {
 
             // 5. Assert self-fence executed
             assertThat(registry.find(worldId)).isEmpty();
-            Path worldScratch = scratchDir.resolve(worldId.folder());
+            Path worldScratch = WorldFixture.dimensionFolder(scratchDir, worldId.folder());
             assertThat(Files.exists(worldScratch)).isFalse();
         } finally {
             brokenDb.close();
@@ -387,9 +388,11 @@ class LeaseFencingTest {
         assertThat(dbAfterNodeB.assignedNode()).isEqualTo("node-B");
 
         // 3. Node A resumes from SIGSTOP and tries to commit its dirty snapshot with Generation 1
-        // Modify local file on Node A's scratch path
-        Path localDirty = scratchDir.resolve(worldId.folder()).resolve("level.dat");
-        Files.writeString(localDirty, "node-A-stale-modification");
+        // Touch a non-region world file so DirtyScanner sees a change without failing
+        // region-structure verification on the snapshot path.
+        Path localDirty =
+                WorldFixture.dimensionFolder(scratchDir, worldId.folder()).resolve("paper-world.yml");
+        Files.writeString(localDirty, Files.readString(localDirty) + "\n# node-A-stale-modification\n");
 
         var staleCommit = commitService.requestCommit(worldId);
         flushExecutors();

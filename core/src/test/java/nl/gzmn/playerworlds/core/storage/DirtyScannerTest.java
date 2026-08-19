@@ -117,7 +117,8 @@ class DirtyScannerTest {
         List<String> excludes = List.of();
 
         assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(null, id, baseline, excludes));
-        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(tempDir, null, baseline, excludes));
+        assertThatNullPointerException()
+                .isThrownBy(() -> DirtyScanner.scanDirty(tempDir, (WorldId) null, baseline, excludes));
         assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(tempDir, id, null, excludes));
         assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(tempDir, id, baseline, null));
     }

@@ -82,20 +82,16 @@ public final class RegionStructure {
             throw new RegionStructureException(label + ": shorter than 8 KiB header (" + bytes.length + " bytes)");
         }
         ByteBuffer buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN);
-        int sectorTotal = bytes.length / SECTOR_BYTES;
-        // Partial trailing sector is allowed only as unused padding; chunk
-        // allocations are still measured in whole sectors.
-        if (bytes.length % SECTOR_BYTES != 0) {
-            // A file that is not a multiple of the sector size can still be
-            // valid if no allocation extends into the partial sector. Track the
-            // exact byte length for payload bounds and the whole-sector count
-            // for allocation bounds.
-            sectorTotal = bytes.length / SECTOR_BYTES;
-        }
+        // Paper / modern Anvil writers often leave the final sector unpadded, so
+        // the file length is not a multiple of 4096. Location entries still claim
+        // whole sectors; the last claimed sector may only be partially present on
+        // disk. Use a ceiling sector count for allocation bounds and the exact
+        // byte length for payload bounds below.
+        int sectorCeiling = (bytes.length + SECTOR_BYTES - 1) / SECTOR_BYTES;
 
         // occupied[s] = chunk index + 1 that owns sector s, or 0 if free.
         // Header sectors 0 and 1 are reserved.
-        int[] occupied = new int[Math.max(sectorTotal, 2)];
+        int[] occupied = new int[Math.max(sectorCeiling, 2)];
         occupied[0] = -1;
         occupied[1] = -1;
 
@@ -119,10 +115,10 @@ public final class RegionStructure {
                         label + ": chunk " + chunk + " offset " + sectorOffset + " overlaps the 8 KiB header");
             }
             long endSector = (long) sectorOffset + (long) sectors;
-            if (endSector > sectorTotal) {
+            if (endSector > sectorCeiling) {
                 throw new RegionStructureException(
                         label + ": chunk " + chunk + " sectors [" + sectorOffset + "," + endSector
-                                + ") exceed file sector count " + sectorTotal
+                                + ") exceed file sector ceiling " + sectorCeiling
                                 + " (" + bytes.length + " bytes)");
             }
 

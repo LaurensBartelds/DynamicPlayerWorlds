@@ -6,11 +6,11 @@ import { withTestContext } from '../lib/test-context.mjs';
 /**
  * Scenario 06: S3 Object Storage & Snapshot Persistence
  *
- * - Checks MinIO S3 bucket health via ctx.s3.checkHealth().
- * - Uploads a test world archive payload to the bucket via ctx.s3.putObject().
- * - Verifies listObjects() contains the key and matches metadata.
- * - Reads back the object via ctx.s3.getObject() and asserts content matches.
- * - Deletes the object via ctx.s3.deleteObject() and verifies cleanup.
+ * - Checks MinIO S3 bucket health.
+ * - Creates a player world through Velocity.
+ * - Waits for the initial commit to publish a non-empty snapshot manifest.
+ * - Asserts data blobs and the manifest exist under worlds/<id>/ in MinIO.
+ * - Sanity-checks put/get/delete against a throwaway key still works.
  */
 export async function run(ctx) {
   console.log('  [06-s3-persistence] Checking MinIO S3 bucket health...');
@@ -18,48 +18,69 @@ export async function run(ctx) {
   assert.ok(isHealthy, 'MinIO S3 bucket healthcheck must return true');
   console.log('  [06-s3-persistence] MinIO S3 healthcheck passed.');
 
-  const timestamp = Date.now();
-  const testKey = `test-worlds/snapshot-${timestamp}.tar.gz`;
-  const payloadContent = `GZMN-TEST-WORLD-ARCHIVE-SNAPSHOT-PAYLOAD-${timestamp}`;
-  const payloadBuffer = Buffer.from(payloadContent, 'utf8');
+  const worldName = 's3persist';
+  let alice = await ctx.spawnBot('Alice');
+  console.log(`  [06-s3-persistence] Alice creating /world create ${worldName}...`);
+  alice.runCommand(`/world create ${worldName}`);
 
-  // 1. Upload test archive object
-  console.log(`  [06-s3-persistence] Uploading snapshot archive to S3 key: '${testKey}'...`);
-  await ctx.s3.putObject(testKey, payloadBuffer);
-  console.log('  [06-s3-persistence] Upload complete.');
+  let world = null;
+  const start = Date.now();
+  while (Date.now() - start < 45000) {
+    const rows = await ctx.db.query(
+      'SELECT id, name, state, manifest_key, storage_bytes FROM player_world WHERE name = $1',
+      [worldName]
+    );
+    if (rows.length) {
+      world = rows[0];
+      if (world.state === 'READY' && world.manifest_key && Number(world.storage_bytes || 0) > 0) {
+        break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
 
-  // 2. List objects and assert key is present
-  console.log('  [06-s3-persistence] Listing objects with prefix "test-worlds/"...');
-  const objects = await ctx.s3.listObjects('test-worlds/');
-  console.log(`  [06-s3-persistence] Found ${objects.length} object(s) with prefix 'test-worlds/'.`);
-
-  const foundObject = objects.find((obj) => obj.Key === testKey);
-  assert.ok(foundObject, `Key '${testKey}' must be listed in bucket contents`);
-  assert.strictEqual(
-    foundObject.Size,
-    payloadBuffer.length,
-    `Object size should be ${payloadBuffer.length}, got ${foundObject.Size}`
+  assert.ok(world, `Expected player_world row for '${worldName}'`);
+  assert.strictEqual(world.state, 'READY', `World must become READY, got ${world.state}`);
+  assert.ok(world.manifest_key, 'Initial commit must set player_world.manifest_key');
+  assert.ok(
+    Number(world.storage_bytes || 0) > 0,
+    `Initial commit must set storage_bytes > 0 (got ${world.storage_bytes}); empty manifests mean DirtyScanner missed Paper 26 paths`
+  );
+  console.log(
+    `  [06-s3-persistence] Commit ready: manifest=${world.manifest_key} bytes=${world.storage_bytes}`
   );
 
-  // 3. Read back object and assert content
-  console.log(`  [06-s3-persistence] Fetching object '${testKey}'...`);
-  const fetchedData = await ctx.s3.getObject(testKey);
-  const fetchedString = typeof fetchedData === 'string' ? fetchedData : fetchedData.toString('utf8');
-  assert.strictEqual(
-    fetchedString,
-    payloadContent,
-    `Fetched content '${fetchedString}' must match original '${payloadContent}'`
-  );
-  console.log('  [06-s3-persistence] Verified content integrity match.');
+  const prefix = `worlds/${world.id}/`;
+  const objects = await ctx.s3.listObjects(prefix);
+  console.log(`  [06-s3-persistence] Found ${objects.length} S3 object(s) under ${prefix}`);
+  assert.ok(objects.length > 0, `Expected S3 objects under ${prefix}`);
 
-  // 4. Delete object and assert cleanup
-  console.log(`  [06-s3-persistence] Deleting test object '${testKey}'...`);
+  const keys = objects.map((o) => o.Key || o.key || String(o));
+  assert.ok(
+    keys.some((k) => k.includes('/manifest/')),
+    'Expected a snapshot manifest object in S3'
+  );
+  assert.ok(
+    keys.some((k) => k.includes('/data/')),
+    'Expected content-addressed data blobs in S3'
+  );
+
+  const manifestBody = await ctx.s3.getObject(world.manifest_key);
+  const manifestJson = JSON.parse(
+    typeof manifestBody === 'string' ? manifestBody : manifestBody.toString('utf8')
+  );
+  const entryCount = Object.keys(manifestJson.entries || {}).length;
+  assert.ok(entryCount > 0, `Manifest must list dirty world files, got ${entryCount} entries`);
+  console.log(`  [06-s3-persistence] Manifest lists ${entryCount} world file(s).`);
+
+  // Keep a lightweight put/get/delete sanity check for the e2e S3 helper itself.
+  const testKey = `test-worlds/helper-${Date.now()}.txt`;
+  const payload = `gzmn-s3-helper-${Date.now()}`;
+  await ctx.s3.putObject(testKey, Buffer.from(payload, 'utf8'));
+  const fetched = await ctx.s3.getObject(testKey);
+  const fetchedString = typeof fetched === 'string' ? fetched : fetched.toString('utf8');
+  assert.strictEqual(fetchedString, payload);
   await ctx.s3.deleteObject(testKey);
-
-  const remainingObjects = await ctx.s3.listObjects('test-worlds/');
-  const stillExists = remainingObjects.some((obj) => obj.Key === testKey);
-  assert.ok(!stillExists, `Key '${testKey}' must no longer exist after deletion`);
-  console.log('  [06-s3-persistence] Verified cleanup.');
 
   console.log('  [06-s3-persistence] Scenario 06 completed successfully.');
 }

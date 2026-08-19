@@ -31,6 +31,9 @@ public final class QuarantineManager {
 
     private static final Logger log = LoggerFactory.getLogger(QuarantineManager.class);
 
+    /** Default primary save name ({@code level-name}) when the caller does not supply one. */
+    public static final String DEFAULT_PRIMARY_LEVEL = "world";
+
     private static final String NETHER_SUFFIX = "_nether";
     private static final String END_SUFFIX = "_the_end";
     private static final String SNAPSHOT_PREFIX = "_snapshot_";
@@ -39,12 +42,28 @@ public final class QuarantineManager {
     private QuarantineManager() {}
 
     /**
+     * Absolute Paper 26 dimension directory under the world container for one Bukkit world name.
+     */
+    public static Path dimensionFolder(Path scratchRoot, String primaryLevelName, String bukkitWorldName) {
+        String level = primaryLevelName == null || primaryLevelName.isBlank() ? DEFAULT_PRIMARY_LEVEL : primaryLevelName;
+        return scratchRoot
+                .resolve(level)
+                .resolve("dimensions")
+                .resolve("minecraft")
+                .resolve(bukkitWorldName);
+    }
+
+    /**
      * Moves a world's scratch folders (overworld, nether, end) to a unique directory
      * in quarantine (MN-10).
      *
+     * <p>Paper 26 nests Bukkit worlds under {@code <level>/dimensions/minecraft/<name>/}.
+     * Quarantine destinations keep the flat {@code <name>_<tag>} form for operator inspection.
+     *
      * @return the list of quarantined target paths
      */
-    public static List<Path> quarantineWorld(Path scratchRoot, Path quarantineRoot, WorldId worldId, String tag)
+    public static List<Path> quarantineWorld(
+            Path scratchRoot, Path quarantineRoot, WorldId worldId, String primaryLevelName, String tag)
             throws IOException {
         Objects.requireNonNull(scratchRoot, "scratchRoot");
         Objects.requireNonNull(quarantineRoot, "quarantineRoot");
@@ -58,7 +77,7 @@ public final class QuarantineManager {
         List<String> targetNames = List.of(folderName, folderName + NETHER_SUFFIX, folderName + END_SUFFIX);
 
         for (String name : targetNames) {
-            Path source = scratchRoot.resolve(name);
+            Path source = dimensionFolder(scratchRoot, primaryLevelName, name);
             if (Files.exists(source)) {
                 Path dest = quarantineRoot.resolve(name + "_" + tag);
                 try {
@@ -74,10 +93,19 @@ public final class QuarantineManager {
         return quarantined;
     }
 
+    public static List<Path> quarantineWorld(Path scratchRoot, Path quarantineRoot, WorldId worldId, String tag)
+            throws IOException {
+        return quarantineWorld(scratchRoot, quarantineRoot, worldId, DEFAULT_PRIMARY_LEVEL, tag);
+    }
+
     public static List<Path> quarantineWorld(Path scratchRoot, Path quarantineRoot, WorldId worldId)
             throws IOException {
         return quarantineWorld(
-                scratchRoot, quarantineRoot, worldId, UUID.randomUUID().toString());
+                scratchRoot,
+                quarantineRoot,
+                worldId,
+                DEFAULT_PRIMARY_LEVEL,
+                UUID.randomUUID().toString());
     }
 
     /**
@@ -88,7 +116,12 @@ public final class QuarantineManager {
      * @return the list of quarantined directories
      */
     public static List<Path> sweepStartup(
-            Path scratchRoot, Path quarantineRoot, Set<WorldId> activeLeasedWorldIds, String tag) throws IOException {
+            Path scratchRoot,
+            Path quarantineRoot,
+            Set<WorldId> activeLeasedWorldIds,
+            String primaryLevelName,
+            String tag)
+            throws IOException {
         Objects.requireNonNull(scratchRoot, "scratchRoot");
         Objects.requireNonNull(quarantineRoot, "quarantineRoot");
         Objects.requireNonNull(activeLeasedWorldIds, "activeLeasedWorldIds");
@@ -101,19 +134,34 @@ public final class QuarantineManager {
         Files.createDirectories(quarantineRoot);
         List<Path> quarantined = new ArrayList<>();
 
+        // Snapshot directories may still sit at the world-container root (MN-5a).
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(scratchRoot)) {
             for (Path entry : stream) {
                 if (!Files.isDirectory(entry)) {
                     continue;
                 }
                 String name = entry.getFileName().toString();
-
-                // Snapshot directories are derived data, deleted outright on startup (MN-5a)
                 if (name.startsWith(SNAPSHOT_PREFIX) || name.equals(SNAPSHOT_DIR)) {
                     deleteRecursively(entry);
                     log.info("Deleted startup leftover snapshot directory: {}", entry);
+                }
+            }
+        }
+
+        // Paper 26 player worlds live under <level>/dimensions/minecraft/<pw_*>
+        String level =
+                primaryLevelName == null || primaryLevelName.isBlank() ? DEFAULT_PRIMARY_LEVEL : primaryLevelName;
+        Path dimensionsRoot = scratchRoot.resolve(level).resolve("dimensions").resolve("minecraft");
+        if (!Files.isDirectory(dimensionsRoot)) {
+            return quarantined;
+        }
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dimensionsRoot)) {
+            for (Path entry : stream) {
+                if (!Files.isDirectory(entry)) {
                     continue;
                 }
+                String name = entry.getFileName().toString();
 
                 // Check if this directory corresponds to a known active leased world
                 if (isCoveredByLease(name, activeLeasedWorldIds)) {
@@ -136,12 +184,18 @@ public final class QuarantineManager {
         return quarantined;
     }
 
+    public static List<Path> sweepStartup(
+            Path scratchRoot, Path quarantineRoot, Set<WorldId> activeLeasedWorldIds, String tag) throws IOException {
+        return sweepStartup(scratchRoot, quarantineRoot, activeLeasedWorldIds, DEFAULT_PRIMARY_LEVEL, tag);
+    }
+
     public static List<Path> sweepStartup(Path scratchRoot, Path quarantineRoot, Set<WorldId> activeLeasedWorldIds)
             throws IOException {
         return sweepStartup(
                 scratchRoot,
                 quarantineRoot,
                 activeLeasedWorldIds,
+                DEFAULT_PRIMARY_LEVEL,
                 UUID.randomUUID().toString());
     }
 

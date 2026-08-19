@@ -20,19 +20,22 @@ import nl.gzmn.playerworlds.core.model.WorldId;
  * exclude-glob and path-walk tests. A real multi-megabyte Anvil world belongs
  * only in the e2e harness (F11), not on the main build classpath.
  *
- * <p>Layout mirrors Bukkit's multi-world layout (MN-2a): overworld content under
- * {@code <folder>/}, nether under {@code <folder>_nether/DIM-1/}, end under
- * {@code <folder>_the_end/DIM1/}, each Bukkit world carrying its own
- * {@code level.dat}. Kept here as constants rather than depending on
- * {@code backend.platform}, so {@code :testing} stays free of Paper.
+ * <p>Layout mirrors Paper 26's nested world storage: every Bukkit world sits at
+ * {@code <level-name>/dimensions/minecraft/<bukkitWorldName>/} with
+ * {@code paper-world.yml} at the root and region/entities/poi/data beneath.
+ * Kept here as constants rather than depending on {@code backend.platform}, so
+ * {@code :testing} stays free of Paper.
  */
 public final class WorldFixture {
+
+    /** Primary save name used by the fixture ({@code level-name} default). */
+    public static final String PRIMARY_LEVEL_NAME = "world";
 
     /** MN-2a directories that must never be omitted from a sync set. */
     public static final List<String> DIMENSION_CONTENT_DIRECTORIES = List.of("region", "entities", "poi", "data");
 
-    /** World-root files that must be synced (FR-3b dragon state lives here). */
-    public static final List<String> WORLD_ROOT_FILES = List.of("level.dat");
+    /** World-root files that mark a materialised Paper 26 dimension. */
+    public static final List<String> WORLD_ROOT_FILES = List.of("paper-world.yml");
 
     /**
      * Node-local files that travel with a live folder but must not reach object
@@ -42,6 +45,7 @@ public final class WorldFixture {
 
     private static final byte[] PLACEHOLDER_MCA = new byte[8192];
     private static final byte[] PLACEHOLDER_DAT = "synthetic-level-dat-v1\n".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] PLACEHOLDER_YML = "_version: 31\n".getBytes(StandardCharsets.UTF_8);
     private static final byte[] PLACEHOLDER_LOCK = "node-local\n".getBytes(StandardCharsets.UTF_8);
 
     /** Which dimension folders to materialise. */
@@ -71,12 +75,21 @@ public final class WorldFixture {
     public static Path materialize(Path scratchRoot, WorldId worldId, DimensionSet dimensions) throws IOException {
         Files.createDirectories(scratchRoot);
         String base = worldId.folder();
-        Path overworld = writeBukkitWorld(scratchRoot.resolve(base), Path.of(""), base + "/overworld");
+        Path overworld = writeBukkitWorld(dimensionFolder(scratchRoot, base), base + "/overworld");
         if (dimensions == DimensionSet.ALL_THREE) {
-            writeBukkitWorld(scratchRoot.resolve(base + "_nether"), Path.of("DIM-1"), base + "/nether");
-            writeBukkitWorld(scratchRoot.resolve(base + "_the_end"), Path.of("DIM1"), base + "/end");
+            writeBukkitWorld(dimensionFolder(scratchRoot, base + "_nether"), base + "/nether");
+            writeBukkitWorld(dimensionFolder(scratchRoot, base + "_the_end"), base + "/end");
         }
         return overworld;
+    }
+
+    /** Absolute Paper 26 dimension folder under the world container. */
+    public static Path dimensionFolder(Path scratchRoot, String bukkitWorldName) {
+        return scratchRoot
+                .resolve(PRIMARY_LEVEL_NAME)
+                .resolve("dimensions")
+                .resolve("minecraft")
+                .resolve(bukkitWorldName);
     }
 
     /**
@@ -87,10 +100,10 @@ public final class WorldFixture {
      */
     public static List<String> syncedRelativePaths(Path scratchRoot, WorldId worldId) throws IOException {
         String base = worldId.folder();
-        List<String> prefixes = List.of(base, base + "_nether", base + "_the_end");
+        List<String> bukkitNames = List.of(base, base + "_nether", base + "_the_end");
         List<String> found = new ArrayList<>();
-        for (String prefix : prefixes) {
-            Path root = scratchRoot.resolve(prefix);
+        for (String bukkitName : bukkitNames) {
+            Path root = dimensionFolder(scratchRoot, bukkitName);
             if (!Files.isDirectory(root)) {
                 continue;
             }
@@ -105,17 +118,14 @@ public final class WorldFixture {
         return List.copyOf(found);
     }
 
-    private static Path writeBukkitWorld(Path worldFolder, Path dimensionRelative, String seedTag) throws IOException {
+    private static Path writeBukkitWorld(Path worldFolder, String seedTag) throws IOException {
         Files.createDirectories(worldFolder);
-        write(worldFolder.resolve("level.dat"), withTag(PLACEHOLDER_DAT, seedTag + "/level.dat"));
+        write(worldFolder.resolve("paper-world.yml"), withTag(PLACEHOLDER_YML, seedTag + "/paper-world.yml"));
         write(worldFolder.resolve("session.lock"), PLACEHOLDER_LOCK);
         write(worldFolder.resolve("uid.dat"), PLACEHOLDER_LOCK);
 
-        Path dataRoot = dimensionRelative.toString().isEmpty() ? worldFolder : worldFolder.resolve(dimensionRelative);
-        Files.createDirectories(dataRoot);
-
         for (String directory : DIMENSION_CONTENT_DIRECTORIES) {
-            Path dir = dataRoot.resolve(directory);
+            Path dir = worldFolder.resolve(directory);
             Files.createDirectories(dir);
             String fileName = directory.equals("data") ? "raids.dat" : "r.0.0.mca";
             byte[] base = directory.equals("data") ? PLACEHOLDER_DAT : PLACEHOLDER_MCA;

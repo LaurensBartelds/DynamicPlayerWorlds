@@ -15,6 +15,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 import nl.gzmn.playerworlds.backend.control.WorldHandoff;
+import nl.gzmn.playerworlds.backend.platform.DimensionKind;
+import nl.gzmn.playerworlds.backend.platform.WorldLayout;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.DbClock;
@@ -56,6 +58,8 @@ public final class WorldArchiver {
     private final DbClock clock;
     private final ArchiveStorage archiveStorage;
     private final Path scratchRoot;
+    private final WorldLayout worldLayout;
+    private final String primaryLevelName;
     private final @Nullable ObjectStore objectStore;
     private final @Nullable WorldRegistry registry;
     private final @Nullable WorldHandoff handoff;
@@ -87,6 +91,8 @@ public final class WorldArchiver {
             DbClock clock,
             ArchiveStorage archiveStorage,
             Path scratchRoot,
+            WorldLayout worldLayout,
+            String primaryLevelName,
             @Nullable ObjectStore objectStore,
             @Nullable WorldRegistry registry,
             @Nullable WorldHandoff handoff,
@@ -97,6 +103,8 @@ public final class WorldArchiver {
         this.clock = Objects.requireNonNull(clock, "clock");
         this.archiveStorage = Objects.requireNonNull(archiveStorage, "archiveStorage");
         this.scratchRoot = Objects.requireNonNull(scratchRoot, "scratchRoot");
+        this.worldLayout = Objects.requireNonNull(worldLayout, "worldLayout");
+        this.primaryLevelName = Objects.requireNonNull(primaryLevelName, "primaryLevelName");
         this.objectStore = objectStore;
         this.registry = registry;
         this.handoff = handoff;
@@ -206,16 +214,17 @@ public final class WorldArchiver {
             return ArchiveResult.error("Failed to acquire lease for archival: " + e.getMessage());
         }
 
-        // 3. Collect dimension folders
+        // 3. Collect dimension folders (Paper 26 nested layout under the primary save)
         String folderBase = world.folder();
-        Path baseDim = scratchRoot.resolve(folderBase);
-        Path netherDim = scratchRoot.resolve(folderBase + "_nether");
-        Path endDim = scratchRoot.resolve(folderBase + "_the_end");
+        List<Path> liveDimensionDirs = new ArrayList<>();
+        for (DimensionKind dimension : DimensionKind.values()) {
+            Path dir = worldLayout.bukkitWorldFolder(scratchRoot, primaryLevelName, folderBase, dimension);
+            if (Files.isDirectory(dir)) {
+                liveDimensionDirs.add(dir);
+            }
+        }
 
-        List<Path> dimensionDirs = new ArrayList<>();
-        if (Files.isDirectory(baseDim)) dimensionDirs.add(baseDim);
-        if (Files.isDirectory(netherDim)) dimensionDirs.add(netherDim);
-        if (Files.isDirectory(endDim)) dimensionDirs.add(endDim);
+        List<Path> dimensionDirs = new ArrayList<>(liveDimensionDirs);
 
         Path tempMaterializeDir = null;
         if (dimensionDirs.isEmpty()) {
@@ -230,12 +239,13 @@ public final class WorldArchiver {
                     WorldDownloader downloader = new WorldDownloader(objectStore, cache, PlainFileCloner.INSTANCE);
                     downloader.materialize(manifest, tempMaterializeDir);
 
-                    Path matBase = tempMaterializeDir.resolve(folderBase);
-                    Path matNether = tempMaterializeDir.resolve(folderBase + "_nether");
-                    Path matEnd = tempMaterializeDir.resolve(folderBase + "_the_end");
-                    if (Files.isDirectory(matBase)) dimensionDirs.add(matBase);
-                    if (Files.isDirectory(matNether)) dimensionDirs.add(matNether);
-                    if (Files.isDirectory(matEnd)) dimensionDirs.add(matEnd);
+                    for (DimensionKind dimension : DimensionKind.values()) {
+                        Path matDir = worldLayout.bukkitWorldFolder(
+                                tempMaterializeDir, primaryLevelName, folderBase, dimension);
+                        if (Files.isDirectory(matDir)) {
+                            dimensionDirs.add(matDir);
+                        }
+                    }
                 } catch (Exception e) {
                     log.error("Failed to materialize world from snapshot before archival: {}", worldId, e);
                 }
@@ -334,9 +344,9 @@ public final class WorldArchiver {
             }
         }
 
-        deleteDirectoryRecursively(baseDim);
-        deleteDirectoryRecursively(netherDim);
-        deleteDirectoryRecursively(endDim);
+        for (Path liveDir : liveDimensionDirs) {
+            deleteDirectoryRecursively(liveDir);
+        }
         deleteQuietly(tempArchive);
 
         log.info(

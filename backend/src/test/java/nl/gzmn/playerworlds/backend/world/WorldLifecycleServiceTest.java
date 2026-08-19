@@ -114,7 +114,8 @@ class WorldLifecycleServiceTest {
                 snapshotEngine,
                 NetworkPolicy::defaults,
                 scratchDir,
-                "node-test");
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
 
         lifecycleService = new WorldLifecycleService(
                 worldRepo,
@@ -188,7 +189,11 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Perform an initial snapshot of the fixture to populate S3
-        List<Path> dirty = DirtyScanner.scanDirty(fixtureDir, worldId, Map.of(), List.of());
+        List<Path> dirty = DirtyScanner.scanDirty(
+                fixtureDir,
+                folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
+                Map.of(),
+                List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
                 fixtureDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
         Manifest manifest = snapResult.manifest();
@@ -224,7 +229,7 @@ class WorldLifecycleServiceTest {
         }
 
         // Ensure scratch directory does not contain this world yet (cold)
-        Path worldScratchFolder = scratchDir.resolve(worldId.folder());
+        Path worldScratchFolder = WorldFixture.dimensionFolder(scratchDir, worldId.folder());
         assertThat(Files.exists(worldScratchFolder)).isFalse();
 
         // Load world through lifecycle service
@@ -236,8 +241,9 @@ class WorldLifecycleServiceTest {
         assertThat(loaded.world().id()).isEqualTo(worldId);
         assertThat(registry.find(worldId)).isPresent();
 
-        // Verify files materialized in scratch directory
-        assertThat(Files.exists(worldScratchFolder.resolve("level.dat"))).isTrue();
+        // Verify files materialized in scratch directory (Paper 26 nested layout)
+        assertThat(Files.exists(worldScratchFolder.resolve("paper-world.yml"))).isTrue();
+        assertThat(Files.exists(worldScratchFolder.resolve("region/r.0.0.mca"))).isTrue();
 
         // Verify cold load metric was incremented
         String scrape = metrics.scrape();
@@ -256,7 +262,11 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Snapshot to S3 and populate object store and cache
-        List<Path> dirty = DirtyScanner.scanDirty(scratchDir, worldId, Map.of(), List.of());
+        List<Path> dirty = DirtyScanner.scanDirty(
+                scratchDir,
+                folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
+                Map.of(),
+                List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
                 scratchDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
         Manifest manifest = snapResult.manifest();

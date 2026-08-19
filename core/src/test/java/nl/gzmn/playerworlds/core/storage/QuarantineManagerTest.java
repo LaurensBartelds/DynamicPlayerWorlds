@@ -38,12 +38,12 @@ class QuarantineManagerTest {
         WorldId worldId = WorldId.random();
         String base = worldId.folder();
 
-        Path overworld = scratchRoot.resolve(base);
-        Path nether = scratchRoot.resolve(base + "_nether");
-        Path end = scratchRoot.resolve(base + "_the_end");
+        Path overworld = QuarantineManager.dimensionFolder(scratchRoot, "world", base);
+        Path nether = QuarantineManager.dimensionFolder(scratchRoot, "world", base + "_nether");
+        Path end = QuarantineManager.dimensionFolder(scratchRoot, "world", base + "_the_end");
 
         Files.createDirectories(overworld);
-        Files.writeString(overworld.resolve("level.dat"), "test data");
+        Files.writeString(overworld.resolve("paper-world.yml"), "test data");
         Files.createDirectories(nether);
         Files.createDirectories(end);
 
@@ -66,16 +66,16 @@ class QuarantineManagerTest {
         WorldId leasedWorld = WorldId.random();
         WorldId unleasedWorld = WorldId.random();
 
-        // Leased world in scratch (should be left untouched)
-        Path leasedFolder = scratchRoot.resolve(leasedWorld.folder());
+        // Leased world in nested Paper 26 path (should be left untouched)
+        Path leasedFolder = QuarantineManager.dimensionFolder(scratchRoot, "world", leasedWorld.folder());
         Files.createDirectories(leasedFolder);
 
-        // Unleased world in scratch (should be moved to quarantine)
-        Path unleasedFolder = scratchRoot.resolve(unleasedWorld.folder());
+        // Unleased world in nested path (should be moved to quarantine)
+        Path unleasedFolder = QuarantineManager.dimensionFolder(scratchRoot, "world", unleasedWorld.folder());
         Files.createDirectories(unleasedFolder);
         Files.writeString(unleasedFolder.resolve("data.txt"), "crash debris");
 
-        // Snapshot folders (should be deleted outright under MN-5a)
+        // Snapshot folders still sit at the world-container root (MN-5a)
         Path snapshotTemp = scratchRoot.resolve("_snapshot_123");
         Path snapshotsDir = scratchRoot.resolve(".snapshots");
         Files.createDirectories(snapshotTemp);

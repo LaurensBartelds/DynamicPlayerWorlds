@@ -104,7 +104,8 @@ class WorldCommitServiceTest {
                 snapshotEngine,
                 NetworkPolicy::defaults,
                 tempDir.resolve("scratch"),
-                "node-test");
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
 
         MainThread.enter(Thread.currentThread());
         server = MockBukkit.mock();

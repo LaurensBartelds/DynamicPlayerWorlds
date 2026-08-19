@@ -93,7 +93,8 @@ class PeriodicSyncTaskTest {
                 snapshotEngine,
                 NetworkPolicy::defaults,
                 scratchDir,
-                "node-test");
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
 
         MainThread.enter(Thread.currentThread());
         server = MockBukkit.mock();

@@ -103,9 +103,9 @@ class WorldRestorerTest {
             Path packTarget = tempDir.resolve("sample.tar.zst");
             ArchivePacker.PackResult pack = ArchivePacker.pack(
                     List.of(
-                            sourceFixture.resolve(worldId.folder()),
-                            sourceFixture.resolve(worldId.folder() + "_nether"),
-                            sourceFixture.resolve(worldId.folder() + "_the_end")),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder()),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_nether"),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_the_end")),
                     packTarget,
                     true);
 
@@ -168,9 +168,9 @@ class WorldRestorerTest {
         Path packTarget = tempDir.resolve("sample.tar.zst");
         ArchivePacker.PackResult pack = ArchivePacker.pack(
                 List.of(
-                        sourceFixture.resolve(worldId.folder()),
-                        sourceFixture.resolve(worldId.folder() + "_nether"),
-                        sourceFixture.resolve(worldId.folder() + "_the_end")),
+                        WorldFixture.dimensionFolder(sourceFixture, worldId.folder()),
+                        WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_nether"),
+                        WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_the_end")),
                 packTarget,
                 true);
 
@@ -220,8 +220,8 @@ class WorldRestorerTest {
         UUID owner = UUID.randomUUID();
 
         Path packTarget = tempDir.resolve("sample.tar.zst");
-        ArchivePacker.PackResult pack =
-                ArchivePacker.pack(List.of(sourceFixture.resolve(worldId.folder())), packTarget, true);
+        ArchivePacker.PackResult pack = ArchivePacker.pack(
+                List.of(WorldFixture.dimensionFolder(sourceFixture, worldId.folder())), packTarget, true);
 
         String archiveKey = "worlds/" + worldId.value() + "/archive/backup.tar.zst";
         archiveStorage.uploadArchive(archiveKey, packTarget);
@@ -268,8 +268,8 @@ class WorldRestorerTest {
         UUID owner = UUID.randomUUID();
 
         Path packTarget = tempDir.resolve("sample.tar.zst");
-        ArchivePacker.PackResult pack =
-                ArchivePacker.pack(List.of(sourceFixture.resolve(worldId.folder())), packTarget, true);
+        ArchivePacker.PackResult pack = ArchivePacker.pack(
+                List.of(WorldFixture.dimensionFolder(sourceFixture, worldId.folder())), packTarget, true);
 
         String archiveKey = "worlds/" + worldId.value() + "/archive/backup.tar.zst";
         archiveStorage.uploadArchive(archiveKey, packTarget);

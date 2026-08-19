@@ -98,7 +98,9 @@ class Milestone6AcceptanceTest {
         List<String> expectedPaths = WorldFixture.syncedRelativePaths(scratch, worldId);
 
         // Corrupt r.0.0.mca sector header (e.g. invalid sector offset pointing inside header)
-        Path mca = scratch.resolve(worldId.folder()).resolve("region").resolve("r.0.0.mca");
+        Path mca = WorldFixture.dimensionFolder(scratch, worldId.folder())
+                        .resolve("region")
+                        .resolve("r.0.0.mca");
         byte[] corrupted = new byte[8192];
         corrupted[0] = 0;
         corrupted[1] = 0;
