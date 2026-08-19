@@ -141,6 +141,22 @@ public final class ConfigValidator {
                     + policy.holdingTimeout().toSeconds()
                     + "s); a cold load cannot outlive the holding area it happens in (NFR-1, FR-11)");
         }
+
+        // CP-5: a claimed node_command becomes claimable again after the claim
+        // timeout, so a give-up command whose own fixed budget already exceeds it
+        // is restarted by a second poller while the first is still running the
+        // migration. HandoffBudget clamps, which turns that into a reported
+        // failure rather than a double drain; this refuses the configuration
+        // where the clamp would bite with no countdown at all.
+        Duration fixedHandoff = policy.commitTimeout().plus(HandoffBudget.MARGIN);
+        if (fixedHandoff.compareTo(policy.controlClaimTimeout()) >= 0) {
+            throw new ConfigException(NetworkPolicy.KEY_COMMIT_TIMEOUT_SECONDS + " ("
+                    + policy.commitTimeout().toSeconds() + "s) plus " + HandoffBudget.MARGIN.toSeconds()
+                    + "s of unload and release must be strictly less than "
+                    + NetworkPolicy.KEY_CONTROL_CLAIM_TIMEOUT_SECONDS + " ("
+                    + policy.controlClaimTimeout().toSeconds()
+                    + "s); a migrate or drain that outlives its claim is run twice (CP-5)");
+        }
     }
 
     private static void validateNodeAgainstPolicy(NodeConfig node, NetworkPolicy policy) {

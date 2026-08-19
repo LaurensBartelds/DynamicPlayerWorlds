@@ -5,6 +5,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import nl.gzmn.playerworlds.core.config.HandoffBudget;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandKind;
@@ -65,8 +66,16 @@ public final class MigrateWorldHandler implements CommandHandler {
                 destination == null ? "wherever it is next placed" : destination,
                 payload.countdownSeconds());
 
+        Duration budget = HandoffBudget.forCountdown(policy.get(), payload.countdownSeconds());
+        if (HandoffBudget.isClamped(policy.get(), payload.countdownSeconds())) {
+            log.warn(
+                    "migrate countdown of {}s does not fit inside control.claim-timeout-seconds; "
+                            + "waiting only {} before reporting a failure",
+                    payload.countdownSeconds(),
+                    budget);
+        }
         WorldHandoff.Outcome outcome = handoff.release(worldId, payload.countdownSeconds(), reason)
-                .get(budget(payload).toMillis(), TimeUnit.MILLISECONDS);
+                .get(budget.toMillis(), TimeUnit.MILLISECONDS);
 
         return switch (outcome) {
             case WorldHandoff.Outcome.NotHeld ignored -> CommandResult.ok();
@@ -80,25 +89,5 @@ public final class MigrateWorldHandler implements CommandHandler {
             case WorldHandoff.Outcome.CommitFailed failed ->
                 CommandResult.error("final snapshot commit failed: " + failed.detail());
         };
-    }
-
-    /**
-     * How long to wait for the whole sequence.
-     *
-     * <p>The countdown plus the commit budget, which has to stay inside
-     * {@code control.claim-timeout-seconds} or a second claimer starts the
-     * migration again while the first is still running it. MN-21 bounds the
-     * countdown for the same reason.
-     */
-    private Duration budget(MigratePayload payload) {
-        NetworkPolicy current = policy.get();
-        Duration wanted = Duration.ofSeconds(payload.countdownSeconds())
-                .plus(current.commitTimeout())
-                .plusSeconds(5);
-        Duration ceiling = current.controlClaimTimeout().minusSeconds(1);
-        if (ceiling.isNegative() || ceiling.isZero()) {
-            return wanted;
-        }
-        return wanted.compareTo(ceiling) > 0 ? ceiling : wanted;
     }
 }

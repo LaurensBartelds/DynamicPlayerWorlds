@@ -7,6 +7,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -30,6 +32,23 @@ import org.slf4j.LoggerFactory;
  * <p>No feature handlers ship here — register them with {@link #register}. An
  * unrecognised kind is completed with an error so it does not retry forever
  * (CP-6).
+ *
+ * <h2>Where a handler runs</h2>
+ *
+ * <p>Not on the thread that claimed it. The poll runs on the scheduler a node
+ * also uses for its lease heartbeat, its fencing watchdog and its periodic sync,
+ * and a handler that <em>waits</em> — {@code MIGRATE_WORLD} waits out a countdown
+ * that same scheduler is the one to complete — deadlocks it until the handler's
+ * budget expires, taking all of that with it. While the LISTEN connection is
+ * healthy the notification path claims first and it never happens; the case in
+ * which it does is precisely the one CP-3 says the poll exists for.
+ *
+ * <p>So claiming stays on the poll and LISTEN threads and handlers get their own
+ * executor: one thread by default, which keeps handlers running one at a time as
+ * they always have, on a thread nothing else depends on. Pass an executor to the
+ * seven-argument constructor to change that — {@code Runnable::run} restores
+ * inline dispatch, which a test asserting on the effect the moment
+ * {@link #pollOnce()} returns needs.
  */
 public final class ControlPlane implements AutoCloseable {
 
@@ -39,6 +58,9 @@ public final class ControlPlane implements AutoCloseable {
     private static final Duration LISTEN_WAIT = Duration.ofSeconds(1);
     private static final Duration RECONNECT_PAUSE = Duration.ofSeconds(2);
 
+    /** How long {@link #close()} waits for a handler already running. */
+    private static final Duration HANDLER_SHUTDOWN_WAIT = Duration.ofSeconds(5);
+
     private final String targetNode;
     private final String listenChannel;
     private final NodeCommandRepository commands;
@@ -46,6 +68,10 @@ public final class ControlPlane implements AutoCloseable {
     private final Duration pollInterval;
     private final Duration claimTimeout;
     private final Map<CommandKind, CommandHandler> handlers = new EnumMap<>(CommandKind.class);
+    private final Executor handlerExecutor;
+
+    /** Non-null when this plane created the handler executor and so must close it. */
+    private final @Nullable ExecutorService ownedHandlerExecutor;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final Object startLock = new Object();
@@ -69,6 +95,23 @@ public final class ControlPlane implements AutoCloseable {
             NodeCommandRepository commands,
             Duration pollInterval,
             Duration claimTimeout) {
+        this(targetNode, listenChannel, databaseSettings, commands, pollInterval, claimTimeout, null);
+    }
+
+    /**
+     * As above, with an explicit handler executor.
+     *
+     * @param handlerExecutor where {@link CommandHandler#handle} runs; {@code null}
+     *     creates a dedicated single thread this plane closes with itself
+     */
+    public ControlPlane(
+            String targetNode,
+            String listenChannel,
+            DatabaseSettings databaseSettings,
+            NodeCommandRepository commands,
+            Duration pollInterval,
+            Duration claimTimeout,
+            @Nullable Executor handlerExecutor) {
         this.targetNode = Objects.requireNonNull(targetNode, "targetNode");
         this.listenChannel = Objects.requireNonNull(listenChannel, "listenChannel");
         this.commands = Objects.requireNonNull(commands, "commands");
@@ -87,6 +130,18 @@ public final class ControlPlane implements AutoCloseable {
             throw new IllegalArgumentException("claimTimeout must be positive, was: " + claimTimeout);
         }
         this.listener = new PgNotificationListener(databaseSettings, listenChannel);
+        if (handlerExecutor == null) {
+            ExecutorService owned = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "gzmn-cp-" + targetNode);
+                thread.setDaemon(true);
+                return thread;
+            });
+            this.ownedHandlerExecutor = owned;
+            this.handlerExecutor = owned;
+        } else {
+            this.ownedHandlerExecutor = null;
+            this.handlerExecutor = handlerExecutor;
+        }
     }
 
     /** Node-scoped consumer: listens on {@code gzmn_node_<nodeId>}. */
@@ -191,8 +246,39 @@ public final class ControlPlane implements AutoCloseable {
             completeQuietly(id, CommandResult.error("target mismatch"));
             return true;
         }
-        completeWithHandler(command);
+        dispatch(command);
         return true;
+    }
+
+    /**
+     * Hands the claimed command to the handler executor.
+     *
+     * <p>Returns as soon as it is queued: {@link #pollOnce()} counts claims, not
+     * completions, and CP-5's guarantee is that a <em>completed</em> row means the
+     * effect has happened, which still holds — the row is completed by the handler
+     * thread after the handler returns.
+     */
+    private void dispatch(NodeCommand command) {
+        try {
+            handlerExecutor.execute(() -> {
+                try {
+                    completeWithHandler(command);
+                } catch (Throwable t) {
+                    // Nothing above this catches: the executor would fold it into
+                    // an uncaught-exception handler and the row would sit claimed
+                    // until the claim timeout with no explanation anywhere.
+                    log.error("control plane failed to complete command {}", command.id(), t);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Stopping. The row stays claimed and becomes claimable again after
+            // control.claim-timeout-seconds, which is CP-5's answer for a consumer
+            // that died holding one.
+            log.warn(
+                    "control plane rejected command {} while stopping; it will be reclaimed after {}",
+                    command.id(),
+                    claimTimeout);
+        }
     }
 
     /**
@@ -243,6 +329,7 @@ public final class ControlPlane implements AutoCloseable {
             cancelPoll();
         }
         listener.close();
+        shutdownOwnedHandlerExecutor();
         Thread thread = listenThread;
         Thread current = Thread.currentThread();
         if (thread != null && !sameThread(thread, current)) {
@@ -253,6 +340,41 @@ public final class ControlPlane implements AutoCloseable {
             }
         }
         log.info("control plane stopped target={}", targetNode);
+    }
+
+    /**
+     * Gives a handler already running a bounded moment to finish.
+     *
+     * <p>Bounded rather than indefinite: a handler is budgeted already (see
+     * {@code HandoffBudget}) and waiting on one that is not would hang the server
+     * stop. Whatever does not finish leaves its row claimed, and CP-5 makes that
+     * recoverable.
+     */
+    private void shutdownOwnedHandlerExecutor() {
+        ExecutorService owned = ownedHandlerExecutor;
+        if (owned == null) {
+            return;
+        }
+        owned.shutdown();
+        try {
+            if (!owned.awaitTermination(HANDLER_SHUTDOWN_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                log.warn(
+                        "control plane handler for {} did not finish within {}; its command will be reclaimed",
+                        targetNode,
+                        HANDLER_SHUTDOWN_WAIT);
+                dropQueued(owned);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            dropQueued(owned);
+        }
+    }
+
+    private void dropQueued(ExecutorService owned) {
+        List<Runnable> dropped = owned.shutdownNow();
+        if (!dropped.isEmpty()) {
+            log.warn("control plane dropped {} queued command(s) for {}", dropped.size(), targetNode);
+        }
     }
 
     private void cancelPoll() {

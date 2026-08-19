@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
+import nl.gzmn.playerworlds.core.config.HandoffBudget;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandKind;
@@ -85,7 +86,17 @@ public final class DrainNodeHandler implements CommandHandler {
 
         List<LoadedWorld> loaded = List.copyOf(registry.loadedWorlds());
         List<String> failures = new ArrayList<>();
-        Duration deadline = budget(payload);
+        Duration deadline = HandoffBudget.forCountdown(policy.get(), payload.countdownSeconds());
+        if (HandoffBudget.isClamped(policy.get(), payload.countdownSeconds())) {
+            // The comment below argues the drain has to fit inside one claim
+            // window; until R15 nothing made it, so a long countdown simply ran
+            // past the window and a second poller drained the node again.
+            log.warn(
+                    "drain countdown of {}s does not fit inside control.claim-timeout-seconds; "
+                            + "waiting only {} before reporting a failure",
+                    payload.countdownSeconds(),
+                    deadline);
+        }
 
         // Started together rather than one after another. Every player on the node
         // is being warned about the same maintenance, so they get one countdown
@@ -131,13 +142,5 @@ public final class DrainNodeHandler implements CommandHandler {
         // The node stays draining: it has worlds it could not release, and letting
         // placement send it more would make the operator's problem larger.
         return CommandResult.error(failures.size() + " worlds would not drain: " + String.join("; ", failures));
-    }
-
-    /** The countdown plus one commit budget, for the whole drain rather than per world. */
-    private Duration budget(MigratePayload payload) {
-        NetworkPolicy current = policy.get();
-        return Duration.ofSeconds(payload.countdownSeconds())
-                .plus(current.commitTimeout())
-                .plusSeconds(5);
     }
 }

@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R14 landed). Next is R15.
+Status: in progress — Phase A, B and C complete (R0–R15 landed). Next is Phase D (R16), which is blocked on confirming D18.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -158,9 +158,9 @@ to hold for an `Error` too.
 
 | Phase | Tasks | Theme |
 | --- | --- | --- |
-| A | R1–R5 | Data loss and access control. No open decisions. **R1, R4 done.** |
-| B | R6–R10 | The commit path: what reaches durable storage, and when. |
-| C | R11–R15 | Lease and lifecycle hygiene. **R11–R14 done.** |
+| A | R1–R5 | Data loss and access control. No open decisions. **Complete.** |
+| B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
+| C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
 | E | R21–R23 | Storage-model correctness. |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
@@ -788,29 +788,61 @@ budget and a throwing task not abandoning the rest of the queue.
 **Acceptance:** no window exists in which a lease is free while this node still
 has the world loaded.
 
-#### R15 — Give control-plane handlers their own executor (D15)
+#### R15 — Give control-plane handlers their own executor (D15) — **DONE**
 
 **Requirement:** CP-3, CP-5.
-**Files:** `core/control/ControlPlane.java`, `backend/GzmnWorldsPlugin.java`,
-`proxy/GzmnWorldsProxyPlugin.java`.
+**Files:** `core/control/ControlPlane.java`, `core/config/HandoffBudget.java`,
+`core/config/ConfigValidator.java`, `backend/control/MigrateWorldHandler.java`,
+`backend/control/DrainNodeHandler.java`.
 
-Add a handler executor to `ControlPlane` and dispatch `completeWithHandler` onto
-it. Claiming stays where it is; only handler execution moves.
+**Landed.** `ControlPlane` gained a handler executor and dispatches
+`completeWithHandler` onto it; claiming stays on the poll and LISTEN threads.
+The default is one dedicated daemon thread rather than a pool, which fixes the
+deadlock without changing anything else: handlers still run one at a time, as
+they did when they shared the poll thread, so nothing had to be re-examined for
+concurrency. A seven-argument constructor takes an explicit executor;
+`Runnable::run` restores inline dispatch for a caller that wants the effect to
+have landed by the time `pollOnce()` returns. `close()` gives a handler in
+flight five seconds, then drops the rest — a dropped row is reclaimed after
+`control.claim-timeout-seconds`, which is CP-5's own answer for a consumer that
+died holding one.
 
-Then fix the two budgets that are wrong for a related reason.
-`DrainNodeHandler.budget()` returns `countdown + commitTimeout + 5s` with no
-ceiling, while its own comment argues the drain "fits inside one
-`control.claim-timeout-seconds` instead of being reclaimed halfway through by a
-second poller". `MigrateWorldHandler.budget()` clamps for exactly that reason.
-Clamp both, and add the assertion to `ConfigValidator` so the relationship is
-enforced rather than asserted in prose.
+Because dispatch is no longer synchronous, `pollOnce()` returning means the
+command was *claimed*, not that it ran. CP-5 is unaffected — a **completed** row
+still means the effect happened, since the handler thread completes it after the
+handler returns — but the tests that asserted on the effect immediately after
+`pollOnce()` now wait for the completed row, which is what a real observer of
+CP-5 does.
 
-**Failing test first:** `aBlockingHandlerDispatchedByThePollDoesNotStallTheScheduler`
-— dispatch `MIGRATE_WORLD` with a non-zero countdown through `pollOnce` on a
-single-threaded scheduler and assert it completes.
+**The budgets.** `MigrateWorldHandler` clamped its wait to
+`control.claim-timeout-seconds` and `DrainNodeHandler` argued for the same
+ceiling in a comment and did not apply it. Both now call
+`HandoffBudget.forCountdown`, which is the one place the shape
+(`countdown + commitTimeout + 5s`, ceiling `claimTimeout - 1s`) and the reason
+for the ceiling are written, and both log once when a countdown is large enough
+that the clamp bites — reachable, since `MigratePayload.MAX_COUNTDOWN_SECONDS`
+is 120 against a 60-second default claim timeout. `ConfigValidator` then refuses
+the configuration in which the *fixed* part alone
+(`commitTimeout + HandoffBudget.MARGIN`) does not fit inside a claim window, so
+the relationship is enforced rather than asserted in prose.
+
+`HandoffBudget` lives in `core.config` beside the policy it is derived from, not
+in `core.control`: putting it next to its callers would have made
+`core.config` depend on `core.control` while `core.control` already depends on
+`core.config`.
+
+**Failing test first (proven by temporary revert):**
+`ControlPlaneTest#aBlockingHandlerDispatchedByThePollDoesNotStallTheScheduler`
+registers a handler with `MigrateWorldHandler`'s exact shape — wait for a future
+that the scheduler running the poll is the one to complete — and submits
+`pollOnce` to that single-threaded scheduler. Reverted to inline dispatch it
+fails with a `TimeoutException` at the poll itself, which is the deadlock. It
+also asserts the scheduler still takes work throughout, which is the heartbeat's
+seat. `#anExplicitExecutorIsHonoured`, `HandoffBudgetTest` and
+`ConfigValidatorTest#commitBudgetMustFitInsideTheClaimWindow` cover the rest.
 **Acceptance:** with the LISTEN connection dropped (`disconnectListener`), a
 migrate with a countdown still completes, and the heartbeat keeps beating
-throughout.
+throughout. The mechanism is covered above; the live half stays on the §7 list.
 
 ### Phase D — FR-40, the maintenance job
 
@@ -1207,8 +1239,8 @@ duplicated as a task here.
 
 ## 8. Sequencing
 
-Phase A (R0–R5) is complete. Remaining work is one branch per task from Phase B
-onwards, each with its failing test first, in the order given. R7 before R12,
+Phases A, B and C (R0–R15) are complete. Remaining work is one branch per task
+from Phase D onwards, each with its failing test first, in the order given. R7 before R12,
 R21 before R20's GC half, R16 after R21's marker. Nothing else has a hard
 ordering constraint.
 
