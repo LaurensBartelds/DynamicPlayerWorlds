@@ -20,7 +20,7 @@
 - Modify: `core/src/main/java/nl/gzmn/playerworlds/core/menu/MenuCodec.java`
 - Test: `core/src/test/java/nl/gzmn/playerworlds/core/menu/MenuCodecTest.java`
 
-- [ ] **Step 1: Write failing test in `MenuCodecTest.java`**
+- [x] **Step 1: Write failing test in `MenuCodecTest.java`**
 
 ```java
 @Test
@@ -38,12 +38,12 @@ void hardDeleteWorldRoundTrip() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :core:test --tests nl.gzmn.playerworlds.core.menu.MenuCodecTest.hardDeleteWorldRoundTrip`  
 Expected: Compilation failure or FAIL (record `HardDeleteWorld` does not exist).
 
-- [ ] **Step 3: Implement `HardDeleteWorld` and update `MenuCodec`**
+- [x] **Step 3: Implement `HardDeleteWorld` and update `MenuCodec`**
 
 In `MenuIntent.java`:
 ```java
@@ -67,12 +67,12 @@ And in decoder switch:
 case TYPE_HARD_DELETE_WORLD -> new MenuIntent.HardDeleteWorld(readWorldId(dis));
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :core:test --tests nl.gzmn.playerworlds.core.menu.MenuCodecTest`  
 Expected: PASS (all roundtrip tests green).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add core/src/main/java/nl/gzmn/playerworlds/core/menu/ core/src/test/java/nl/gzmn/playerworlds/core/menu/
@@ -88,7 +88,7 @@ git commit -m "feat(core): add HardDeleteWorld intent to wire protocol and MenuC
 - Modify: `proxy/src/main/java/nl/gzmn/playerworlds/proxy/command/WorldCommand.java`
 - Test: `proxy/src/test/java/nl/gzmn/playerworlds/proxy/command/WorldActionsTest.java`
 
-- [ ] **Step 1: Write failing unit tests in `WorldActionsTest.java`**
+- [x] **Step 1: Write failing unit tests in `WorldActionsTest.java`**
 
 ```java
 @Test
@@ -109,12 +109,12 @@ void deleteHardActiveWorldFailsWithConflict() throws Exception {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :proxy:test --tests nl.gzmn.playerworlds.proxy.command.WorldActionsTest`  
 Expected: FAIL (method `deleteHard` not present).
 
-- [ ] **Step 3: Implement `deleteHard` in `WorldActions.java` and `WorldCommand.java`**
+- [x] **Step 3: Implement `deleteHard` in `WorldActions.java` and `WorldCommand.java`**
 
 In `WorldActions.java`:
 ```java
@@ -180,12 +180,12 @@ private ActionResult executeDeleteHard(Player caller, PlayerWorld world, boolean
 In `WorldCommand.java`:
 Update `/world delete <name>` to support `hard` and `hard confirm` arguments.
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `./gradlew :proxy:test`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add proxy/src/main/java/nl/gzmn/playerworlds/proxy/command/ proxy/src/test/java/nl/gzmn/playerworlds/proxy/command/
@@ -200,7 +200,7 @@ git commit -m "feat(proxy): implement player deleteHard domain action and CLI co
 - Modify: `proxy/src/main/java/nl/gzmn/playerworlds/proxy/menu/MenuChannelListener.java`
 - Test: `proxy/src/test/java/nl/gzmn/playerworlds/proxy/menu/MenuChannelListenerTest.java`
 
-- [ ] **Step 1: Write failing test in `MenuChannelListenerTest.java`**
+- [x] **Step 1: Write failing test in `MenuChannelListenerTest.java`**
 
 ```java
 @Test
@@ -212,24 +212,24 @@ void hardDeleteWorldIntentDispatchesToActions() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :proxy:test --tests nl.gzmn.playerworlds.proxy.menu.MenuChannelListenerTest`  
 Expected: FAIL (unhandled switch case or missing implementation).
 
-- [ ] **Step 3: Implement dispatch in `MenuChannelListener.java`**
+- [x] **Step 3: Implement dispatch in `MenuChannelListener.java`**
 
 In `MenuChannelListener.java`:
 ```java
 case MenuIntent.HardDeleteWorld hardDelete -> actions.deleteHard(player, hardDelete.worldId());
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :proxy:test --tests nl.gzmn.playerworlds.proxy.menu.MenuChannelListenerTest`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add proxy/src/main/java/nl/gzmn/playerworlds/proxy/menu/ proxy/src/test/java/nl/gzmn/playerworlds/proxy/menu/
@@ -244,7 +244,7 @@ git commit -m "feat(proxy): dispatch HardDeleteWorld in MenuChannelListener"
 - Modify: `backend/src/main/java/nl/gzmn/playerworlds/backend/gui/screen/WorldMenu.java`
 - Test: `backend/src/test/java/nl/gzmn/playerworlds/backend/gui/screen/CoreScreensTest.java`
 
-- [ ] **Step 1: Write failing test in `CoreScreensTest.java`**
+- [x] **Step 1: Write failing test in `CoreScreensTest.java`**
 
 ```java
 @Test
@@ -256,12 +256,12 @@ void archivedWorldShowsPermanentDeleteButtonAndOpensConfirmModal() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `./gradlew :backend:test --tests nl.gzmn.playerworlds.backend.gui.screen.CoreScreensTest`  
 Expected: FAIL.
 
-- [ ] **Step 3: Update `WorldMenu.java`**
+- [x] **Step 3: Update `WorldMenu.java`**
 
 In `WorldMenu.java`:
 When `world.state() == WorldState.ARCHIVED`:
@@ -298,12 +298,12 @@ When `world.state() == WorldState.ARCHIVED`:
     );
     ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `./gradlew :backend:test --tests nl.gzmn.playerworlds.backend.gui.screen.CoreScreensTest`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add backend/src/main/java/nl/gzmn/playerworlds/backend/gui/screen/ backend/src/test/java/nl/gzmn/playerworlds/backend/gui/screen/
@@ -317,12 +317,12 @@ git commit -m "feat(backend): add permanent deletion button and confirmation flo
 **Files:**
 - None (verification task)
 
-- [ ] **Step 1: Run code formatters and static checks**
+- [x] **Step 1: Run code formatters and static checks**
 
 Run: `./gradlew spotlessApply check`  
 Expected: BUILD SUCCESSFUL with 0 violations.
 
-- [ ] **Step 2: Re-run all tests from scratch**
+- [x] **Step 2: Re-run all tests from scratch**
 
 Run: `./gradlew test --rerun`  
 Expected: 100% tests passed.
