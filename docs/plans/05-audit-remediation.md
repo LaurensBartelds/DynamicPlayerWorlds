@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R13 landed). Next is R14.
+Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R14 landed). Next is R15.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -160,7 +160,7 @@ to hold for an `Error` too.
 | --- | --- | --- |
 | A | R1–R5 | Data loss and access control. No open decisions. **R1, R4 done.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. |
-| C | R11–R15 | Lease and lifecycle hygiene. **R11–R13 done.** |
+| C | R11–R15 | Lease and lifecycle hygiene. **R11–R14 done.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
 | E | R21–R23 | Storage-model correctness. |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
@@ -731,31 +731,60 @@ against the old defaults, which is the point of it.
 `worlds_holding_timeouts_total`; `MetricNames.HOLDING_TIMEOUTS` is
 `holding.timeouts`, which scrapes without a prefix.)
 
-#### R14 — Shutdown releases leases after unloading, not before
+#### R14 — Shutdown releases leases after unloading, not before — **DONE**
 
 **Requirement:** FR-28, MN-12, FR-25.
-**Files:** `backend/GzmnWorldsPlugin.java`, `backend/world/IdleUnloadTask.java`.
+**Files:** `backend/GzmnWorldsPlugin.java`, `backend/control/NodeShutdown.java`,
+`core/concurrent/DrainableMainScheduler.java`, `backend/world/IdleUnloadTask.java`.
 
-`onDisable` commits, then releases every lease, then unloads. FR-25 orders it
+`onDisable` committed, then released every lease, then unloaded. FR-25 orders it
 *commit, unload, release*, and `WorldHandoff.unload` carries the reasoning in a
 comment: *"Release comes last, so no other node can acquire the world before its
 final snapshot is the current one."* Two paths doing the same thing in opposite
 orders, with the reasoning on only one of them.
 
-Drive shutdown through `WorldHandoff.release(worldId, 0, "server shutting down")`
-so there is one implementation of the order. That also picks up `afterUnload`'s
-`touchLastPlayed` and cache invalidation, which `unloadAllForShutdown` currently
-skips.
+**What was in the way.** Paper marks a plugin disabled *before* calling
+`onDisable`, and its scheduler then refuses a task from a disabled plugin. Every
+asynchronous path here ends by hopping back to the tick thread — the commit's
+capture phase, the unload, the auto-save restore — so inside `onDisable` none of
+them can complete. That, not oversight, is why shutdown had a second sequence:
+the ordinary one could not run there, and the old code's own
+`allOf(commits).get(commitTimeout)` was waiting on futures that in the
+already-committing case could never land.
 
-One thing to confirm on a live node while testing this, because it decides
-whether the change is sufficient: the audit's reading is that Paper disables
-plugins *before* kicking players, which would mean `Bukkit.unloadWorld` returns
-false during `onDisable` for any world still holding one, and the current
-shutdown path only logs that. If so, routing through the handoff is not merely
-tidier — it is the only version that works, because it ejects to the holding
-world first. Verify rather than assume.
+**Landed.** `DrainableMainScheduler` wraps the platform scheduler; after
+`beginShutdown()` work submitted from other threads queues instead, and the main
+thread runs it while it waits (`awaitDraining`). With that, `onDisable` drives
+the *ordinary* path: `NodeShutdown` starts `WorldHandoff.release(worldId, 0, …)`
+for every loaded world, waits for all of them inside one budget
+(`commitTimeout + 5s`), and reports each outcome. `afterUnload` now runs on this
+path too, so `last_played` is written — MN-15a scores a warm copy from it — and
+the membership cache is invalidated. `IdleUnloadTask.unloadAllForShutdown` is
+gone; so is the plugin's `nodeConfig` field, which existed only for the
+hand-rolled lease release.
 
-**Failing test first:** `shutdownReleasesAfterUnload_FR28`.
+A world that will not unload, or whose final commit fails, now **keeps** its
+lease and stays registered. That is the handoff's existing rule for a migrate and
+it is the right one: such a world's newest state is only in this node's scratch
+directory, and a released lease invites another node to serve the snapshot before
+it. It expires on its own after `nodes.lease-seconds` (MN-12).
+
+**On the live question this task raised.** The audit asked whether Paper kicks
+players before or after disabling plugins, because if before, `unloadWorld`
+returns false for any world still holding one. Still unverified on a live node —
+but the change no longer depends on the answer. The handoff ejects to the holding
+world first, so it works whether the players are still connected or already gone,
+and the `unloadWorld`-refuses case is now a `Blocked` outcome that keeps the lease
+rather than a log line after the lease was already dropped.
+
+**Failing test first (proven by temporary revert):**
+`NodeShutdownTest#shutdownReleasesAfterUnload_FR28` reads the lease holder from
+inside `WorldUnloadEvent` — the instant the world comes down — and asserts it is
+still this node. Releasing before the unload (a one-line revert in
+`WorldHandoff.unload`) makes it read null, which is the window itself.
+`#aWorldThatWillNotUnloadKeepsItsLease_FR28` fails the same way.
+`DrainableMainSchedulerTest` covers the queue-and-drain contract, including the
+budget and a throwing task not abandoning the rest of the queue.
 **Acceptance:** no window exists in which a lease is free while this node still
 has the world loaded.
 

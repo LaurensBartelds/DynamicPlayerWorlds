@@ -3,7 +3,6 @@ package nl.gzmn.playerworlds.backend;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -21,6 +20,7 @@ import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
 import nl.gzmn.playerworlds.backend.control.MigrateWorldHandler;
+import nl.gzmn.playerworlds.backend.control.NodeShutdown;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
 import nl.gzmn.playerworlds.backend.control.WorldHandoff;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
@@ -44,7 +44,6 @@ import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
-import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
@@ -56,6 +55,7 @@ import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.concurrent.BoundedOperations;
+import nl.gzmn.playerworlds.core.concurrent.DrainableMainScheduler;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
@@ -135,21 +135,30 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
     private static final long TICKS_PER_SECOND = 20L;
 
+    /**
+     * What FR-28's shutdown budget adds to {@code storage.commit-timeout-seconds}
+     * for the unload and the lease release that follow the commit. Both are short
+     * and neither touches object storage; this is slack, not a target.
+     */
+    private static final Duration SHUTDOWN_UNLOAD_MARGIN = Duration.ofSeconds(5);
+
     private @Nullable Platform platform;
     private @Nullable PluginExecutors executors;
+    private @Nullable DrainableMainScheduler mainScheduler;
     private @Nullable WorldsMetrics metrics;
     private @Nullable PrometheusEndpoint metricsEndpoint;
     private @Nullable Database database;
     private @Nullable ObjectStore objectStore;
     private @Nullable WorldRegistry registry;
-    private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
+    /** FR-28's shutdown drives the same give-up sequence as the control plane. */
+    private @Nullable WorldHandoff worldHandoff;
+
     private @Nullable NodeHeartbeat nodeHeartbeat;
     private @Nullable LeaseCoordinator leaseCoordinator;
     private @Nullable SelfFencingHandler fencingHandler;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
-    private @Nullable NodeConfig nodeConfig;
     private @Nullable WorldArchiver archiver;
     private @Nullable WorldRestorer restorer;
     private @Nullable MenuChannel menuChannel;
@@ -221,17 +230,19 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             return;
         }
 
+        // Drainable, because Paper marks a plugin disabled before calling
+        // onDisable and its scheduler then refuses tasks: without this, nothing
+        // inside onDisable can hop back to the tick thread and FR-28's shutdown
+        // cannot use the ordinary give-up path (R14).
+        DrainableMainScheduler mainThread = new DrainableMainScheduler(getServer()::isPrimaryThread, task -> {
+            getServer().getScheduler().runTask(this, task);
+        });
+        this.mainScheduler = mainThread;
+
         PluginExecutors pools =
-                PluginExecutors.create(node.database().poolSize(), loadedPolicy.parallelTransfers(), task -> {
-                    if (getServer().isPrimaryThread()) {
-                        task.run();
-                    } else {
-                        getServer().getScheduler().runTask(this, task);
-                    }
-                });
+                PluginExecutors.create(node.database().poolSize(), loadedPolicy.parallelTransfers(), mainThread);
         this.executors = pools;
 
-        this.nodeConfig = node;
         schedulePolicyRefresh(openedDatabase, pools);
 
         PlayerWorldRepository menuWorldRepo = new PlayerWorldRepository(openedDatabase);
@@ -610,7 +621,6 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 this::policy,
                 worldCommitService::requestCommit,
                 pools.main());
-        this.idleUnload = sweep;
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
 
@@ -725,6 +735,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // all three commands that give a world up.
         WorldHandoff handoff =
                 new WorldHandoff(worldRegistry, lifecycle, worldFolders, pools, commits, nodeCommands, this::policy);
+        this.worldHandoff = handoff;
 
         plane.register(CommandKind.UNLOAD_WORLD, new UnloadWorldHandler(handoff, this::policy));
         plane.register(CommandKind.MIGRATE_WORLD, new MigrateWorldHandler(handoff, this::policy));
@@ -926,61 +937,33 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // still accept it, then drain the pools, then close the database, then
         // drop the main-thread mark so a late callback cannot look like main.
 
-        // FR-28 & MN-12: commit final snapshot and release lease for all loaded worlds synchronously
-        WorldRegistry reg = this.registry;
-        WorldCommitService commits = this.commitService;
-        PluginExecutors pools = this.executors;
-        Database db = this.database;
-        NodeConfig cfg = this.nodeConfig;
-        if (commits != null && reg != null) {
-            List<LoadedWorld> loadedList = List.copyOf(reg.loadedWorlds());
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
-            for (LoadedWorld loaded : loadedList) {
-                try {
-                    futures.add(commits.requestCommit(loaded.id()));
-                } catch (Exception e) {
-                    getLogger()
-                            .warning(() -> "could not request shutdown commit for world " + loaded.id() + ": "
-                                    + e.getMessage());
-                }
-            }
-            if (!futures.isEmpty()) {
-                Duration commitTimeout = policy.commitTimeout();
-                try {
-                    CompletableFuture.allOf(futures.toArray(CompletableFuture<?>[]::new))
-                            .get(commitTimeout.toMillis(), TimeUnit.MILLISECONDS);
-                } catch (TimeoutException e) {
-                    getLogger().warning(() -> "shutdown commits timed out after " + commitTimeout);
-                } catch (Exception e) {
-                    getLogger().warning(() -> "shutdown commit failed: " + e.getMessage());
-                }
-            }
-
-            // Cleanly release held leases in DB (MN-12)
-            if (db != null && pools != null && cfg != null) {
-                PlayerWorldRepository repo = new PlayerWorldRepository(db);
-                for (LoadedWorld loaded : loadedList) {
-                    try {
-                        BoundedOperations.run(pools.db(), Duration.ofSeconds(2), () -> {
-                            try {
-                                repo.releaseLease(loaded.id(), cfg.nodeId(), loaded.generation());
-                            } catch (SQLException e) {
-                                getLogger()
-                                        .warning(() -> "could not release lease for world " + loaded.id() + ": "
-                                                + e.getMessage());
-                            }
-                        });
-                    } catch (Exception e) {
-                        getLogger().warning(() -> "timeout or error releasing lease for world " + loaded.id());
-                    }
-                }
-            }
+        // Paper has already marked this plugin disabled, so its scheduler will not
+        // take a task any more. From here the main thread runs its own queued work
+        // (R14) — without which nothing below that hops to main can complete.
+        DrainableMainScheduler mainThread = this.mainScheduler;
+        if (mainThread != null) {
+            mainThread.beginShutdown();
         }
 
-        IdleUnloadTask sweep = this.idleUnload;
-        this.idleUnload = null;
-        if (sweep != null && MainThread.isMain()) {
-            sweep.unloadAllForShutdown();
+        // FR-28, FR-25, MN-12: commit, unload, release — in that order, and by the
+        // same handoff the control plane uses, so there is one implementation of
+        // the order rather than two that disagree about it.
+        WorldRegistry reg = this.registry;
+        WorldHandoff handoff = this.worldHandoff;
+        this.worldHandoff = null;
+        PluginExecutors pools = this.executors;
+        if (handoff != null && reg != null && mainThread != null && MainThread.isMain()) {
+            Duration budget = policy.commitTimeout().plus(SHUTDOWN_UNLOAD_MARGIN);
+            try {
+                new NodeShutdown(reg, handoff, mainThread).releaseAll(budget);
+            } catch (RuntimeException e) {
+                getLogger().warning(() -> "shutdown handoff failed: " + e.getMessage());
+            }
+        } else if (reg != null && !reg.loadedWorlds().isEmpty()) {
+            getLogger()
+                    .warning(() -> "disabling with " + reg.loadedWorlds().size()
+                            + " world(s) still loaded and no handoff available; their leases expire on their own"
+                            + " (MN-12)");
         }
 
         // MN-17: leave the registration cleanly, so the proxy stops routing here
