@@ -77,16 +77,26 @@ public final class WorldMenu implements GuiScreen {
                         Component.text(
                                 "Storage: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
                                 NamedTextColor.GRAY)));
-
-        // Slot 10: Join
-        inventory.setItem(
-                SLOT_JOIN,
-                ItemUtil.create(
-                        Material.ENDER_PEARL,
-                        Component.text("Join World", NamedTextColor.GREEN, TextDecoration.BOLD),
-                        Component.text("Teleport directly to this world", NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to join", NamedTextColor.YELLOW)));
+        // Slot 10: Join or Restore
+        if (world.state() == WorldState.ARCHIVED) {
+            inventory.setItem(
+                    SLOT_JOIN,
+                    ItemUtil.create(
+                            Material.ANVIL,
+                            Component.text("Restore World", NamedTextColor.GREEN, TextDecoration.BOLD),
+                            Component.text("Restore this world from cold storage", NamedTextColor.GRAY),
+                            Component.empty(),
+                            Component.text("▶ Click to restore", NamedTextColor.YELLOW)));
+        } else {
+            inventory.setItem(
+                    SLOT_JOIN,
+                    ItemUtil.create(
+                            Material.ENDER_PEARL,
+                            Component.text("Join World", NamedTextColor.GREEN, TextDecoration.BOLD),
+                            Component.text("Teleport directly to this world", NamedTextColor.GRAY),
+                            Component.empty(),
+                            Component.text("▶ Click to join", NamedTextColor.YELLOW)));
+        }
 
         // Slot 11: Members
         inventory.setItem(
@@ -148,16 +158,17 @@ public final class WorldMenu implements GuiScreen {
                         Component.empty(),
                         Component.text("▶ Click to view storage breakdown", NamedTextColor.YELLOW)));
 
-        // Slot 16: Archive or Restore
+        // Slot 16: Archive or Permanently Delete
         if (world.state() == WorldState.ARCHIVED) {
             inventory.setItem(
                     SLOT_ARCHIVE,
                     ItemUtil.create(
-                            Material.ANVIL,
-                            Component.text("Restore World", NamedTextColor.GREEN, TextDecoration.BOLD),
-                            Component.text("Restore this world from cold storage", NamedTextColor.GRAY),
+                            Material.LAVA_BUCKET,
+                            Component.text("Permanently Delete World", NamedTextColor.DARK_RED, TextDecoration.BOLD),
+                            Component.text("⚠ Irreversible Action", NamedTextColor.RED, TextDecoration.BOLD),
+                            Component.text("Permanently destroys all chunks and backup archives.", NamedTextColor.GRAY),
                             Component.empty(),
-                            Component.text("▶ Click to restore", NamedTextColor.YELLOW)));
+                            Component.text("▶ Click to delete permanently (requires confirm)", NamedTextColor.DARK_RED)));
         } else {
             inventory.setItem(
                     SLOT_ARCHIVE,
@@ -187,16 +198,30 @@ public final class WorldMenu implements GuiScreen {
 
         switch (slot) {
             case SLOT_JOIN -> {
-                if (menuChannel != null) {
-                    var _ = menuChannel
-                            .sendIntent(player, new MenuIntent.JoinWorld(world.id()))
-                            .whenComplete((result, ex) -> {
-                                if (result instanceof MenuResult.Failed failed) {
-                                    player.sendMessage(Component.text(
-                                            "Could not join world: " + failed.message(), NamedTextColor.RED));
+                if (world.state() == WorldState.ARCHIVED) {
+                    if (menuChannel != null) {
+                        var _ = menuChannel
+                                .sendIntent(player, new MenuIntent.RestoreWorld(world.name()))
+                                .whenComplete((result, ex) -> {
+                                    if (result instanceof MenuResult.Failed failed) {
+                                        player.sendMessage(Component.text(
+                                                "Could not restore world: " + failed.message(), NamedTextColor.RED));
+                                    }
                                     var _ = menuService.openWorldMenu(player, world.id());
-                                }
-                            });
+                                });
+                    }
+                } else {
+                    if (menuChannel != null) {
+                        var _ = menuChannel
+                                .sendIntent(player, new MenuIntent.JoinWorld(world.id()))
+                                .whenComplete((result, ex) -> {
+                                    if (result instanceof MenuResult.Failed failed) {
+                                        player.sendMessage(Component.text(
+                                                "Could not join world: " + failed.message(), NamedTextColor.RED));
+                                        var _ = menuService.openWorldMenu(player, world.id());
+                                    }
+                                });
+                    }
                 }
             }
             case SLOT_MEMBERS -> {
@@ -229,17 +254,33 @@ public final class WorldMenu implements GuiScreen {
             }
             case SLOT_ARCHIVE -> {
                 if (world.state() == WorldState.ARCHIVED) {
-                    if (menuChannel != null) {
-                        var _ = menuChannel
-                                .sendIntent(player, new MenuIntent.RestoreWorld(world.name()))
-                                .whenComplete((result, ex) -> {
-                                    if (result instanceof MenuResult.Failed failed) {
-                                        player.sendMessage(Component.text(
-                                                "Could not restore world: " + failed.message(), NamedTextColor.RED));
-                                    }
-                                    var _ = menuService.openWorldMenu(player, world.id());
-                                });
-                    }
+                    menuService.openConfirmMenu(
+                            player,
+                            Component.text(
+                                    "Permanently Delete '" + world.name() + "'?", NamedTextColor.DARK_RED, TextDecoration.BOLD),
+                            Component.text(
+                                    "Permanently destroy '" + world.name() + "'? All archives will be lost forever.",
+                                    NamedTextColor.RED),
+                            () -> {
+                                if (menuChannel != null) {
+                                    var _ = menuChannel
+                                            .sendIntent(player, new MenuIntent.HardDeleteWorld(world.id()))
+                                            .whenComplete((result, ex) -> {
+                                                if (result instanceof MenuResult.Ok ok) {
+                                                    player.sendMessage(Component.text(ok.message(), NamedTextColor.GREEN));
+                                                    var _ = menuService.openMyWorldsMenu(player);
+                                                } else if (result instanceof MenuResult.Failed failed) {
+                                                    player.sendMessage(Component.text(
+                                                            "Could not delete world: " + failed.message(),
+                                                            NamedTextColor.RED));
+                                                    var _ = menuService.openWorldMenu(player, world.id());
+                                                }
+                                            });
+                                }
+                            },
+                            () -> {
+                                var _ = menuService.openWorldMenu(player, world.id());
+                            });
                 } else {
                     menuService.openConfirmMenu(
                             player,

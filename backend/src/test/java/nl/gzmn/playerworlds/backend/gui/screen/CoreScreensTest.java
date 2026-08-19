@@ -334,6 +334,59 @@ class CoreScreensTest {
     }
 
     @Test
+    @DisplayName("WorldMenu for archived world shows restore on slot 10 and permanent delete on slot 16")
+    void archivedWorldShowsRestoreAndPermanentDelete() throws Exception {
+        RecordingPlayerMock player = createRecordingPlayer("Dave");
+        WorldId worldId = WorldId.random();
+        PlayerWorld world = new PlayerWorld(
+                worldId,
+                player.getUniqueId(),
+                "dave-archived-world",
+                worldId.folder(),
+                789L,
+                5000,
+                Visibility.PRIVATE,
+                null,
+                "{}",
+                null,
+                null,
+                1L,
+                null,
+                null,
+                null,
+                Instant.now(),
+                null,
+                WorldState.ARCHIVED,
+                1024L * 1024L * 30L);
+
+        WorldMenu menu = new WorldMenu(menuService, channel, world);
+        Inventory inv = menu.render(player);
+
+        assertThat(inv.getItem(WorldMenu.SLOT_JOIN).getType()).isEqualTo(Material.ANVIL);
+        assertThat(inv.getItem(WorldMenu.SLOT_ARCHIVE).getType()).isEqualTo(Material.LAVA_BUCKET);
+
+        // Click slot 10 -> Restore
+        menu.handleClick(player, WorldMenu.SLOT_JOIN, ClickType.LEFT);
+        byte[] restoreMsg = player.nextSentMessage();
+        IntentEnvelope restoreEnv = (IntentEnvelope) MenuCodec.decode(restoreMsg);
+        assertThat(restoreEnv.intent()).isEqualTo(new MenuIntent.RestoreWorld("dave-archived-world"));
+
+        // Click slot 16 -> Permanently Delete opens ConfirmMenu
+        menu.handleClick(player, WorldMenu.SLOT_ARCHIVE, ClickType.LEFT);
+        drainMain();
+        assertThat(menuService.activeScreen(player)).isPresent();
+        assertThat(menuService.activeScreen(player).get()).isInstanceOf(ConfirmMenu.class);
+
+        // Confirm in ConfirmMenu -> sends HardDeleteWorld intent
+        ConfirmMenu confirmMenu = (ConfirmMenu) menuService.activeScreen(player).get();
+        confirmMenu.handleClick(player, ConfirmMenu.SLOT_CONFIRM, ClickType.LEFT);
+
+        byte[] hardDeleteMsg = player.nextSentMessage();
+        IntentEnvelope hardDeleteEnv = (IntentEnvelope) MenuCodec.decode(hardDeleteMsg);
+        assertThat(hardDeleteEnv.intent()).isEqualTo(new MenuIntent.HardDeleteWorld(worldId));
+    }
+
+    @Test
     @DisplayName("StorageMenu renders quota overview and owned world sizes")
     void storageMenuRendersOverviewAndBreakdown() throws Exception {
         PlayerMock player = server.addPlayer();
