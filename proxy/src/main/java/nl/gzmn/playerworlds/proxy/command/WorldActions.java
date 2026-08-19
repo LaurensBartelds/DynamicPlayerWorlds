@@ -374,14 +374,26 @@ public final class WorldActions {
                     "UNCONFIRMED",
                     info(caller, "type /world delete " + world.name() + " hard confirm to permanently delete"));
         }
-        if (!worlds.deleteHard(world.id())) {
-            return ActionResult.failure(
-                    "STATE_CHANGED",
-                    error(caller, "'" + world.name() + "' changed while you were confirming; try again"));
+        // R23 / FR-37: routed to a node rather than done here. The confirmation
+        // promises to destroy the world "and all backup archives", and the proxy
+        // has no object-store client (spec section 13) — deleting the row here
+        // took the archive rows with it through the cascade and orphaned every
+        // object they named, permanently, because MN-2b's collection walks per
+        // world and the world was gone.
+        NetworkPolicy current = policy.get();
+        String node = archivalNodeOrExplain(caller, world, current);
+        if (node == null) {
+            return ActionResult.failure("ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
         }
-        log.info("world {} ('{}') permanently deleted by owner {}", world.id(), world.name(), caller.getUsername());
+        enqueueTo(node, world, CommandKind.DELETE_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+        log.info(
+                "world {} ('{}') queued for permanent deletion on {} by owner {} (FR-37)",
+                world.id(),
+                world.name(),
+                node,
+                caller.getUsername());
         return ActionResult.success(
-                Component.text("Permanently deleted world '" + world.name() + "'.", NamedTextColor.GREEN));
+                info(caller, "permanently deleting '" + world.name() + "' and its archives on " + node));
     }
 
     /**

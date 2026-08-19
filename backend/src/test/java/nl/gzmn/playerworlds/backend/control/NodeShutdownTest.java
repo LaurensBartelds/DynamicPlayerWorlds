@@ -166,6 +166,7 @@ class NodeShutdownTest {
                 .registerEvents(
                         new Listener() {
                             @EventHandler
+                            @SuppressWarnings({"UnusedMethod", "EffectivelyPrivate"}) // Bukkit calls it by reflection
                             public void onUnload(WorldUnloadEvent event) {
                                 if (!event.getWorld().getName().equals(overworldName)) {
                                     return;

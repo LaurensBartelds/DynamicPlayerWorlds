@@ -29,7 +29,13 @@ class DrainableMainSchedulerTest {
         worker = Executors.newSingleThreadExecutor();
         mainThread = Thread.currentThread();
         platformTasks = new ConcurrentLinkedQueue<>();
-        scheduler = new DrainableMainScheduler(() -> Thread.currentThread() == mainThread, platformTasks::add);
+        scheduler = new DrainableMainScheduler(this::onMainThread, platformTasks::add);
+    }
+
+    /** Thread identity; Error Prone rejects {@code ==} unless it is named. */
+    @SuppressWarnings("ReferenceEquality")
+    private boolean onMainThread() {
+        return Thread.currentThread() == mainThread;
     }
 
     @AfterEach

@@ -40,6 +40,7 @@ import nl.gzmn.playerworlds.backend.storage.ArchiveStorage;
 import nl.gzmn.playerworlds.backend.storage.MaintenanceTask;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
 import nl.gzmn.playerworlds.backend.storage.WorldArchiver;
+import nl.gzmn.playerworlds.backend.storage.WorldEraser;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
@@ -781,9 +782,17 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 node.nodeId(),
                 identity.dataVersion(),
                 identity.minecraftVersion());
+        // FR-37: hard deletion runs here rather than on the proxy, because the
+        // archive objects and the world's snapshot prefix are only reachable from
+        // a node (R23).
+        WorldEraser worldEraser = new WorldEraser(
+                new PlayerWorldRepository(openedDatabase),
+                new ArchiveRepository(openedDatabase),
+                archiveStorage,
+                store);
         this.archiver = worldArchiver;
         this.restorer = worldRestorer;
-        BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer);
+        BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer, worldEraser);
 
         plane.start(pools.sched(), listen);
         this.controlPlane = plane;

@@ -7,6 +7,8 @@ import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -17,6 +19,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
@@ -166,6 +169,7 @@ class WorldActionsTest {
 
     @Test
     void deleteHardArchivedWorldSucceeds() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");
         playersByUuid.put(owner, player);
@@ -178,8 +182,15 @@ class WorldActionsTest {
         ActionResult result = actions.deleteHard(player, "archivedworld", true).get();
         assertThat(result).isInstanceOf(ActionResult.Ok.class);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
-                .contains("Permanently deleted world 'archivedworld'");
-        assertThat(worlds.findById(worldId)).isEmpty();
+                .contains("permanently deleting 'archivedworld' and its archives");
+
+        // R23 / FR-37: the proxy has no object-store client, so it routes the
+        // deletion to a node rather than deleting the row and orphaning every
+        // archive object the row's children named.
+        assertThat(worlds.findById(worldId))
+                .as("the row survives until the node reports the objects gone")
+                .isPresent();
+        assertThat(enqueuedKinds("paper-a")).containsExactly(CommandKind.DELETE_WORLD.name());
     }
 
     @Test
@@ -219,6 +230,7 @@ class WorldActionsTest {
 
     @Test
     void deleteHardByIdSucceeds() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");
         playersByUuid.put(owner, player);
@@ -231,8 +243,9 @@ class WorldActionsTest {
         ActionResult result = actions.deleteHard(player, worldId).get();
         assertThat(result).isInstanceOf(ActionResult.Ok.class);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
-                .contains("Permanently deleted world 'archivedworld'");
-        assertThat(worlds.findById(worldId)).isEmpty();
+                .contains("permanently deleting 'archivedworld' and its archives");
+        assertThat(worlds.findById(worldId)).isPresent();
+        assertThat(enqueuedKinds("paper-a")).containsExactly(CommandKind.DELETE_WORLD.name());
     }
 
     @Test
@@ -531,5 +544,15 @@ class WorldActionsTest {
                     }
                     return null;
                 });
+    }
+
+    /** The command kinds queued for a node, oldest first. */
+    private List<String> enqueuedKinds(String nodeId) throws Exception {
+        NodeCommandRepository commands = new NodeCommandRepository(database);
+        List<String> kinds = new ArrayList<>();
+        for (Long id : commands.findClaimableIds(nodeId, Duration.ofMinutes(1), 10)) {
+            commands.findById(id).ifPresent(command -> kinds.add(command.command()));
+        }
+        return kinds;
     }
 }

@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B and C complete (R0–R15), plus R21 and R22. Next is R23, then Phase D from R16.
+Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23). Next is Phase D from R16, then Phase F.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -162,7 +162,7 @@ to hold for an `Error` too.
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
-| E | R21–R23 | Storage-model correctness. **R21, R22 done.** |
+| E | R21–R23 | Storage-model correctness. **Complete.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
 ---
@@ -1028,24 +1028,39 @@ asserts the two keys differ and both objects survive.
 **Acceptance:** the milestone-11 round trip returns a world *and* its players'
 inventories.
 
-#### R23 — `deleteHard` deletes the archives it promises to delete
+#### R23 — `deleteHard` deletes the archives it promises to delete — **DONE**
 
 **Requirement:** FR-37.
-**Files:** `proxy/command/WorldActions.java`, `core/db/PlayerWorldRepository.java`,
-`backend/storage/WorldArchiver.java`.
+**Files:** `backend/storage/WorldEraser.java`, `backend/control/BackendControlHandlers.java`,
+`core/control/CommandKind.java`, `proxy/command/WorldActions.java`.
 
-The confirmation promises to permanently destroy the world *"and all backup
-archives"*. `worlds.deleteHard` deletes the `player_world` row; the cascade
-removes the `player_world_archive` rows; the archive objects and any surviving
-per-world prefix in object storage are orphaned permanently, and MN-2b can never
-find them because the GC walks per world and the world is gone.
+The confirmation promised to permanently destroy the world *"and all backup
+archives"*, and the proxy could only keep half of it. `worlds.deleteHard` removed
+the `player_world` row, the cascade removed the `player_world_archive` rows, and
+the archive objects and the world's live snapshot prefix were orphaned
+permanently — MN-2b's collection walks per world, and the world was gone.
 
-Delete the objects before the row, or route hard deletion through a node
-(`ARCHIVE_WORLD`'s sibling) that owns the object store. The second is more
-consistent with §13 — the proxy has no object-store client — and gives the
-operation a result to report under R24.
+**Landed** as the second of the plan's two options, routed through a node, which
+§13 makes the only place with an object-store client and which gives the
+operation a result to report under R24. New `CommandKind.DELETE_WORLD`, handled
+by `WorldEraser`: read the archive rows, delete each archive object, delete
+`worlds/<id>/`, and only then the row. Objects first is CONTRIBUTING rule 8 — the
+rows are the only record of which objects belong to this world, so a failure
+part-way leaves the world ARCHIVED and retryable rather than leaving a bucket
+full of objects nothing can name. State is re-checked on the node, because CP-4's
+generation check does not see a restore that took the world out of ARCHIVED while
+the command sat in the queue. `NotFound` completes OK (CP-5).
 
-**Failing test first:** `hardDeleteRemovesArchiveObjects_FR37`.
+The proxy keeps ownership, permission, state and the typed confirmation — they
+need the caller — and then routes with the existing `archivalNodeOrExplain`, the
+same way `/world archive` and `/world restore` already do. Its message says the
+deletion is running on a named node; R24 is where the outcome comes back.
+
+**Failing test first:** `WorldEraserTest#hardDeleteRemovesArchiveObjects_FR37`
+asserts the archive object *and* a live snapshot object are gone, not only the
+rows. `#theRowSurvivesAFailedObjectDelete` asserts rule 8's order.
+`#aWorldThatIsNotArchivedIsRefused_FR37` covers the queued-behind-a-restore case,
+and `WorldActionsTest` that the proxy no longer deletes the row itself.
 
 ### Phase F — reporting, messaging, and de-duplication
 

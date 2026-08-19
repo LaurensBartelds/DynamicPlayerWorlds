@@ -325,6 +325,8 @@ class MenuChannelListenerTest {
 
     @Test
     void hardDeleteWorldIntentDispatchesAndSendsOkResult() throws Exception {
+        // R23: hard deletion is routed to a node, so there has to be one.
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
         UUID playerId = UUID.randomUUID();
         Player player = mockPlayer(playerId, "Alice");
         playersByUuid.put(playerId, player);
@@ -352,8 +354,10 @@ class MenuChannelListenerTest {
         assertThat(result).isInstanceOf(MenuResult.Ok.class);
         MenuResult.Ok ok = (MenuResult.Ok) result;
         assertThat(ok.correlationId()).isEqualTo(99L);
-        assertThat(ok.message()).contains("Permanently deleted world 'archivedworld'");
-        assertThat(worlds.findById(worldId)).isEmpty();
+        assertThat(ok.message()).contains("permanently deleting 'archivedworld' and its archives");
+        // The node deletes the objects and then the row (R23, FR-37); the proxy
+        // has no object-store client and must not remove the row on its own.
+        assertThat(worlds.findById(worldId)).isPresent();
     }
 
     @Test
