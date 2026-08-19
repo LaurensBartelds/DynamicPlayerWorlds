@@ -294,11 +294,17 @@ public final class ControlPlane implements AutoCloseable {
                     continue;
                 }
                 dispatchId(id);
-            } catch (Exception e) {
+            } catch (Throwable t) {
+                // The loop survives anything a dispatch can throw. CP-3's whole
+                // argument is that the durable row is the contract and NOTIFY is
+                // only a latency optimisation — but that only holds while this
+                // thread is alive to consume notifications. A handler Error used
+                // to kill it outright, and the node then ran on the poll path
+                // alone with nothing saying so.
                 if (!running.get()) {
                     return;
                 }
-                log.warn("control plane LISTEN failed on {}, will reconnect: {}", listenChannel, e.toString());
+                log.warn("control plane LISTEN failed on {}, will reconnect: {}", listenChannel, t.toString());
                 listener.disconnect();
                 sleep(RECONNECT_PAUSE);
             }
@@ -350,10 +356,24 @@ public final class ControlPlane implements AutoCloseable {
             if (result == null) {
                 result = CommandResult.error("handler returned null");
             }
-        } catch (Exception e) {
-            log.warn("control handler failed id={} kind={}: {}", command.id(), kind.get(), e.toString());
-            String message = e.getMessage();
-            result = CommandResult.error(e.getClass().getSimpleName() + ": " + (message == null ? "" : message));
+        } catch (Throwable t) {
+            // Throwable, not Exception. A handler that throws an Error — an
+            // UnsatisfiedLinkError from a relocated native library was the one
+            // that found this — used to escape here entirely, which cost two
+            // things at once: the command was left claimed and never completed,
+            // so it retried forever after control.claim-timeout-seconds; and the
+            // throw propagated out of the dispatch loop and killed the LISTEN
+            // thread, silently reducing the node to CP-3's poll fallback for the
+            // rest of its life.
+            //
+            // CP-6 wants a failing command to "degrade visibly instead of
+            // stalling the queue", and that has to hold for an Error too.
+            if (t instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            log.warn("control handler failed id={} kind={}: {}", command.id(), kind.get(), t.toString());
+            String message = t.getMessage();
+            result = CommandResult.error(t.getClass().getSimpleName() + ": " + (message == null ? "" : message));
         }
         completeQuietly(command.id(), result);
     }

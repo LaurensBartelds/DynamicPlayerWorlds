@@ -223,7 +223,11 @@ export class BotSession {
         const isTransient =
           err.message?.includes('already connected') ||
           err.message?.includes('duplicate_login') ||
-          err.message?.includes('disconnected before spawn');
+          err.message?.includes('disconnected before spawn') ||
+          // Velocity's wording when a previous session for this username has not
+          // been released yet. It arrives as a kick during login.
+          err.message?.includes('already connected to this proxy') ||
+          err.message?.includes('timed out');
         if (attempt < maxRetries && isTransient) {
           this.disconnect();
           await new Promise((r) => setTimeout(r, 600 * attempt));
@@ -385,6 +389,12 @@ export class BotSession {
       }
       this.connected = false;
       this._spawned = false;
+      // Dropped, not kept. connect() only builds a new mineflayer bot when this
+      // is null, and a disconnected bot never emits 'spawn' again — so holding
+      // on to it made every retry wait out the full spawn timeout against a dead
+      // socket instead of reconnecting. That turned one duplicate-session
+      // rejection into a cascade of 60s failures across the whole suite.
+      this.bot = null;
     }
   }
 }

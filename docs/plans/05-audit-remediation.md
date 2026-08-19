@@ -1,9 +1,8 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — R1, R2, R3 and R4 landed; R5 still open in phase A.
-**R0 below now outranks everything in this plan**: enabling object storage in
-the e2e harness proved that on the pinned Paper build the snapshot commit writes
-an empty manifest, so object storage holds no world data at all.
+Status: in progress — R0, R1, R2, R3 and R4 landed; R5 still open in phase A.
+The e2e suite runs with object storage enabled and is 9/9 green across
+consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
 and the requirements those defects turned out to have left unimplemented
 Spec baseline: `docs/spec/v0.4.md`
@@ -101,8 +100,57 @@ which data version each applies from.
 Sequenced ahead of Phase A: R2's checksum gate and R3's handoff check are both
 correct and both currently unreachable, because archival cannot get past step 3.
 
-**Not started.** It is a larger change than anything else in this plan and it
-needs a decision on how far back the layouts must be supported.
+**Landed** (commit `fe9142c`, by the repository owner with Junie): the layout,
+commit, archive and quarantine paths were aligned on Paper 26's nested scheme,
+and `RegionStructure` was relaxed to accept the unpadded trailing sector a live
+`.mca` carries.
+
+Three further defects sat behind it, each of which only became reachable once
+the previous one was fixed. All three are now fixed and the archival scenario
+passes end to end.
+
+#### R0a — a file that vanished between the scan and the copy aborted every sync
+
+`SnapshotCopier.copyOne` threw `StorageException("source missing…")` when a path
+named by the dirty scan no longer existed. Paper writes and removes transient
+files under `data/` around every save — `chunk_tickets.dat` is the one that
+showed up — so in practice **no snapshot ever completed**: the manifest stayed
+empty and the commit failed with the world already saved.
+
+MN-5a's "abort this sync" rule is about a file that will not *settle*, which is
+a torn-read risk. A file that no longer exists carries no such risk; it is
+simply not part of the state the snapshot describes. `copyOne` now returns
+`null` for a vanished source and `copyAll` omits it. After the fix the live
+prefix went from 1 object (the empty manifest) to 8–15 real objects.
+
+#### R0b — zstd cannot be used from a relocated plugin jar
+
+`archive.compression` defaulted to `zstd-3`, and zstd-jni is a native library
+whose JNI entry points are bound to `com.github.luben.zstd`. The plugin jar
+relocates every dependency, so the first archive threw
+`UnsatisfiedLinkError` out of a static initialiser. **Archival never worked with
+the documented default**, on any server.
+
+The default is now `gzip` — in the JDK, no native component — and an explicit
+zstd request fails with a message naming the relocation rather than a JNI stack
+trace. The specification itself doubts the codec's value here ("region files are
+already zlib-compressed internally… several times the CPU for a few percent of
+size"), so this is close to free. **Spec §7 and §12.8 need the default changed;
+see §4.** Removing the dependency altogether is the tidier end state and is not
+done here.
+
+#### R0c — an `Error` in a control-plane handler killed the LISTEN thread
+
+`ControlPlane.completeWithHandler` caught `Exception`. R0b's
+`UnsatisfiedLinkError` is an `Error`, so it escaped: the command was left
+claimed and never completed — retried forever after
+`control.claim-timeout-seconds` — and the throw propagated out of the dispatch
+loop and **killed the `gzmn-backend-listen` thread**, silently reducing the node
+to CP-3's poll fallback for the rest of its life.
+
+Both the dispatch and the LISTEN loop now catch `Throwable`. CP-6 wants a
+failing command to "degrade visibly instead of stalling the queue", and that has
+to hold for an `Error` too.
 
 ---
 
@@ -966,6 +1014,13 @@ missing, and each one is a decision the code has already taken implicitly.
 4. **§6 — `/world admin drain`.** Already reported in `NEXT-STEPS.md` and still
    open: MN-22 is an operational requirement with no row in §6's table. Either
    §6 gains the row or MN-22 names the mechanism.
+5. **§7 and §12.8 — `archive.compression` (R0b).** The documented default
+   `zstd-3` cannot work: zstd-jni is native and its JNI symbols are bound to a
+   package the plugin jar must relocate, so the default threw
+   `UnsatisfiedLinkError` on every archival. The code now defaults to `gzip`.
+   The specification should either name `gzip` as the default and drop zstd, or
+   state that zstd requires an unshaded deployment that this project does not
+   produce.
 
 Two further items are already recorded as open in `NEXT-STEPS.md` and are folded
 into tasks above rather than restated: `commitSnapshot`'s fencing predicate

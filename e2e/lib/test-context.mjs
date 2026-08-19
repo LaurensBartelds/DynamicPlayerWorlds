@@ -23,6 +23,32 @@ export class TestContext {
     return await sendRcon(nodeName, command, options);
   }
 
+  /**
+   * Blocks until both backend nodes report no players, bounded.
+   *
+   * <p>Returns false on timeout rather than throwing: a slow teardown should
+   * show up as the next scenario's failure with its own message, not as an
+   * error attributed to the scenario that just passed.
+   */
+  async waitForNoPlayers(timeoutMs = 20000) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const [a, b] = await Promise.all([sendRcon('paper-a', 'e2e status'), sendRcon('paper-b', 'e2e status')]);
+        if (/online=0/.test(a) && /online=0/.test(b)) {
+          // The backends have dropped them; give Velocity a moment to release
+          // its own session registry, which is what rejects a duplicate login.
+          await new Promise((r) => setTimeout(r, 400));
+          return true;
+        }
+      } catch {
+        // A node busy enough to refuse RCON is also a reason to keep waiting.
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return false;
+  }
+
   async resetState() {
     await this.db.truncateTables();
     await this.s3.clearBucket();
@@ -38,8 +64,11 @@ export class TestContext {
     }
     this.bots = [];
 
-    // Allow proxy to cleanly close client sessions
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait for the sessions to actually be gone rather than guessing at 500ms.
+    // Velocity rejects a second login for a username it still has registered
+    // ("You are already connected to this proxy!"), so a scenario that ended
+    // slightly slowly used to poison every scenario after it.
+    await this.waitForNoPlayers();
 
     try {
       await this.db.close();
