@@ -3,10 +3,12 @@ package nl.gzmn.playerworlds.backend.storage;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.*;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
@@ -21,6 +23,7 @@ import nl.gzmn.playerworlds.core.db.ArchiveRepository;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
@@ -58,6 +61,7 @@ class WorldRestorerTest {
     private PlayerWorldRepository worldRepo;
     private ArchiveRepository archiveRepo;
     private MembershipRepository membershipRepo;
+    private ProfileRepository profileRepo;
     private Path scratchRoot;
     private Path archiveDir;
     private ArchiveStorage archiveStorage;
@@ -70,6 +74,7 @@ class WorldRestorerTest {
         worldRepo = new PlayerWorldRepository(database);
         archiveRepo = new ArchiveRepository(database);
         membershipRepo = new MembershipRepository(database);
+        profileRepo = new ProfileRepository(database);
 
         scratchRoot = tempDir.resolve("scratch");
         archiveDir = tempDir.resolve("archives");
@@ -130,6 +135,7 @@ class WorldRestorerTest {
 
             WorldRestorer restorer = new WorldRestorer(
                     worldRepo,
+                    profileRepo,
                     archiveRepo,
                     s3ArchiveStorage,
                     snapshotEngine,
@@ -195,6 +201,7 @@ class WorldRestorerTest {
 
         WorldRestorer restorer = new WorldRestorer(
                 worldRepo,
+                profileRepo,
                 archiveRepo,
                 archiveStorage,
                 null,
@@ -250,6 +257,7 @@ class WorldRestorerTest {
 
         WorldRestorer restorer = new WorldRestorer(
                 worldRepo,
+                profileRepo,
                 archiveRepo,
                 archiveStorage,
                 null,
@@ -294,6 +302,7 @@ class WorldRestorerTest {
 
         WorldRestorer restorer = new WorldRestorer(
                 worldRepo,
+                profileRepo,
                 archiveRepo,
                 archiveStorage,
                 null,
@@ -328,6 +337,7 @@ class WorldRestorerTest {
 
         WorldRestorer restorer = new WorldRestorer(
                 worldRepo,
+                profileRepo,
                 archiveRepo,
                 archiveStorage,
                 null,
@@ -343,5 +353,154 @@ class WorldRestorerTest {
 
         assertThat(result.success()).isFalse();
         assertThat(result.message()).containsIgnoringCase("state");
+    }
+
+    @Test
+    @DisplayName("restoring a world returns its players' inventories with it (FR-36, D17)")
+    void restoringAWorldPreservesInventories_FR36() throws Exception {
+        StorageClientSettings s3Settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(s3Settings)) {
+            LocalObjectCache cache = new LocalObjectCache(tempDir.resolve("cache-inv"), PlainFileCloner.INSTANCE);
+            SnapshotEngine snapshotEngine =
+                    new SnapshotEngine(store, cache, new SnapshotCopier(PlainFileCloner.INSTANCE, 2));
+            ArchiveStorage s3ArchiveStorage = ArchiveStorage.s3(store);
+
+            Path sourceFixture = tempDir.resolve("fixture-inv");
+            WorldId worldId = WorldFixture.materialize(sourceFixture);
+            UUID owner = UUID.randomUUID();
+            UUID member = UUID.randomUUID();
+
+            Path packTarget = tempDir.resolve("inv.tar.zst");
+            ArchivePacker.PackResult pack = ArchivePacker.pack(
+                    List.of(
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder()),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_nether"),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_the_end")),
+                    packTarget,
+                    true);
+            String archiveKey = "worlds/" + worldId.value() + "/archive/inv.tar.zst";
+            s3ArchiveStorage.uploadArchive(archiveKey, packTarget);
+
+            byte[] ownerPayload = "owner-diamonds".getBytes(StandardCharsets.UTF_8);
+            byte[] memberPayload = "member-diamonds".getBytes(StandardCharsets.UTF_8);
+            onDb(() -> {
+                worldRepo.create(worldId, owner, "inventory-world", 12345L, 5000, Visibility.PRIVATE);
+                worldRepo.markReadyAndPlayed(worldId);
+                // The profiles the world had when it was last played, keyed to the
+                // generation it was played under — which is what a commit does.
+                long played = worldRepo.findById(worldId).orElseThrow().generation();
+                profileRepo.commit(worldId, played, 1, Map.of(owner, ownerPayload, member, memberPayload));
+                worldRepo.transitionToArchived(
+                        worldId, archiveKey, pack.sizeBytes(), pack.checksum(), Platform.BUILD_DATA_VERSION);
+                return null;
+            });
+
+            WorldRestorer restorer = new WorldRestorer(
+                    worldRepo,
+                    profileRepo,
+                    archiveRepo,
+                    s3ArchiveStorage,
+                    snapshotEngine,
+                    store,
+                    scratchRoot,
+                    FOLDERS,
+                    NetworkPolicy::defaults,
+                    "node-1",
+                    Platform.BUILD_DATA_VERSION,
+                    "26.2");
+
+            WorldRestorer.RestoreResult result = onDb(() -> restorer.restoreWorld(worldId, null));
+            assertThat(result.success()).isTrue();
+
+            // FR-15b reads the (generation, sequence) out of manifest_key and loads
+            // the profiles named by it. Restored at a hardcoded (0, 1), that lookup
+            // found nothing and every member was issued a fresh inventory.
+            PlayerWorld restored = onDb(() -> worldRepo.findById(worldId).orElseThrow());
+            ProfileRepository.Snapshot named = snapshotOf(restored.manifestKey());
+            assertThat(named.generation()).isEqualTo(restored.generation());
+
+            assertThat(onDb(() -> profileRepo.load(worldId, owner, named)))
+                    .get()
+                    .extracting(ProfileRepository.StoredProfile::data)
+                    .isEqualTo(ownerPayload);
+            assertThat(onDb(() -> profileRepo.load(worldId, member, named)))
+                    .get()
+                    .extracting(ProfileRepository.StoredProfile::data)
+                    .isEqualTo(memberPayload);
+        }
+    }
+
+    @Test
+    @DisplayName("two restores do not write the same manifest key (MN-3)")
+    void twoRestoresDoNotWriteTheSameManifestKey_MN3() throws Exception {
+        StorageClientSettings s3Settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(s3Settings)) {
+            LocalObjectCache cache = new LocalObjectCache(tempDir.resolve("cache-twice"), PlainFileCloner.INSTANCE);
+            SnapshotEngine snapshotEngine =
+                    new SnapshotEngine(store, cache, new SnapshotCopier(PlainFileCloner.INSTANCE, 2));
+            ArchiveStorage s3ArchiveStorage = ArchiveStorage.s3(store);
+
+            Path sourceFixture = tempDir.resolve("fixture-twice");
+            WorldId worldId = WorldFixture.materialize(sourceFixture);
+            UUID owner = UUID.randomUUID();
+
+            Path packTarget = tempDir.resolve("twice.tar.zst");
+            ArchivePacker.PackResult pack = ArchivePacker.pack(
+                    List.of(
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder()),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_nether"),
+                            WorldFixture.dimensionFolder(sourceFixture, worldId.folder() + "_the_end")),
+                    packTarget,
+                    true);
+            String archiveKey = "worlds/" + worldId.value() + "/archive/twice.tar.zst";
+            s3ArchiveStorage.uploadArchive(archiveKey, packTarget);
+
+            onDb(() -> {
+                worldRepo.create(worldId, owner, "twice-world", 12345L, 5000, Visibility.PRIVATE);
+                worldRepo.markReadyAndPlayed(worldId);
+                worldRepo.transitionToArchived(
+                        worldId, archiveKey, pack.sizeBytes(), pack.checksum(), Platform.BUILD_DATA_VERSION);
+                return null;
+            });
+
+            WorldRestorer restorer = new WorldRestorer(
+                    worldRepo,
+                    profileRepo,
+                    archiveRepo,
+                    s3ArchiveStorage,
+                    snapshotEngine,
+                    store,
+                    scratchRoot,
+                    FOLDERS,
+                    NetworkPolicy::defaults,
+                    "node-1",
+                    Platform.BUILD_DATA_VERSION,
+                    "26.2");
+
+            String first = onDb(() -> restorer.restoreWorld(worldId, null)).manifestKey();
+
+            // Archive and restore the same world again.
+            onDb(() -> {
+                worldRepo.transitionToArchived(
+                        worldId, archiveKey, pack.sizeBytes(), pack.checksum(), Platform.BUILD_DATA_VERSION);
+                return null;
+            });
+            String second = onDb(() -> restorer.restoreWorld(worldId, null)).manifestKey();
+
+            // MN-3: manifest keys are write-once. Both restores used to write
+            // 0-1.json, so the second silently replaced the first with different
+            // content while old manifests still referenced the objects it named.
+            assertThat(second).isNotNull().isNotEqualTo(first);
+            assertThat(store.exists(first)).isTrue();
+            assertThat(store.exists(second)).isTrue();
+        }
+    }
+
+    /** The {@code (generation, sequence)} FR-15b parses out of a manifest key. */
+    private static ProfileRepository.Snapshot snapshotOf(String manifestKey) {
+        String name = manifestKey.substring(manifestKey.lastIndexOf('/') + 1).replace(".json", "");
+        int dash = name.indexOf('-');
+        return new ProfileRepository.Snapshot(
+                Long.parseLong(name.substring(0, dash)), Integer.parseInt(name.substring(dash + 1)));
     }
 }

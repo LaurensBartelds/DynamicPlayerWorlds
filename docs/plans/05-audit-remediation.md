@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B and C complete (R0–R15), plus R21. Next is R22, then Phase D from R16.
+Status: in progress — Phases A, B and C complete (R0–R15), plus R21 and R22. Next is R23, then Phase D from R16.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -162,7 +162,7 @@ to hold for an `Error` too.
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
-| E | R21–R23 | Storage-model correctness. **R21 done.** |
+| E | R21–R23 | Storage-model correctness. **R21, R22 done.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
 ---
@@ -990,24 +990,41 @@ debris inside the world's folders and an unrelated file outside them, asserts th
 first goes and the second stays; reverted, the debris survives.
 `DirtyScannerTest#aDeletedFileLeavesTheObservedSet` covers the scanner half.
 
-#### R22 — A restore preserves profiles and its generation (D17)
+#### R22 — A restore preserves profiles and its generation (D17) — **DONE**
 
 **Requirement:** FR-36, FR-15b, MN-3.
-**Files:** `backend/storage/WorldRestorer.java`, `core/db/PlayerWorldRepository.java`.
+**Files:** `backend/storage/WorldRestorer.java`, `core/db/PlayerWorldRepository.java`,
+`core/db/ProfileRepository.java`.
 
-Two bugs in one place. The restore snapshot is written at a hardcoded
-`generation = 0, sequence = 1`, so (a) `ProfileListener` parses `(0,1)` out of
-the resulting `manifest_key`, finds no profile rows, and issues every member a
+Two bugs in one place. The restore snapshot was written at a hardcoded
+`generation = 0, sequence = 1`, so (a) `ProfileListener` parsed `(0,1)` out of
+the resulting `manifest_key`, found no profile rows, and issued every member a
 fresh profile — a silent, total inventory wipe on every restore; and (b) MN-3's
-write-once manifest key is violated, because a second restore rewrites the same
+write-once manifest key was violated, because a second restore rewrote the same
 `0-1.json` object with different content.
 
-Carry the generation `transitionToRestoring` just granted into the snapshot, and
-re-key the newest surviving profile snapshot onto the restore's
-`(generation, sequence)` inside `completeRestore`'s transaction.
+**Landed.** `transitionToRestoring` returns the generation it granted instead of
+a bare boolean, and the restore writes its snapshot under that generation at
+sequence 1. The generation is fresh every time, so no manifest exists under it
+and the key is written once. `completeRestore` takes the resulting
+`(generation, sequence)` and a `ProfileRepository`, and re-keys each member's
+newest surviving profile onto it inside the transaction that moves
+`manifest_key` — the same one-transaction rule, and the same shape, as
+`commitSnapshot`'s R10 re-key. Strictly older rows only, so a retried restore
+carries the payloads forward rather than re-keying the ones it just wrote.
 
-**Failing test first:** `restoringAWorldPreservesInventories_FR36`, and
-`twoRestoresDoNotWriteTheSameManifestKey_MN3`.
+**Also fixed here**, because it is the same defect on the neighbouring branch: a
+node without object storage wrote `manifest_key = "local"`. Nothing reads that
+sentinel, so under R10's rule FR-15b parsed it for a `(generation, sequence)`,
+failed, and refused every member with an eject. The column now stays null, which
+is what every other path in that mode means by it.
+
+**Failing test first (proven by temporary revert):**
+`WorldRestorerTest#restoringAWorldPreservesInventories_FR36` archives a world
+with two members' profiles and asserts both load at the snapshot the restored
+`manifest_key` names; against the hardcoded `(0,1)` the lookup finds nothing.
+`#twoRestoresDoNotWriteTheSameManifestKey_MN3` restores the same world twice and
+asserts the two keys differ and both objects survive.
 **Acceptance:** the milestone-11 round trip returns a world *and* its players'
 inventories.
 

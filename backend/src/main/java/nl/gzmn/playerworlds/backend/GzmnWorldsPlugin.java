@@ -770,6 +770,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 identity.dataVersion());
         WorldRestorer worldRestorer = new WorldRestorer(
                 new PlayerWorldRepository(openedDatabase),
+                new ProfileRepository(openedDatabase),
                 new ArchiveRepository(openedDatabase),
                 archiveStorage,
                 snapshotEngine,

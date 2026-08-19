@@ -17,6 +17,7 @@ import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.ArchiveRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.WorldArchive;
 import nl.gzmn.playerworlds.core.model.WorldId;
@@ -49,7 +50,20 @@ public final class WorldRestorer {
 
     private static final Logger log = LoggerFactory.getLogger(WorldRestorer.class);
 
+    /**
+     * The sequence a restore's snapshot is written at.
+     *
+     * <p>One, not zero, and it has to agree with the sequence the profile rows are
+     * re-keyed onto: FR-15b loads profiles by the {@code (generation, sequence)}
+     * parsed out of {@code manifest_key}, so the two are the same pair or the
+     * inventories are unreachable. The generation is fresh — {@code
+     * transitionToRestoring} bumped it — so no manifest exists under it and MN-3's
+     * write-once key holds.
+     */
+    private static final int RESTORE_SEQUENCE = 1;
+
     private final PlayerWorldRepository worlds;
+    private final ProfileRepository profiles;
     private final ArchiveRepository archiveRepo;
     private final ArchiveStorage archiveStorage;
     private final @Nullable SnapshotEngine snapshotEngine;
@@ -72,7 +86,11 @@ public final class WorldRestorer {
             long liveStorageBytes,
             @Nullable String message) {
 
-        public static RestoreResult ok(String manifestKey, long liveStorageBytes) {
+        /**
+         * @param manifestKey the snapshot the restore committed, or {@code null}
+         *     on a node with no object storage, where there is no manifest to name
+         */
+        public static RestoreResult ok(@Nullable String manifestKey, long liveStorageBytes) {
             return new RestoreResult(true, manifestKey, liveStorageBytes, null);
         }
 
@@ -83,6 +101,7 @@ public final class WorldRestorer {
 
     public WorldRestorer(
             PlayerWorldRepository worlds,
+            ProfileRepository profiles,
             ArchiveRepository archiveRepo,
             ArchiveStorage archiveStorage,
             @Nullable SnapshotEngine snapshotEngine,
@@ -94,6 +113,7 @@ public final class WorldRestorer {
             int nodeDataVersion,
             String nodeMcVersion) {
         this.worlds = Objects.requireNonNull(worlds, "worlds");
+        this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.archiveRepo = Objects.requireNonNull(archiveRepo, "archiveRepo");
         this.archiveStorage = Objects.requireNonNull(archiveStorage, "archiveStorage");
         this.snapshotEngine = snapshotEngine;
@@ -133,14 +153,19 @@ public final class WorldRestorer {
 
         // 1. Acquire lease and advance state to RESTORING
         NetworkPolicy currentPolicy = policy.get();
+        final long generation;
         try {
-            boolean acquired = worlds.transitionToRestoring(worldId, nodeId, currentPolicy.leaseDuration());
-            if (!acquired) {
+            Optional<Long> granted = worlds.transitionToRestoring(worldId, nodeId, currentPolicy.leaseDuration());
+            if (granted.isEmpty()) {
                 return RestoreResult.error("Could not acquire lease for restore; world may be leased to another node");
             }
+            // R22: the generation the transition granted, not zero. The snapshot
+            // below is written under it and the profiles are re-keyed onto it.
+            generation = granted.get();
         } catch (SQLException e) {
             return RestoreResult.error("Failed to acquire lease for restore: " + e.getMessage());
         }
+        ProfileRepository.Snapshot restoreSnapshot = new ProfileRepository.Snapshot(generation, RESTORE_SEQUENCE);
 
         // 2. Fetch latest archive record
         final WorldArchive archive;
@@ -194,7 +219,7 @@ public final class WorldRestorer {
         }
 
         // 7. Generate snapshot and upload objects
-        String manifestKey;
+        @Nullable String manifestKey;
         long liveStorageBytes;
         if (snapshotEngine != null && objectStore != null) {
             try {
@@ -205,8 +230,8 @@ public final class WorldRestorer {
                 SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
                         tempExtractDir,
                         worldId,
-                        0L,
-                        1,
+                        generation,
+                        RESTORE_SEQUENCE,
                         archive.dataVersion(),
                         nodeMcVersion,
                         Map.of(),
@@ -224,7 +249,12 @@ public final class WorldRestorer {
             try {
                 copyDirectoryRecursively(tempExtractDir, scratchRoot);
                 liveStorageBytes = calculateDirectorySize(tempExtractDir);
-                manifestKey = "local";
+                // No object storage, so there is no manifest and manifest_key
+                // stays null — which is what every other path in this mode means
+                // by it. Writing a "local" sentinel made FR-15b's load path parse
+                // it for a (generation, sequence), fail, and refuse every member
+                // under R10's orphan rule.
+                manifestKey = null;
             } catch (Exception e) {
                 deleteDirectoryRecursively(tempExtractDir);
                 deleteQuietly(tempArchive);
@@ -235,7 +265,13 @@ public final class WorldRestorer {
         // 8. Complete restore in database
         try {
             boolean completed = worlds.completeRestore(
-                    worldId, manifestKey, liveStorageBytes, archive.dataVersion(), nodeMcVersion);
+                    worldId,
+                    manifestKey,
+                    liveStorageBytes,
+                    archive.dataVersion(),
+                    nodeMcVersion,
+                    restoreSnapshot,
+                    profiles);
             if (!completed) {
                 deleteDirectoryRecursively(tempExtractDir);
                 deleteQuietly(tempArchive);

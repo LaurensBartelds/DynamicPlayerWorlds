@@ -214,6 +214,51 @@ public final class ProfileRepository extends Repository {
     }
 
     /**
+     * Copies each player's newest surviving profile onto {@code target} (D17, FR-36).
+     *
+     * <p>The archive-and-restore case. FR-31 states the model the rest of the
+     * system is built on — the world's id never changes, so "profiles, bans and
+     * members survive intact" — and archival changes the id no more than a
+     * transfer does. But a restore commits a snapshot in a <em>new</em>
+     * generation, and FR-15b loads profiles by the {@code (generation, sequence)}
+     * in {@code manifest_key}, so without this every member's inventory becomes
+     * unreachable the moment their world comes back: rows still there, keyed to a
+     * snapshot nothing points at any more.
+     *
+     * <p>Strictly older rows only, so a retried restore re-keys the same payloads
+     * rather than the ones it wrote last time; {@code ON CONFLICT DO NOTHING} then
+     * leaves anything already written for {@code target} alone.
+     *
+     * @return rows inserted
+     */
+    public int rekeyLatestSnapshot(Connection connection, WorldId worldId, Snapshot target) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(target, "target");
+        return execute(connection, """
+                INSERT INTO player_world_profile (
+                  world_id, uuid, generation, sequence, format_version, data
+                )
+                SELECT world_id, uuid, ?, ?, format_version, data
+                  FROM (
+                    SELECT DISTINCT ON (uuid)
+                           world_id, uuid, format_version, data
+                      FROM player_world_profile
+                     WHERE world_id = ?
+                       AND (generation, sequence) < (?, ?)
+                     ORDER BY uuid, generation DESC, sequence DESC
+                  ) latest
+                ON CONFLICT (world_id, uuid, generation, sequence) DO NOTHING
+                """, statement -> {
+            statement.setLong(1, target.generation());
+            statement.setInt(2, target.sequence());
+            statement.setObject(3, worldId.value());
+            statement.setLong(4, target.generation());
+            statement.setInt(5, target.sequence());
+        });
+    }
+
+    /**
      * The sequence the next commit in this generation should use.
      *
      * <p>Read inside the committing transaction so two commits cannot pick the

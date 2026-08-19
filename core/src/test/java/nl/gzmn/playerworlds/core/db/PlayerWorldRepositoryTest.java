@@ -1039,18 +1039,21 @@ class PlayerWorldRepositoryTest {
         boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
         assertThat(archived).isTrue();
 
-        boolean restoring = worlds.transitionToRestoring(id, "node-restore", Duration.ofMinutes(5));
-        assertThat(restoring).isTrue();
+        Optional<Long> restoring = worlds.transitionToRestoring(id, "node-restore", Duration.ofMinutes(5));
+        assertThat(restoring).isPresent();
 
         PlayerWorld world = worlds.findById(id).orElseThrow();
         assertThat(world.state()).isEqualTo(WorldState.RESTORING);
         assertThat(world.assignedNode()).isEqualTo("node-restore");
         assertThat(world.generation()).isGreaterThanOrEqualTo(1L);
         assertThat(world.leaseExpires()).isNotNull();
+        // R22: the granted generation comes back, because the restore's snapshot
+        // has to be written under it rather than under a hardcoded zero.
+        assertThat(restoring).contains(world.generation());
 
-        // Second transition while active lease is held returns false
-        boolean second = worlds.transitionToRestoring(id, "other-node", Duration.ofMinutes(5));
-        assertThat(second).isFalse();
+        // Second transition while active lease is held grants nothing
+        Optional<Long> second = worlds.transitionToRestoring(id, "other-node", Duration.ofMinutes(5));
+        assertThat(second).isEmpty();
     }
 
     @Test
@@ -1062,15 +1065,18 @@ class PlayerWorldRepositoryTest {
         database.inTransaction(connection -> worlds.markReady(connection, id));
         boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
         assertThat(archived).isTrue();
-        boolean restoring = worlds.transitionToRestoring(id, "node-1", Duration.ofMinutes(5));
-        assertThat(restoring).isTrue();
+        long generation = worlds.transitionToRestoring(id, "node-1", Duration.ofMinutes(5))
+                .orElseThrow();
 
-        boolean completed = worlds.completeRestore(id, "worlds/" + id + "/manifest/0-1.json", 987654L, 3953, "1.21.4");
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot target = new ProfileRepository.Snapshot(generation, 1);
+        String manifestKey = "worlds/" + id + "/manifest/" + generation + "-1.json";
+        boolean completed = worlds.completeRestore(id, manifestKey, 987654L, 3953, "1.21.4", target, profiles);
         assertThat(completed).isTrue();
 
         PlayerWorld world = worlds.findById(id).orElseThrow();
         assertThat(world.state()).isEqualTo(WorldState.READY);
-        assertThat(world.manifestKey()).isEqualTo("worlds/" + id + "/manifest/0-1.json");
+        assertThat(world.manifestKey()).isEqualTo(manifestKey);
         assertThat(world.dataVersion()).isEqualTo(3953);
         assertThat(world.mcVersion()).isEqualTo("1.21.4");
         assertThat(world.assignedNode()).isNull();

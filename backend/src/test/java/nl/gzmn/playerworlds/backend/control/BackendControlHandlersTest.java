@@ -663,6 +663,7 @@ class BackendControlHandlersTest {
         nl.gzmn.playerworlds.backend.storage.WorldRestorer restorer =
                 new nl.gzmn.playerworlds.backend.storage.WorldRestorer(
                         new PlayerWorldRepository(database),
+                        new nl.gzmn.playerworlds.core.db.ProfileRepository(database),
                         new nl.gzmn.playerworlds.core.db.ArchiveRepository(database),
                         storage,
                         null,

@@ -1063,30 +1063,45 @@ public final class PlayerWorldRepository extends Repository {
      *
      * @return true if the world was transitioned and the lease granted to {@code node}
      */
-    public boolean transitionToRestoring(Connection connection, WorldId worldId, String node, Duration leaseDuration)
-            throws SQLException {
+    public Optional<Long> transitionToRestoring(
+            Connection connection, WorldId worldId, String node, Duration leaseDuration) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(node, "node");
         Objects.requireNonNull(leaseDuration, "leaseDuration");
-        return execute(connection, """
-                        UPDATE player_world
-                           SET state = 'RESTORING',
-                               assigned_node = ?,
-                               lease_expires = now() + (? * interval '1 second'),
-                               generation = generation + 1
-                         WHERE id = ?
-                           AND state IN ('ARCHIVED', 'RESTORING')
-                           AND (assigned_node IS NULL OR lease_expires < now())
-                        """, statement -> {
+        return queryOne(
+                connection,
+                """
+                UPDATE player_world
+                   SET state = 'RESTORING',
+                       assigned_node = ?,
+                       lease_expires = now() + (? * interval '1 second'),
+                       generation = generation + 1
+                 WHERE id = ?
+                   AND state IN ('ARCHIVED', 'RESTORING')
+                   AND (assigned_node IS NULL OR lease_expires < now())
+                RETURNING generation
+                """,
+                statement -> {
                     statement.setString(1, node);
                     statement.setLong(2, leaseDuration.toSeconds());
                     statement.setObject(3, worldId.value());
-                })
-                == 1;
+                },
+                row -> row.getLong("generation"));
     }
 
-    public boolean transitionToRestoring(WorldId worldId, String node, Duration leaseDuration) throws SQLException {
+    /**
+     * Takes a world into RESTORING and returns the generation it was granted.
+     *
+     * <p>The generation is returned rather than discarded because the restore's
+     * snapshot has to be written under it (R22). Written at a hardcoded
+     * generation 0 it violated MN-3's write-once manifest key — a second restore
+     * rewrote the same {@code 0-1.json} with different content — and FR-15b then
+     * looked for profiles at {@code (0, 1)}, found none, and issued every member a
+     * fresh inventory.
+     */
+    public Optional<Long> transitionToRestoring(WorldId worldId, String node, Duration leaseDuration)
+            throws SQLException {
         return database.inTransaction(connection -> transitionToRestoring(connection, worldId, node, leaseDuration));
     }
 
@@ -1139,19 +1154,22 @@ public final class PlayerWorldRepository extends Repository {
     public boolean completeRestore(
             Connection connection,
             WorldId worldId,
-            String manifestKey,
+            @Nullable String manifestKey,
             long storageBytes,
             int dataVersion,
-            String mcVersion)
+            String mcVersion,
+            ProfileRepository.Snapshot restoreSnapshot,
+            ProfileRepository profileRepository)
             throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(manifestKey, "manifestKey");
         Objects.requireNonNull(mcVersion, "mcVersion");
+        Objects.requireNonNull(restoreSnapshot, "restoreSnapshot");
+        Objects.requireNonNull(profileRepository, "profileRepository");
         if (storageBytes < 0) {
             throw new IllegalArgumentException("storageBytes must not be negative: " + storageBytes);
         }
-        return execute(connection, """
+        boolean advanced = execute(connection, """
                         UPDATE player_world
                            SET state = 'READY',
                                manifest_key = ?,
@@ -1171,13 +1189,37 @@ public final class PlayerWorldRepository extends Repository {
                     statement.setObject(5, worldId.value());
                 })
                 == 1;
+        if (!advanced) {
+            return false;
+        }
+        // D17 / FR-36: the profiles ride with the manifest pointer, in the one
+        // transaction, for the same reason MN-3a's commit does. A restore that
+        // moved manifest_key without them would return the world and leave every
+        // member's inventory keyed to a snapshot nothing points at any more.
+        profileRepository.rekeyLatestSnapshot(connection, worldId, restoreSnapshot);
+        return true;
     }
 
+    /** {@link #completeRestore(Connection, WorldId, String, long, int, String,
+     * ProfileRepository.Snapshot, ProfileRepository)} in its own transaction. */
     public boolean completeRestore(
-            WorldId worldId, String manifestKey, long storageBytes, int dataVersion, String mcVersion)
+            WorldId worldId,
+            @Nullable String manifestKey,
+            long storageBytes,
+            int dataVersion,
+            String mcVersion,
+            ProfileRepository.Snapshot restoreSnapshot,
+            ProfileRepository profileRepository)
             throws SQLException {
-        return database.inTransaction(
-                connection -> completeRestore(connection, worldId, manifestKey, storageBytes, dataVersion, mcVersion));
+        return database.inTransaction(connection -> completeRestore(
+                connection,
+                worldId,
+                manifestKey,
+                storageBytes,
+                dataVersion,
+                mcVersion,
+                restoreSnapshot,
+                profileRepository));
     }
 
     private static PlayerWorld mapRow(ResultSet row) throws SQLException {
