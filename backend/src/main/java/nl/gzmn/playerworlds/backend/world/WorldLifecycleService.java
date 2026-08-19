@@ -713,26 +713,46 @@ public final class WorldLifecycleService {
         return new UnloadOutcome.Complete(unloaded);
     }
 
-    /** Records a completed unload: deregisters, updates meters, writes the row. */
-    public void afterUnload(LoadedWorld loaded) {
+    /**
+     * Records a completed unload: deregisters, updates meters, writes the row.
+     *
+     * @return a future that completes once {@code last_played} is written and the
+     *     lease is released (MN-12). Callers that go on to do something the lease
+     *     governs — {@link nl.gzmn.playerworlds.backend.storage.WorldArchiver}
+     *     acquires it again immediately — must wait for it. Before this returned
+     *     anything, the release was fire-and-forget on the database executor, so
+     *     the archiver's own {@code acquireLease} usually lost to a lease that
+     *     had not been dropped yet and it went on to pack the world unleased,
+     *     which is the single thing FR-35's "acquires the lease first" exists to
+     *     prevent.
+     */
+    public CompletableFuture<Void> afterUnload(LoadedWorld loaded) {
         Objects.requireNonNull(loaded, "loaded");
         registry.unregister(loaded.id());
         membershipCache.invalidate(loaded.id());
         metrics.setWorldsLoaded(registry.size());
         events.info(LogEvent.WORLD_UNLOAD, "world unloaded: " + loaded.name(), loaded.id());
-        executors.db().execute(() -> {
-            try {
-                worlds.touchLastPlayed(loaded.id());
-                if (nodeId != null) {
-                    boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
-                    if (released) {
-                        events.info(LogEvent.LEASE_RELEASE, "lease released for world " + loaded.name(), loaded.id());
+        return CompletableFuture.runAsync(
+                () -> {
+                    try {
+                        worlds.touchLastPlayed(loaded.id());
+                        if (nodeId != null) {
+                            boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
+                            if (released) {
+                                events.info(
+                                        LogEvent.LEASE_RELEASE,
+                                        "lease released for world " + loaded.name(),
+                                        loaded.id());
+                            }
+                        }
+                    } catch (SQLException e) {
+                        log.warn(
+                                "could not record last_played or release lease after unloading world {}",
+                                loaded.id(),
+                                e);
                     }
-                }
-            } catch (SQLException e) {
-                log.warn("could not record last_played or release lease after unloading world {}", loaded.id(), e);
-            }
-        });
+                },
+                executors.db());
     }
 
     /**

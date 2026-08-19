@@ -14,9 +14,11 @@ import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
+import nl.gzmn.playerworlds.backend.world.WorldCacheLoader;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
+import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -31,7 +33,9 @@ import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.model.WorldSettings;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
@@ -275,12 +279,31 @@ class BackendControlHandlersTest {
     }
 
     @Test
-    void invalidateCacheInvalidatesMembershipCacheAndPolicyWithWorldId() throws Exception {
+    void invalidateCacheRefreshesMembershipFromTheRowWithWorldId() throws Exception {
+        // R4/D13. This used to assert the cache was *emptied*, which is what the
+        // handler did and what made /world promote demote the owner: a miss in
+        // MembershipCache answers VISITOR rather than "go and read", so an evicted
+        // entry on a loaded world is a wrong answer until the world unloads.
         MembershipCache membershipCache = new MembershipCache();
-        WorldId worldId = WorldId.random();
+        WorldSettingsCache settingsCache = new WorldSettingsCache();
+        PlayerWorldRepository worlds = new PlayerWorldRepository(database);
+        MembershipRepository members = new MembershipRepository(database);
+
         UUID owner = UUID.randomUUID();
+        UUID builder = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        var _ = offMain(() -> worlds.create(worldId, owner, "cache-refresh", 1L, 5000, Visibility.PRIVATE));
+
+        // Stale on purpose: the node cached the membership before the promotion.
         membershipCache.put(worldId, owner, Map.of(owner, Role.OWNER));
-        assertTrue(membershipCache.isCached(worldId));
+        assertThat(membershipCache.roleOf(worldId, builder)).isEmpty();
+
+        // The proxy's half of /world promote, already committed when the command
+        // reaches the node.
+        var _ = offMain(() -> database.inTransaction(
+                connection -> members.insertMember(connection, worldId, builder, Role.BUILDER, owner)));
+
+        WorldCacheLoader caches = new WorldCacheLoader(worlds, members, membershipCache, settingsCache);
 
         NetworkSettings networkSettings = new NetworkSettings(database);
         executors
@@ -295,7 +318,7 @@ class BackendControlHandlersTest {
                 .get();
         assertThat(networkSettings.policy()).isNotNull();
 
-        InvalidateCacheHandler handler = new InvalidateCacheHandler(networkSettings, membershipCache, Runnable::run);
+        InvalidateCacheHandler handler = new InvalidateCacheHandler(networkSettings, caches, null, Runnable::run);
 
         NodeCommand command = new NodeCommand(
                 2L,
@@ -311,27 +334,40 @@ class BackendControlHandlersTest {
                 0,
                 null);
 
-        CommandResult result = handler.handle(command);
+        CommandResult result = offMain(() -> handler.handle(command));
         assertTrue(result.isOk());
-        assertFalse(membershipCache.isCached(worldId));
+
+        // Refreshed, not emptied: the world is still cached, the owner is still
+        // the owner (FR-31a), and the promotion the command announced is visible.
+        assertTrue(membershipCache.isCached(worldId));
+        assertThat(membershipCache.roleOf(worldId, owner)).contains(Role.OWNER);
+        assertThat(membershipCache.roleOf(worldId, builder)).contains(Role.BUILDER);
     }
 
     @Test
-    void invalidateCacheClearsMembershipCacheWhenNoWorldId() {
+    void invalidateCacheDropsAWorldThatNoLongerExists() throws Exception {
+        // The one case where eviction is still right: the row is gone, so there
+        // is nothing authoritative left to answer from.
         MembershipCache membershipCache = new MembershipCache();
-        WorldId worldId1 = WorldId.random();
-        WorldId worldId2 = WorldId.random();
-        UUID owner = UUID.randomUUID();
-        membershipCache.put(worldId1, owner, Map.of(owner, Role.OWNER));
-        membershipCache.put(worldId2, owner, Map.of(owner, Role.OWNER));
-        assertEquals(2, membershipCache.size());
+        WorldSettingsCache settingsCache = new WorldSettingsCache();
+        WorldCacheLoader caches = new WorldCacheLoader(
+                new PlayerWorldRepository(database),
+                new MembershipRepository(database),
+                membershipCache,
+                settingsCache);
 
-        InvalidateCacheHandler handler = new InvalidateCacheHandler(null, membershipCache, Runnable::run);
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        membershipCache.put(worldId, owner, Map.of(owner, Role.OWNER));
+        settingsCache.put(worldId, WorldSettings.defaults().withPvp(true));
+        assertTrue(membershipCache.isCached(worldId));
+
+        InvalidateCacheHandler handler = new InvalidateCacheHandler(null, caches, null, Runnable::run);
 
         NodeCommand command = new NodeCommand(
                 3L,
                 "node-1",
-                null,
+                worldId,
                 null,
                 CommandKind.INVALIDATE_CACHE.name(),
                 "{}",
@@ -342,15 +378,14 @@ class BackendControlHandlersTest {
                 0,
                 null);
 
-        CommandResult result = handler.handle(command);
+        CommandResult result = offMain(() -> handler.handle(command));
         assertTrue(result.isOk());
         assertEquals(0, membershipCache.size());
     }
 
     @Test
     void ejectPlayerHandlesInvalidPayloadGracefully() {
-        MembershipCache membershipCache = new MembershipCache();
-        EjectPlayerHandler handler = new EjectPlayerHandler(membershipCache, null, null, null, null);
+        EjectPlayerHandler handler = new EjectPlayerHandler(loaderFor(new MembershipCache()), null, null, null, null);
 
         NodeCommand command = new NodeCommand(
                 4L,
@@ -371,14 +406,14 @@ class BackendControlHandlersTest {
     }
 
     @Test
-    void ejectPlayerInvalidatesMembershipCacheWhenWorldIdProvided() {
+    void ejectPlayerInvalidatesMembershipCacheWhenWorldIdProvided() throws Exception {
         MembershipCache membershipCache = new MembershipCache();
         WorldId worldId = WorldId.random();
         UUID owner = UUID.randomUUID();
         membershipCache.put(worldId, owner, Map.of(owner, Role.OWNER));
         assertTrue(membershipCache.isCached(worldId));
 
-        EjectPlayerHandler handler = new EjectPlayerHandler(membershipCache, null, null, null, null);
+        EjectPlayerHandler handler = new EjectPlayerHandler(loaderFor(membershipCache), null, null, null, null);
 
         UUID target = UUID.randomUUID();
         String payload = EjectPayload.format(target, "Kicked from world");
@@ -396,13 +431,13 @@ class BackendControlHandlersTest {
                 0,
                 null);
 
-        CommandResult result = handler.handle(command);
+        CommandResult result = offMain(() -> handler.handle(command));
         assertTrue(result.isOk());
         assertFalse(membershipCache.isCached(worldId));
     }
 
     @Test
-    void ejectPlayerMessagesOnlinePlayerWhenInTargetWorld() {
+    void ejectPlayerMessagesOnlinePlayerWhenInTargetWorld() throws Exception {
         MembershipCache membershipCache = new MembershipCache();
         WorldId worldId = WorldId.random();
         NodeCommandRepository nodeCommands = new NodeCommandRepository(database);
@@ -413,8 +448,8 @@ class BackendControlHandlersTest {
         PlayerMock player = server.addPlayer();
         player.teleport(worldMock.getSpawnLocation());
 
-        EjectPlayerHandler handler =
-                new EjectPlayerHandler(membershipCache, folders, executors, nodeCommands, NetworkPolicy::defaults);
+        EjectPlayerHandler handler = new EjectPlayerHandler(
+                loaderFor(membershipCache), folders, executors, nodeCommands, NetworkPolicy::defaults);
 
         String payload = EjectPayload.format(player.getUniqueId(), "Custom kick reason");
         NodeCommand command = new NodeCommand(
@@ -431,7 +466,7 @@ class BackendControlHandlersTest {
                 0,
                 null);
 
-        CommandResult result = handler.handle(command);
+        CommandResult result = offMain(() -> handler.handle(command));
         assertTrue(result.isOk());
 
         String message = PlainTextComponentSerializer.plainText().serialize(player.nextComponentMessage());
@@ -510,5 +545,27 @@ class BackendControlHandlersTest {
         CommandResult result = handler.handle(command);
         assertFalse(result.isOk());
         assertEquals("ERROR:missing world_id", result.wire());
+    }
+
+    /**
+     * Runs {@code work} off the thread this test marked as main.
+     *
+     * <p>The control plane dispatches handlers on its poll or LISTEN thread,
+     * never on the tick thread, so a handler doing JDBC inline is correct in
+     * production. This test class calls {@code MainThread.enter} on itself, so
+     * without this the NFR-2 guard fires on the test thread rather than on a
+     * real defect.
+     */
+    private <T> T offMain(java.util.concurrent.Callable<T> work) throws Exception {
+        return executors.db().submit(work).get();
+    }
+
+    /** A loader over the caches under test, backed by the real schema. */
+    private WorldCacheLoader loaderFor(MembershipCache membershipCache) {
+        return new WorldCacheLoader(
+                new PlayerWorldRepository(database),
+                new MembershipRepository(database),
+                membershipCache,
+                new WorldSettingsCache());
     }
 }

@@ -2,8 +2,15 @@ package nl.gzmn.playerworlds.backend;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.tngtech.archunit.core.domain.JavaClass;
+import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaModifier;
+import com.tngtech.archunit.core.importer.ClassFileImporter;
+import com.tngtech.archunit.core.importer.ImportOption;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
+import java.util.stream.Collectors;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -12,6 +19,8 @@ import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -81,6 +90,43 @@ class PluginSmokeTest {
         assertThat(plugin.policy().maxWorldsPerPlayer()).isEqualTo(NetworkPolicy.DEFAULT_MAX_WORLDS_PER_PLAYER);
         assertThat(plugin.menuService()).isNotNull();
         assertThat(plugin.menuChannel()).isNotNull();
+    }
+
+    @Test
+    @DisplayName("every Listener in the backend is registered at enable (R1)")
+    void everyListenerInTheBackendIsRegisteredAtEnable() throws Exception {
+        // The guard, not the instance. CommandGuardListener implemented FR-21 and
+        // FR-22 completely, passed its own unit suite, and was never constructed —
+        // so /list and /tell leaked presence between two worlds on one node for
+        // three milestones. An unregistered listener is invisible to every other
+        // kind of test by construction, which is what makes this assertion worth
+        // more than the one-line registration it protects.
+        TestDatabase.openFresh().close();
+        GzmnWorldsPlugin plugin = MockBukkit.loadWithConfig(SmokePlugin.class, config(TestDatabase.settings()));
+        assertThat(plugin.isEnabled()).isTrue();
+
+        Set<String> registered = HandlerList.getRegisteredListeners(plugin).stream()
+                .map(listener -> listener.getListener().getClass().getName())
+                .collect(Collectors.toSet());
+
+        JavaClasses backend = new ClassFileImporter()
+                .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+                .importPackages("nl.gzmn.playerworlds.backend");
+
+        Set<String> declared = backend.stream()
+                .filter(candidate -> candidate.isAssignableTo(Listener.class))
+                .filter(candidate -> !candidate.getModifiers().contains(JavaModifier.ABSTRACT))
+                .filter(JavaClass::isTopLevelClass)
+                .map(JavaClass::getFullName)
+                .collect(Collectors.toSet());
+
+        assertThat(declared)
+                .as("sanity: the importer found the listener classes at all")
+                .isNotEmpty();
+        assertThat(registered)
+                .as("every Listener in :backend must be registered by onEnable; "
+                        + "an unregistered one is dead code that still passes its own tests")
+                .containsAll(declared);
     }
 
     @Test

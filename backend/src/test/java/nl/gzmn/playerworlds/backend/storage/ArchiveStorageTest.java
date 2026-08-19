@@ -148,4 +148,40 @@ class ArchiveStorageTest {
     void rejectsInvalidConstructors() {
         assertThatThrownBy(() -> new ArchiveStorage(null, null)).isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    @DisplayName("verifyStoredArchive catches a corruption that preserves the length (R2, FR-35)")
+    void verifyStoredArchiveCatchesLengthPreservingCorruption() throws IOException {
+        Path localRoot = tempDir.resolve("verify_archives");
+        ArchiveStorage storage = ArchiveStorage.filesystem(localRoot);
+
+        Path source = tempDir.resolve("verify.tar.zst");
+        Files.write(source, "the quick brown fox jumps over the lazy dog".getBytes(StandardCharsets.UTF_8));
+        String expected = ArchivePacker.computeSha256(source);
+
+        String key = "worlds/pw-verify/archive/pw-verify.tar.zst";
+        storage.uploadArchive(key, source);
+
+        assertThat(storage.verifyStoredArchive(key, expected))
+                .as("an intact archive verifies")
+                .isTrue();
+
+        // The corruption archival has to catch: same length, different bytes.
+        // This is what a bad multipart part looks like, and it is exactly what a
+        // size comparison — the only check FR-35's step 6 used to perform —
+        // cannot see.
+        Path stored = localRoot.resolve(key);
+        byte[] bytes = Files.readAllBytes(stored);
+        long lengthBefore = bytes.length;
+        bytes[bytes.length / 2] ^= (byte) 0xFF;
+        Files.write(stored, bytes);
+
+        assertThat(Files.size(stored))
+                .as("the corruption must not change the length, or the size check would catch it")
+                .isEqualTo(lengthBefore);
+        assertThat(storage.getArchiveSize(key)).isEqualTo(lengthBefore);
+        assertThat(storage.verifyStoredArchive(key, expected))
+                .as("a length-preserving corruption must fail verification (FR-35)")
+                .isFalse();
+    }
 }

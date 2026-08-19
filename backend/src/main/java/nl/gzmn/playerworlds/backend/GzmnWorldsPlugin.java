@@ -40,6 +40,7 @@ import nl.gzmn.playerworlds.backend.storage.MaintenanceTask;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
 import nl.gzmn.playerworlds.backend.storage.WorldArchiver;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
+import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
@@ -48,6 +49,7 @@ import nl.gzmn.playerworlds.backend.world.PortalListener;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
 import nl.gzmn.playerworlds.backend.world.VisibilityGroups;
 import nl.gzmn.playerworlds.backend.world.VisibilityListener;
+import nl.gzmn.playerworlds.backend.world.WorldCacheLoader;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
@@ -463,6 +465,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
         MembershipCache membershipCache = new MembershipCache();
         WorldSettingsCache settingsCache = new WorldSettingsCache();
+        // The fill half of both caches (FR-9, FR-9e, FR-31a). INVALIDATE_CACHE
+        // used to evict only, and a miss in these two is a wrong answer rather
+        // than an absence.
+        WorldCacheLoader worldCaches =
+                new WorldCacheLoader(worldRepository, membershipRepository, membershipCache, settingsCache);
         GroupChatBuffer chatBuffer = new GroupChatBuffer();
         PendingTransferRepository transferRepository = new PendingTransferRepository(openedDatabase);
         NodeCommandRepository nodeCommands = new NodeCommandRepository(openedDatabase);
@@ -485,6 +492,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldCommitService,
                 objectCache);
 
+        // One instance, shared: FR-18's grouping and FR-22's allow-list must
+        // agree about who is in which group, and two copies of the rule are two
+        // chances for them to disagree.
+        VisibilityGroups visibilityGroups = new VisibilityGroups(worldFolders);
+
         getServer()
                 .getPluginManager()
                 .registerEvents(
@@ -494,21 +506,30 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .getPluginManager()
                 .registerEvents(new RoleEnforcementListener(worldFolders, membershipCache, settingsCache), this);
         // FR-18/19/20: Visibility and group chat buffer
-        getServer()
-                .getPluginManager()
-                .registerEvents(new VisibilityListener(this, new VisibilityGroups(worldFolders), chatBuffer), this);
+        getServer().getPluginManager().registerEvents(new VisibilityListener(this, visibilityGroups, chatBuffer), this);
+        // FR-21/FR-22: the command allow-list inside a player world. Without this
+        // registration the class is dead code and vanilla /list and /tell leak
+        // presence between two worlds on one node, which is the whole of §5.5.
+        getServer().getPluginManager().registerEvents(new CommandGuardListener(visibilityGroups, this::policy), this);
         // FR-11: routed join listener
         TransferJoinListener transferListener = new TransferJoinListener(
                 node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy);
         getServer().getPluginManager().registerEvents(transferListener, this);
 
-        getServer().getScheduler().runTaskTimer(this, () -> {
-            for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
-                if (!worldFolders.isPlayerWorld(player.getWorld().getName())) {
-                    transferListener.processPlayer(player);
-                }
-            }
-        }, 10L, 10L);
+        getServer()
+                .getScheduler()
+                .runTaskTimer(
+                        this,
+                        () -> {
+                            for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
+                                if (!worldFolders.isPlayerWorld(
+                                        player.getWorld().getName())) {
+                                    transferListener.processPlayer(player);
+                                }
+                            }
+                        },
+                        10L,
+                        10L);
         // FR-15: profile commit triggers & manifest snapshot restores
         getServer()
                 .getPluginManager()
@@ -611,8 +632,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 worldRegistry,
                 lifecycle,
                 worldFolders,
-                membershipCache,
-                settingsCache,
+                worldCaches,
                 openedDatabase,
                 nodeCommands,
                 pools,
@@ -661,8 +681,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldRegistry worldRegistry,
             WorldLifecycleService lifecycle,
             WorldFolders worldFolders,
-            MembershipCache membershipCache,
-            WorldSettingsCache settingsCache,
+            WorldCacheLoader worldCaches,
             Database openedDatabase,
             NodeCommandRepository nodeCommands,
             PluginExecutors pools,
@@ -698,9 +717,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         plane.register(
                 CommandKind.INVALIDATE_CACHE,
                 new InvalidateCacheHandler(
-                        new NetworkSettings(openedDatabase), membershipCache, settingsCache, pools.db()));
+                        new NetworkSettings(openedDatabase), worldCaches, worldRegistry, pools.db()));
         EjectPlayerHandler ejectHandler =
-                new EjectPlayerHandler(membershipCache, worldFolders, pools, nodeCommands, this::policy);
+                new EjectPlayerHandler(worldCaches, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);
         plane.register(CommandKind.EJECT_PLAYER, ejectHandler);
 

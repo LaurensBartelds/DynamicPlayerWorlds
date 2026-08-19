@@ -379,7 +379,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             onMain(() -> {
                 switch (lifecycle.unloadOnMain(live.get())) {
                     case nl.gzmn.playerworlds.backend.world.UnloadOutcome.Complete complete -> {
-                        lifecycle.afterUnload(live.get());
+                        var _ = lifecycle.afterUnload(live.get());
                         success(sender, "unloaded '" + name + "' " + complete.unloaded());
                     }
                     case nl.gzmn.playerworlds.backend.world.UnloadOutcome.Blocked blocked ->

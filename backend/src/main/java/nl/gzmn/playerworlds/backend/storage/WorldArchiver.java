@@ -137,14 +137,47 @@ public final class WorldArchiver {
             return ArchiveResult.error("Cannot archive world in state " + world.state());
         }
 
-        // 1. Unload if loaded locally
+        // 1. Give the world up if this node is holding it.
+        //
+        // The outcome is acted on, not logged. Blocked means a dimension refused
+        // to unload and the world is still ticking; CommitFailed means the final
+        // snapshot did not land and WorldHandoff deliberately left the world
+        // loaded and leased. Continuing past either packs a live world folder
+        // with ArchivePacker — bypassing the whole of MN-5a's quiesce-snapshot-
+        // verify — and then deletes it from under three loaded Bukkit worlds.
         if (registry != null && registry.find(worldId).isPresent()) {
-            if (handoff != null) {
-                try {
-                    handoff.release(worldId, 0, "Archiving world")
-                            .get(policy.get().commitTimeout().plusSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
-                } catch (Exception e) {
-                    log.warn("Error unloading world {} during archival: {}", worldId, e.getMessage());
+            if (handoff == null) {
+                return ArchiveResult.error(
+                        "World " + worldId + " is loaded here but there is no handoff to release it");
+            }
+            final WorldHandoff.Outcome released;
+            try {
+                released = handoff.release(worldId, 0, "Archiving world")
+                        .get(policy.get().commitTimeout().plusSeconds(10).toMillis(), TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ArchiveResult.error("Interrupted while unloading world " + worldId + " for archival");
+            } catch (Exception e) {
+                return ArchiveResult.error("Could not unload world " + worldId + " for archival: " + e.getMessage());
+            }
+            switch (released) {
+                case WorldHandoff.Outcome.Released ignored -> {
+                    // The lease is released too: WorldHandoff waits for it, so the
+                    // acquisition below is not racing a queued release.
+                }
+                case WorldHandoff.Outcome.NotHeld ignored -> {
+                    // Fenced or migrated while we were asking. Nothing loaded here.
+                }
+                case WorldHandoff.Outcome.Blocked blocked -> {
+                    return ArchiveResult.error("Cannot archive world " + worldId + ": dimension "
+                            + blocked.dimension() + " would not unload ("
+                            + String.join(", ", blocked.blockers())
+                            + "). The world is still loaded; FR-40 retries it.");
+                }
+                case WorldHandoff.Outcome.CommitFailed failed -> {
+                    return ArchiveResult.error("Cannot archive world " + worldId
+                            + ": the final snapshot commit failed (" + failed.detail()
+                            + "). The world is still loaded and leased; FR-40 retries it.");
                 }
             }
         }
@@ -249,7 +282,13 @@ public final class WorldArchiver {
             return ArchiveResult.error("Failed to upload archive: " + e.getMessage());
         }
 
-        // 6. Verify stored archive
+        // 6. Verify the stored archive (FR-35, CONTRIBUTING rule 8).
+        //
+        // Steps 7 and 8 delete the live folders and the whole per-world object
+        // prefix, so this is the last moment at which a second copy of the world
+        // exists. FR-35 is explicit that the deletions happen "only after the
+        // checksum of the written archive verifies" — a length comparison is not
+        // that, and a corrupt part with the right length passes it.
         try {
             if (!archiveStorage.exists(archiveKey)) {
                 throw new StorageException("Archive verification failed: key not found " + archiveKey);
@@ -258,6 +297,10 @@ public final class WorldArchiver {
             if (storedSize != packResult.sizeBytes()) {
                 throw new StorageException(
                         "Archive size mismatch: expected " + packResult.sizeBytes() + ", got " + storedSize);
+            }
+            if (!archiveStorage.verifyStoredArchive(archiveKey, packResult.checksum())) {
+                throw new StorageException("Archive checksum mismatch for " + archiveKey + "; expected "
+                        + packResult.checksum() + ". Nothing has been deleted.");
             }
         } catch (Exception e) {
             archiveStorage.deleteArchive(archiveKey);

@@ -256,8 +256,24 @@ public final class WorldHandoff {
                         // Deregisters, records last_played and releases the lease
                         // (MN-12). Release comes last, so no other node can acquire
                         // the world before its final snapshot is the current one.
-                        lifecycle.afterUnload(loaded);
-                        done.complete(new Outcome.Released(playersMoved));
+                        //
+                        // Waited on rather than fired and forgotten: `Released` is
+                        // read by callers that act on the lease straight afterwards
+                        // (FR-35's archival re-acquires it), so completing this
+                        // future before the release lands would make the outcome's
+                        // own name untrue.
+                        var _ = lifecycle.afterUnload(loaded).whenComplete((released, failure) -> {
+                            if (failure != null) {
+                                // The world is down either way; the lease will
+                                // expire on its own (MN-12). Report it rather
+                                // than claiming a clean release.
+                                log.warn(
+                                        "world {} unloaded but its lease release did not complete",
+                                        loaded.id(),
+                                        failure);
+                            }
+                            done.complete(new Outcome.Released(playersMoved));
+                        });
                     }
                     case UnloadOutcome.Blocked blocked ->
                         done.complete(new Outcome.Blocked(blocked.dimension(), blocked.blockers()));

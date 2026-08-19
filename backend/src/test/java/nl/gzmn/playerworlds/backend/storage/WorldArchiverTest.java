@@ -348,4 +348,178 @@ class WorldArchiverTest {
         assertThat(result.success()).isFalse();
         assertThat(result.message()).containsIgnoringCase("owner");
     }
+
+    @Test
+    @DisplayName("refuses to delete anything when the stored archive fails its checksum (R2, FR-35)")
+    void archiveRefusesWhenStoredArchiveIsCorrupt() throws Exception {
+        WorldId worldId = WorldFixture.materialize(scratchRoot);
+        UUID owner = UUID.randomUUID();
+
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "corrupt-world", 12345L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        CorruptingObjectStore store = new CorruptingObjectStore();
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                ArchiveStorage.s3(store),
+                scratchRoot,
+                null,
+                registry,
+                null,
+                NetworkPolicy::defaults,
+                "node-1",
+                Platform.BUILD_DATA_VERSION);
+
+        WorldArchiver.ArchiveResult result = onDb(() -> archiver.archiveWorld(worldId, owner));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.message()).contains("checksum");
+
+        // The point of the check: at this moment the archive is the only copy the
+        // world would have had, so nothing may have been deleted.
+        assertThat(Files.exists(scratchRoot.resolve(worldId.folder())))
+                .as("the live overworld folder must survive a failed verification (FR-35)")
+                .isTrue();
+
+        PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());
+        assertThat(after.state())
+                .as("a world whose archive did not verify stays archivable, not ARCHIVED")
+                .isNotEqualTo(WorldState.ARCHIVED);
+        assertThat(onDb(() -> archiveRepo.findLatestByWorld(worldId)))
+                .as("no archive row may be recorded for an archive that did not verify")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("refuses to pack a world it is still holding and cannot give up (R3, FR-35, MN-5a)")
+    void archiveRefusesToPackAWorldItCouldNotGiveUp() throws Exception {
+        WorldId worldId = WorldFixture.materialize(scratchRoot);
+        UUID owner = UUID.randomUUID();
+
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "still-loaded", 12345L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        LoadedWorld loaded = new LoadedWorld(worldId, owner, "still-loaded", 12345L, 5000);
+        loaded.markMaterialised(DimensionKind.OVERWORLD);
+        registry.register(loaded);
+
+        // No handoff: the world is loaded here and there is no way to release it.
+        // The old code logged that and packed the live folder anyway, which reads
+        // region files the server is still writing (MN-5a) and then deletes them
+        // from under a loaded Bukkit world.
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                null,
+                registry,
+                null,
+                NetworkPolicy::defaults,
+                "node-1",
+                Platform.BUILD_DATA_VERSION);
+
+        WorldArchiver.ArchiveResult result = onDb(() -> archiver.archiveWorld(worldId, owner));
+
+        assertThat(result.success()).isFalse();
+        assertThat(Files.exists(scratchRoot.resolve(worldId.folder())))
+                .as("a world that is still loaded must not have its folders deleted")
+                .isTrue();
+        PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());
+        assertThat(after.state()).isNotEqualTo(WorldState.ARCHIVED);
+    }
+
+    /**
+     * An {@link nl.gzmn.playerworlds.core.storage.ObjectStore} that stores what it
+     * is given but flips one byte of every uploaded file, keeping the length.
+     *
+     * <p>This is the failure FR-35's verification exists for and the one a size
+     * comparison cannot see: a corrupted multipart part has exactly the right
+     * length. Modelled at the ObjectStore seam because that is where a real
+     * transfer corruption would occur.
+     */
+    private static final class CorruptingObjectStore implements nl.gzmn.playerworlds.core.storage.ObjectStore {
+
+        private final java.util.Map<String, byte[]> objects = new java.util.concurrent.ConcurrentHashMap<>();
+
+        @Override
+        public void putObject(String key, Path sourceFile) {
+            try {
+                byte[] bytes = Files.readAllBytes(sourceFile);
+                if (bytes.length > 0) {
+                    bytes[bytes.length / 2] ^= (byte) 0xFF;
+                }
+                objects.put(key, bytes);
+            } catch (java.io.IOException e) {
+                throw new nl.gzmn.playerworlds.core.storage.StorageException("put failed: " + key, e);
+            }
+        }
+
+        @Override
+        public void putBytes(String key, byte[] bytes, String contentType) {
+            objects.put(key, bytes.clone());
+        }
+
+        @Override
+        public void getObject(String key, Path destinationFile) {
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new nl.gzmn.playerworlds.core.storage.StorageException("missing: " + key);
+            }
+            try {
+                Path parent = destinationFile.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+                Files.write(destinationFile, bytes);
+            } catch (java.io.IOException e) {
+                throw new nl.gzmn.playerworlds.core.storage.StorageException("get failed: " + key, e);
+            }
+        }
+
+        @Override
+        public byte[] getBytes(String key) {
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new nl.gzmn.playerworlds.core.storage.StorageException("missing: " + key);
+            }
+            return bytes.clone();
+        }
+
+        @Override
+        public boolean exists(String key) {
+            return objects.containsKey(key);
+        }
+
+        @Override
+        public void deleteObject(String key) {
+            var _ = objects.remove(key);
+        }
+
+        @Override
+        public void deletePrefix(String prefix) {
+            var _ = objects.keySet().removeIf(key -> key.startsWith(prefix));
+        }
+
+        @Override
+        public long getObjectSize(String key) {
+            byte[] bytes = objects.get(key);
+            if (bytes == null) {
+                throw new nl.gzmn.playerworlds.core.storage.StorageException("missing: " + key);
+            }
+            return bytes.length;
+        }
+
+        @Override
+        public void close() {
+            objects.clear();
+        }
+    }
 }

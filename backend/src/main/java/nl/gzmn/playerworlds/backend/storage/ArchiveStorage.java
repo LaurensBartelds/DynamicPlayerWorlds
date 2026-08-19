@@ -212,6 +212,56 @@ public final class ArchiveStorage {
     }
 
     /**
+     * Re-reads a stored archive and compares its SHA-256 against {@code expected}.
+     *
+     * <p>FR-35 and CONTRIBUTING rule 8 both make this the gate on destruction:
+     * archival deletes the live folders <em>and</em> the per-world object prefix,
+     * so at the moment it runs the archive is about to become the only copy of
+     * the world. A length comparison does not establish that the bytes arrived —
+     * a truncated-then-padded multipart upload, or a corrupted part, has exactly
+     * the right length.
+     *
+     * <p>The check reads the object back rather than asking the store for a
+     * checksum, because {@link ObjectStore} exposes none and the filesystem
+     * backend has none to expose. That costs one extra download of an archive
+     * that was just uploaded. It is the cheapest honest option here; an S3-only
+     * fast path using {@code ChecksumAlgorithm.SHA256} on the upload would avoid
+     * the transfer and is worth having once {@code ObjectStore} can carry it.
+     *
+     * @return true when the stored bytes hash to {@code expected}
+     */
+    public boolean verifyStoredArchive(String key, String expected) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(expected, "expected");
+
+        if (objectStore == null) {
+            Path stored = resolveLocalPath(key);
+            if (!Files.isRegularFile(stored)) {
+                log.error("archive verification failed: {} is not a regular file", key);
+                return false;
+            }
+            return ArchivePacker.verifyChecksum(stored, expected);
+        }
+
+        Path scratch = null;
+        try {
+            scratch = Files.createTempFile("archive-verify-", ".tmp");
+            objectStore.getObject(key, scratch);
+            return ArchivePacker.verifyChecksum(scratch, expected);
+        } catch (IOException e) {
+            throw new StorageException("Failed to read back archive for verification: " + key, e);
+        } finally {
+            if (scratch != null) {
+                try {
+                    Files.deleteIfExists(scratch);
+                } catch (IOException ignored) {
+                    log.debug("Could not delete verification scratch file: {}", scratch);
+                }
+            }
+        }
+    }
+
+    /**
      * Deletes all archive objects matching the specified prefix.
      *
      * @param prefix key prefix to purge

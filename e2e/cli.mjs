@@ -72,12 +72,16 @@ async function executeGradle(tasks = [':backend:shadowJar', ':proxy:shadowJar', 
   console.log(`==> Executing Gradle (${tasks.join(' ')})...`);
 
   return new Promise((resolve, reject) => {
+    // Absolute path, not the bare name: cmd.exe does not reliably resolve
+    // gradlew.bat from `cwd` when the repository path contains a space, and the
+    // failure reads as "'gradlew.bat' is not recognized" — which looks like a
+    // missing wrapper rather than a lookup problem.
     const child = isWin
-      ? spawn('cmd.exe', ['/c', 'gradlew.bat', '--console=plain', ...tasks], {
+      ? spawn('cmd.exe', ['/c', gradlewPath, '--console=plain', ...tasks], {
           cwd: REPO_ROOT,
           stdio: 'inherit',
         })
-      : spawn('./gradlew', ['--console=plain', ...tasks], {
+      : spawn(gradlewPath, ['--console=plain', ...tasks], {
           cwd: REPO_ROOT,
           stdio: 'inherit',
         });
@@ -201,6 +205,13 @@ function stagePaperNode(node, motd, downloadsDir, backendJar, harnessJar) {
   const gzmnWorldsConfigDir = path.join(dest, 'plugins', 'gzmn-worlds');
   fs.mkdirSync(gzmnWorldsConfigDir, { recursive: true });
   const postgresPassword = process.env.E2E_POSTGRES_PASSWORD || 'e2e-postgres-not-for-prod';
+  // Object storage is the source of truth at rest (MN-1), and with it disabled
+  // the harness never exercised snapshots, manifests, the commit point (MN-3a)
+  // or archival to S3 at all — the whole of spec §12.2. The compose stack has
+  // always run MinIO; only the nodes were never pointed at it.
+  const minioUser = process.env.E2E_MINIO_USER || 'gzmn-e2e';
+  const minioPassword = process.env.E2E_MINIO_PASSWORD || 'gzmn-e2e-secret';
+  const minioBucket = process.env.E2E_MINIO_BUCKET || 'gzmn-worlds';
   const gzmnConfig = `node:
   id: ${node}
   address: ${node}:25565
@@ -219,7 +230,13 @@ storage:
   quarantine-path: quarantine
   min-free-space-bytes: 0
   s3:
-    enabled: false
+    enabled: true
+    endpoint: http://minio:9000
+    region: us-east-1
+    access-key: "${minioUser}"
+    secret-key: "${minioPassword}"
+    bucket: "${minioBucket}"
+    path-style-access: true
 
 metrics:
   bind: 0.0.0.0

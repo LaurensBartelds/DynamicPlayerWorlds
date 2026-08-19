@@ -7,7 +7,7 @@ import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
-import nl.gzmn.playerworlds.backend.world.MembershipCache;
+import nl.gzmn.playerworlds.backend.world.WorldCacheLoader;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -33,19 +33,19 @@ public final class EjectPlayerHandler implements CommandHandler {
 
     private static final Logger log = LoggerFactory.getLogger(EjectPlayerHandler.class);
 
-    private final MembershipCache membershipCache;
+    private final WorldCacheLoader caches;
     private final @Nullable WorldFolders folders;
     private final @Nullable PluginExecutors executors;
     private final @Nullable NodeCommandRepository nodeCommands;
     private final @Nullable Supplier<NetworkPolicy> policy;
 
     public EjectPlayerHandler(
-            MembershipCache membershipCache,
+            WorldCacheLoader caches,
             @Nullable WorldFolders folders,
             @Nullable PluginExecutors executors,
             @Nullable NodeCommandRepository nodeCommands,
             @Nullable Supplier<NetworkPolicy> policy) {
-        this.membershipCache = Objects.requireNonNull(membershipCache, "membershipCache");
+        this.caches = Objects.requireNonNull(caches, "caches");
         this.folders = folders;
         this.executors = executors;
         this.nodeCommands = nodeCommands;
@@ -56,7 +56,11 @@ public final class EjectPlayerHandler implements CommandHandler {
     public CommandResult handle(NodeCommand command) {
         WorldId worldId = command.worldId();
         if (worldId != null) {
-            membershipCache.invalidate(worldId);
+            // A kick or ban changed the membership this node is enforcing on, so
+            // it has to be re-read. Dropping it would leave every player in the
+            // world — the owner included — enforced as a VISITOR (FR-9). Inline,
+            // for the CP-5 reason in InvalidateCacheHandler.
+            caches.refreshQuietly(worldId);
         }
 
         Optional<EjectPayload> payload = EjectPayload.parse(command.payloadJson());

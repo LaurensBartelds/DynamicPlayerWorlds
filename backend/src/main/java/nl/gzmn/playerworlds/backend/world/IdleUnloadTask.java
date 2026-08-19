@@ -186,7 +186,7 @@ public final class IdleUnloadTask implements Runnable {
                     world.id(),
                     world.idleSweeps(),
                     complete.unloaded());
-            lifecycle.afterUnload(world);
+            var _ = lifecycle.afterUnload(world);
             return;
         }
 
