@@ -33,13 +33,13 @@ export async function run(ctx) {
   const startWait = Date.now();
   while (Date.now() - startWait < 15000) {
     const rows = await ctx.db.query('SELECT * FROM player_world WHERE name = $1', [worldName]);
-    if (rows.length > 0) {
+    if (rows.length > 0 && rows[0].state === 'READY') {
       worldRecord = rows[0];
       break;
     }
     await new Promise((r) => setTimeout(r, 500));
   }
-  assert.ok(worldRecord, `World '${worldName}' must exist in player_world`);
+  assert.ok(worldRecord, `World '${worldName}' must exist in player_world and be READY`);
   const worldId = worldRecord.id;
 
   // Reconnect Alice if disconnected during world creation transfer
