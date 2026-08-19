@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B started (R6 landed). Next is R7.
+Status: in progress — Phase A complete; Phase B in progress (R6–R7 landed). Next is R8.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -517,31 +517,30 @@ store fails phase-2 uploads; without restore the staged departure is gone and
 the next commit cannot re-capture the player (already in lobby); with restore
 the departure remains and the retry persists emerald×9 / level 11.
 
-#### R7 — A fenced world stops committing, and stops re-uploading itself
+#### R7 — A fenced world stops committing, and stops re-uploading itself — DONE
 
 **Requirement:** MN-10, MN-10a, MN-13.
-**Files:** `backend/lease/SelfFencingHandler.java`,
-`backend/profile/WorldCommitService.java`, `backend/profile/ProfileListener.java`.
+**Files:** `backend/profile/WorldCommitService.java`,
+`backend/world/WorldLifecycleService.java` (load clears fence).
+`SelfFencingHandler` already called `forget`; no change required there.
+`ProfileListener` still calls `commitDeparture` on eject — the refuse is in the
+service.
 
-`selfFence` unregisters the world and calls `commitService.forget(worldId)`,
-then teleports every player out on the main thread. That teleport raises
-`PlayerChangedWorldEvent`, `ProfileListener` answers with `commitDeparture`, and
-`commitDeparture` recreates the queue entry `forget` just dropped. Because
-`forget` also cleared `cachedManifests`, the new commit's baseline is null, so
-`DirtyScanner` reports the entire world as dirty and `SnapshotEngine` re-copies,
-re-hashes and re-uploads all of it — from a scratch directory that
-`QuarantineManager.quarantineWorld` is concurrently moving on the io executor.
-Phase 3 then falls back to `generation = 0`, `commitSnapshot` returns false, and
-`selfFence(COMMIT_FENCED)` fires again.
+**Landed.** `WorldCommitService` keeps a `fencedWorlds` set. `forget` (called
+only from `selfFence`) adds the id and still drops queue / cached manifest /
+pending departures. `requestCommit` and `commitDeparture` return an already-
+failed future while fenced, before staging or SnapshotEngine work.
+`allowCommits` clears the fence on a successful load (materialize, warm load,
+and create).
 
-Add a fenced-world set to `WorldCommitService`, consulted at the top of
-`requestCommit` and `commitDeparture`, returning an already-failed future rather
-than starting work. `forget` populates it; a successful load clears it.
-
-**Failing test first:** `fencedWorldRefusesFurtherCommits_MN10a`, asserting no
-`SnapshotEngine` interaction after `selfFence`.
-**Acceptance:** a fence with players inside performs zero uploads and exactly
-one quarantine move.
+**Failing test first (proven by temporary revert of the refuse checks):**
+`WorldCommitServiceTest#fencedWorldRefusesFurtherCommits_MN10a` — after
+`forget`, without the gates `requestCommit` is still in-flight (work started)
+rather than already failed; with the gates both futures fail immediately, zero
+further uploads, and no pending departure is staged. `allowCommits` then lets a
+reload commit again.
+**Acceptance:** a fence with players inside performs zero uploads after
+`forget`; quarantine remains a single move owned by `SelfFencingHandler`.
 
 #### R8 — `generation` stops doubling as a "not found" sentinel
 

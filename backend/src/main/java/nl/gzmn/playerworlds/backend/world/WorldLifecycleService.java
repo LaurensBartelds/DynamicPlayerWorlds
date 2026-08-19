@@ -343,6 +343,8 @@ public final class WorldLifecycleService {
                             .thenCompose(ignored -> promoteToReady(row, loaded))
                             .thenApply(outcome -> {
                                 if (commitService != null && outcome instanceof CreateOutcome.Created) {
+                                    // R7: a prior fence on this id (if any) no longer applies.
+                                    commitService.allowCommits(row.id());
                                     var _ = commitService.requestCommit(row.id());
                                 }
                                 return outcome;
@@ -547,6 +549,8 @@ public final class WorldLifecycleService {
                 WorldDownloader.Result dlResult = worldDownloader.materialize(manifest, worldContainer);
                 isCold = !dlResult.wasWarm();
                 if (commitService != null) {
+                    // R7: successful materialize clears any prior self-fence on this id.
+                    commitService.allowCommits(row.id());
                     commitService.cacheManifest(row.id(), manifest);
                 }
             } catch (Exception e) {
@@ -604,6 +608,10 @@ public final class WorldLifecycleService {
                                 worlds.touchLastPlayed(row.id());
                             } catch (SQLException e) {
                                 log.warn("could not record last_played for world {}", row.id(), e);
+                            }
+                            // R7: warm path (no object-store materialize) still clears a prior fence.
+                            if (commitService != null) {
+                                commitService.allowCommits(row.id());
                             }
                             cacheMembership(row);
                             metrics.setWorldsLoaded(registry.size());

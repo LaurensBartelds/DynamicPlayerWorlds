@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -71,6 +72,15 @@ public final class WorldCommitService {
 
     private final Map<WorldId, Manifest> cachedManifests = new ConcurrentHashMap<>();
     private final Map<WorldId, Map<UUID, byte[]>> pendingDepartures = new ConcurrentHashMap<>();
+
+    /**
+     * Worlds this node has self-fenced (MN-10a / R7).
+     *
+     * <p>{@link #forget} adds the id when the lease is lost; {@link #requestCommit}
+     * and {@link #commitDeparture} refuse while it is present. A later successful
+     * load calls {@link #allowCommits} so the world can commit again on this node.
+     */
+    private final Set<WorldId> fencedWorlds = ConcurrentHashMap.newKeySet();
 
     public WorldCommitService(
             ProfileRepository profiles,
@@ -172,14 +182,46 @@ public final class WorldCommitService {
      *     finished, so a caller that needs its own state durable can wait
      */
     public CompletableFuture<Void> requestCommit(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        if (fencedWorlds.contains(worldId)) {
+            // MN-10a / R7: selfFence already dropped this world. Do not re-upload
+            // a scratch directory QuarantineManager is moving, and do not fire
+            // COMMIT_FENCED again from a generation=0 fallback (see R8).
+            return CompletableFuture.failedFuture(
+                    new StorageException("refusing commit for fenced world " + worldId + " (MN-10a)"));
+        }
         return queue.request(worldId);
     }
 
-    /** Drops a world's commit queue, cached manifest, and pending departures once it has unloaded. */
+    /**
+     * Drops a world's commit queue, cached manifest, and pending departures, and
+     * marks it fenced so departures and periodic sync cannot start new work (R7).
+     *
+     * <p>Called from {@link SelfFencingHandler#selfFence} only — not from a clean unload.
+     */
     public void forget(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        fencedWorlds.add(worldId);
         queue.forget(worldId);
         cachedManifests.remove(worldId);
         pendingDepartures.remove(worldId);
+    }
+
+    /**
+     * Clears the MN-10a fence after a successful load so commits may run again.
+     *
+     * <p>A fenced world is quarantined; the next time this (or another) node loads
+     * it from the last good snapshot, commits are legitimate again.
+     */
+    public void allowCommits(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        fencedWorlds.remove(worldId);
+    }
+
+    /** Visible for tests and diagnostics: whether {@link #forget} has fenced this world. */
+    public boolean isFenced(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return fencedWorlds.contains(worldId);
     }
 
     /** Whether a commit is running, for the unload path and for tests. */
@@ -235,7 +277,7 @@ public final class WorldCommitService {
                     .handle((ignored, failure) -> {
                         if (failure != null) {
                             restoreDepartures(worldId, phase1.takenDepartures());
-                            throw new CompletionException(failure);
+                            throw unwrapFailure(failure);
                         }
                         clearTakenDepartures(worldId, phase1.takenDepartures());
                         return null;
@@ -262,7 +304,7 @@ public final class WorldCommitService {
                         .handle((phase3, failure) -> {
                             if (failure != null) {
                                 restoreDepartures(p1.worldId(), p1.takenDepartures());
-                                throw new CompletionException(failure);
+                                throw unwrapFailure(failure);
                             }
                             // Success — the payloads were written with the snapshot. Drop only
                             // the ones this commit took; a newer departure keeps its entry.
@@ -270,6 +312,23 @@ public final class WorldCommitService {
                             phase4Completion(phase3);
                             return null;
                         }));
+    }
+
+    /**
+     * Re-throw a stage failure without nesting {@link CompletionException}.
+     *
+     * <p>{@code thenApplyAsync} already wraps checked/runtime failures; wrapping
+     * again would make {@code join().getCause()} a CompletionException instead of
+     * the real {@link StorageException} (MN-3a / LeaseFencingTest).
+     */
+    private static RuntimeException unwrapFailure(Throwable failure) {
+        if (failure instanceof CompletionException ce) {
+            return ce;
+        }
+        if (failure instanceof RuntimeException re) {
+            return re;
+        }
+        return new CompletionException(failure);
     }
 
     private CompletableFuture<Phase1Result> phase1MainThread(WorldId worldId) {
@@ -546,6 +605,14 @@ public final class WorldCommitService {
     public CompletableFuture<Void> commitDeparture(WorldId worldId, Player player, String dimensionName) {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(player, "player");
+        // R7 / MN-10a: fence check before capture or staging. The eject teleport
+        // that follows selfFence raises PlayerChangedWorldEvent → this method;
+        // starting work here re-creates the queue entry forget just dropped and
+        // re-uploads a world directory already being quarantined.
+        if (fencedWorlds.contains(worldId)) {
+            return CompletableFuture.failedFuture(
+                    new StorageException("refusing departure commit for fenced world " + worldId + " (MN-10a)"));
+        }
         UUID uuid = player.getUniqueId();
         byte[] payload = ProfileCodec.encode(profileService.capture(player, dimensionName));
 

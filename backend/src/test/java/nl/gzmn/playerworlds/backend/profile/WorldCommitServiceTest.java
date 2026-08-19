@@ -361,6 +361,144 @@ class WorldCommitServiceTest {
         assertThat(items).anyMatch(item -> item != null && item.getType() == Material.EMERALD && item.getAmount() == 9);
     }
 
+    /**
+     * R7 / MN-10a: after self-fence, {@code forget} must stop further commits.
+     *
+     * <p>Without a fenced-world set, the teleport that ejects players raises
+     * {@code PlayerChangedWorldEvent} → {@code commitDeparture}, which re-queues a
+     * full snapshot of a directory {@code QuarantineManager} is already moving.
+     */
+    @Test
+    @DisplayName("fenced world refuses further commits and performs zero uploads (MN-10a / R7)")
+    void fencedWorldRefusesFurtherCommits_MN10a() throws Exception {
+        Path scratch = tempDir.resolve("scratch");
+        WorldId worldId = WorldFixture.materialize(scratch);
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "fenced-world", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        WorldMock overworld = server.addSimpleWorld(overworldName);
+        WorldMock lobby = server.addSimpleWorld("lobby");
+
+        PlayerMock player = server.addPlayer();
+        player.teleport(overworld.getSpawnLocation());
+        player.getInventory().addItem(new ItemStack(Material.DIAMOND, 4));
+        player.setLevel(3);
+
+        java.util.concurrent.atomic.AtomicInteger uploads = new java.util.concurrent.atomic.AtomicInteger();
+        ObjectStore countingStore = new ObjectStore() {
+            @Override
+            public void putObject(String key, Path sourceFile) {
+                uploads.incrementAndGet();
+                objectStore.putObject(key, sourceFile);
+            }
+
+            @Override
+            public void putBytes(String key, byte[] bytes, String contentType) {
+                uploads.incrementAndGet();
+                objectStore.putBytes(key, bytes, contentType);
+            }
+
+            @Override
+            public void getObject(String key, Path destinationFile) {
+                objectStore.getObject(key, destinationFile);
+            }
+
+            @Override
+            public byte[] getBytes(String key) {
+                return objectStore.getBytes(key);
+            }
+
+            @Override
+            public boolean exists(String key) {
+                return objectStore.exists(key);
+            }
+
+            @Override
+            public void deleteObject(String key) {
+                objectStore.deleteObject(key);
+            }
+
+            @Override
+            public void deletePrefix(String prefix) {
+                objectStore.deletePrefix(prefix);
+            }
+
+            @Override
+            public long getObjectSize(String key) {
+                return objectStore.getObjectSize(key);
+            }
+
+            @Override
+            public void close() {
+                // underlying store closed in tearDown
+            }
+        };
+
+        SnapshotEngine countingEngine =
+                new SnapshotEngine(countingStore, objectCache, new SnapshotCopier(PlainFileCloner.INSTANCE));
+        WorldCommitService service = new WorldCommitService(
+                profileRepo,
+                worldRepo,
+                profileService,
+                folders,
+                platform,
+                executors,
+                countingEngine,
+                NetworkPolicy::defaults,
+                scratch,
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
+
+        // Seed a cached manifest so a post-fence commit would otherwise try a dirty scan/upload.
+        var seed = service.requestCommit(worldId);
+        flushExecutors();
+        seed.join();
+        flushExecutors();
+        int uploadsAfterSeed = uploads.get();
+        assertThat(uploadsAfterSeed).isPositive();
+        assertThat(service.cachedManifest(worldId)).isPresent();
+
+        // selfFence path: unregister is external; forget is what the handler calls.
+        service.forget(worldId);
+        assertThat(service.cachedManifest(worldId)).isEmpty();
+        assertThat(service.isFenced(worldId))
+                .as("R7: forget marks the world fenced so departures cannot re-queue work")
+                .isTrue();
+
+        // Eject: player leaves the world → ProfileListener would call commitDeparture.
+        player.teleport(lobby.getSpawnLocation());
+        var departure = service.commitDeparture(worldId, player, overworldName);
+        var periodic = service.requestCommit(worldId);
+        flushExecutors();
+
+        assertThat(departure)
+                .as("R7: commitDeparture after fence must already be failed")
+                .isCompletedExceptionally();
+        assertThat(periodic)
+                .as("R7: requestCommit after fence must already be failed")
+                .isCompletedExceptionally();
+        assertThat(service.hasPendingDeparture(worldId, player.getUniqueId()))
+                .as("R7: departure must not be staged for a fenced world")
+                .isFalse();
+        assertThat(uploads.get())
+                .as("R7 / MN-10a: zero SnapshotEngine uploads after fence")
+                .isEqualTo(uploadsAfterSeed);
+
+        // A later successful load clears the fence so commits can run again.
+        service.allowCommits(worldId);
+        assertThat(service.isFenced(worldId)).isFalse();
+        var afterReload = service.requestCommit(worldId);
+        flushExecutors();
+        afterReload.join();
+        flushExecutors();
+        assertThat(uploads.get()).isGreaterThan(uploadsAfterSeed);
+    }
+
     @Test
     @DisplayName("committing departing player captures their profile and commits atomically")
     void commitDeparturePersistsDepartingPlayer() throws Exception {
