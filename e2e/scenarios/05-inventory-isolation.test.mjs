@@ -14,7 +14,7 @@ import { withTestContext } from '../lib/test-context.mjs';
  */
 export async function run(ctx) {
   console.log('  [05-inventory-isolation] Spawning Alice into lobby...');
-  const alice = await ctx.spawnBot('Alice');
+  let alice = await ctx.spawnBot('Alice');
   assert.ok(alice.connected, 'Alice should be connected');
 
   // Verify initial inventory

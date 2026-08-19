@@ -13,8 +13,7 @@ import { withTestContext } from '../lib/test-context.mjs';
  * - Tests /world delete testworld with confirmation and asserts proper teardown.
  */
 export async function run(ctx) {
-  console.log('  [02-world-lifecycle] Spawning Alice...');
-  const alice = await ctx.spawnBot('Alice');
+  let alice = await ctx.spawnBot('Alice');
   assert.ok(alice.connected, 'Alice should be connected to the proxy');
 
   const worldName = 'testworld';
@@ -60,6 +59,22 @@ export async function run(ctx) {
     console.log(`  [02-world-lifecycle] Received creation chat: ${chatMsg}`);
   } catch {
     console.log('  [02-world-lifecycle] Note: Chat message verified via database row.');
+  }
+
+  // Wait until world completes creation and is READY before deleting
+  const readyStartTime = Date.now();
+  while (Date.now() - readyStartTime < 10000) {
+    const rows = await ctx.db.query('SELECT * FROM player_world WHERE name = $1', [worldName]);
+    if (rows && rows.length > 0 && rows[0].state === 'READY') {
+      console.log('  [02-world-lifecycle] World is READY.');
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  // Reconnect Alice if disconnected during world transfer
+  if (!alice.connected) {
+    alice = await ctx.spawnBot('Alice');
   }
 
   // Test /world delete

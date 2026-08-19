@@ -38,6 +38,9 @@ export class TestContext {
     }
     this.bots = [];
 
+    // Allow proxy to cleanly close client sessions
+    await new Promise((r) => setTimeout(r, 500));
+
     try {
       await this.db.close();
     } catch {
@@ -49,6 +52,7 @@ export class TestContext {
 export async function withTestContext(testFn) {
   const ctx = new TestContext();
   try {
+    await ctx.resetState();
     await testFn(ctx);
   } finally {
     await ctx.cleanup();

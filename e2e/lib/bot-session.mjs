@@ -1,7 +1,16 @@
+import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { config } from './config.mjs';
 
 const require = createRequire(import.meta.url);
+
+export function getOfflineUuid(username) {
+  const hash = crypto.createHash('md5').update(`OfflinePlayer:${username}`, 'utf8').digest();
+  hash[6] = (hash[6] & 0x0f) | 0x30;
+  hash[8] = (hash[8] & 0x3f) | 0x80;
+  const hex = hash.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 // Patch mineflayer version definitions so paper 26.x/adjacent schemas can initialize cleanly
 const mfVersion = require('mineflayer/lib/version');
@@ -13,6 +22,8 @@ if (mfVersion && mfVersion.testedVersions && !mfVersion.testedVersions.includes(
 const mineflayer = require('mineflayer');
 
 export class BotSession {
+  static uuidRegistry = new Map();
+
   constructor(usernameOrOptions = {}, maybeOptions = {}) {
     let options = {};
     let username = 'E2EPlayer';
@@ -36,6 +47,9 @@ export class BotSession {
     this.bot = null;
     this.connected = false;
     this._spawned = false;
+    this.tablistPlayers = new Set([this.username]);
+
+    BotSession.uuidRegistry.set(getOfflineUuid(this.username), this.username);
   }
 
   _initBot() {
@@ -59,6 +73,57 @@ export class BotSession {
         }
         return origWrite(name, params);
       };
+
+      this.bot._client.prependListener('update_time', (packet) => {
+        if (packet) {
+          if (typeof packet.age === 'bigint') {
+            const high = Number(packet.age >> 32n);
+            const low = Number(packet.age & 0xFFFFFFFFn);
+            packet.age = [high, low];
+          } else if (!Array.isArray(packet.age)) {
+            packet.age = [0, 0];
+          }
+          if (typeof packet.time === 'bigint') {
+            const high = Number(packet.time >> 32n);
+            const low = Number(packet.time & 0xFFFFFFFFn);
+            packet.time = [high, low];
+          } else if (!Array.isArray(packet.time)) {
+            const ticks = (packet.clockUpdates && packet.clockUpdates[0] && packet.clockUpdates[0].totalTicks) || 0;
+            packet.time = [0, Number(ticks)];
+          }
+        }
+      });
+
+      this.bot._client.on('player_info', (packet) => {
+        if (packet && Array.isArray(packet.data)) {
+          for (const item of packet.data) {
+            let name = (item.player && item.player.name) || null;
+            if (!name && item.uuid) {
+              name = BotSession.uuidRegistry.get(item.uuid);
+            }
+            if (name) {
+              this.tablistPlayers.add(name);
+              if (this.bot.players) {
+                this.bot.players[name] = { username: name, uuid: item.uuid };
+              }
+            }
+          }
+        }
+      });
+
+      this.bot._client.on('player_remove', (packet) => {
+        if (packet && Array.isArray(packet.players)) {
+          for (const uuid of packet.players) {
+            const name = BotSession.uuidRegistry.get(uuid);
+            if (name) {
+              this.tablistPlayers.delete(name);
+              if (this.bot.players) {
+                delete this.bot.players[name];
+              }
+            }
+          }
+        }
+      });
     }
 
     this.bot.on('message', (jsonMsg) => {
@@ -76,6 +141,7 @@ export class BotSession {
     this.bot.on('spawn', () => {
       this._spawned = true;
       this.connected = true;
+      this.tablistPlayers.add(this.username);
     });
 
     this.bot.on('end', () => {
@@ -83,80 +149,106 @@ export class BotSession {
     });
   }
 
-  connect(timeoutMs = 60000) {
-    if (!this.bot) {
-      this._initBot();
+  async connect(timeoutMs = 60000, maxRetries = 3) {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (!this.bot) {
+        this._initBot();
+      }
+
+      try {
+        await new Promise((resolve, reject) => {
+          if (this._spawned) {
+            return resolve(this);
+          }
+
+          let timer = null;
+
+          const onSpawn = () => {
+            cleanup();
+            this._spawned = true;
+            this.connected = true;
+            resolve(this);
+          };
+
+          const onError = (err) => {
+            if (!this._spawned) {
+              cleanup();
+              reject(err || new Error(`Bot '${this.username}' encountered error before spawn`));
+            }
+          };
+
+          const onEnd = (reason) => {
+            if (!this._spawned) {
+              cleanup();
+              reject(new Error(`Bot '${this.username}' disconnected before spawn: ${reason || 'unknown'}`));
+            }
+          };
+
+          const onKicked = (reason) => {
+            if (!this._spawned) {
+              cleanup();
+              const reasonStr = typeof reason === 'object' ? JSON.stringify(reason) : String(reason);
+              reject(new Error(`Bot '${this.username}' was kicked before spawn: ${reasonStr}`));
+            }
+          };
+
+          const cleanup = () => {
+            if (timer) {
+              clearTimeout(timer);
+              timer = null;
+            }
+            if (this.bot) {
+              this.bot.removeListener('spawn', onSpawn);
+              this.bot.removeListener('error', onError);
+              this.bot.removeListener('end', onEnd);
+              this.bot.removeListener('kicked', onKicked);
+            }
+          };
+
+          if (timeoutMs > 0) {
+            timer = setTimeout(() => {
+              cleanup();
+              reject(new Error(`Bot '${this.username}' timed out after ${timeoutMs}ms waiting for spawn`));
+            }, timeoutMs);
+          }
+
+          this.bot.once('spawn', onSpawn);
+          this.bot.once('error', onError);
+          this.bot.once('end', onEnd);
+          this.bot.once('kicked', onKicked);
+        });
+
+        return this;
+      } catch (err) {
+        const isTransient =
+          err.message?.includes('already connected') ||
+          err.message?.includes('duplicate_login') ||
+          err.message?.includes('disconnected before spawn');
+        if (attempt < maxRetries && isTransient) {
+          this.disconnect();
+          await new Promise((r) => setTimeout(r, 600 * attempt));
+          continue;
+        }
+        throw err;
+      }
     }
-
-    return new Promise((resolve, reject) => {
-      if (this._spawned) {
-        return resolve(this);
-      }
-
-      let timer = null;
-
-      const onSpawn = () => {
-        cleanup();
-        this._spawned = true;
-        this.connected = true;
-        resolve(this);
-      };
-
-      const onError = (err) => {
-        if (!this._spawned) {
-          cleanup();
-          reject(err || new Error(`Bot '${this.username}' encountered error before spawn`));
-        }
-      };
-
-      const onEnd = (reason) => {
-        if (!this._spawned) {
-          cleanup();
-          reject(new Error(`Bot '${this.username}' disconnected before spawn: ${reason || 'unknown'}`));
-        }
-      };
-
-      const onKicked = (reason) => {
-        if (!this._spawned) {
-          cleanup();
-          const reasonStr = typeof reason === 'object' ? JSON.stringify(reason) : String(reason);
-          reject(new Error(`Bot '${this.username}' was kicked before spawn: ${reasonStr}`));
-        }
-      };
-
-      const cleanup = () => {
-        if (timer) {
-          clearTimeout(timer);
-          timer = null;
-        }
-        if (this.bot) {
-          this.bot.removeListener('spawn', onSpawn);
-          this.bot.removeListener('error', onError);
-          this.bot.removeListener('end', onEnd);
-          this.bot.removeListener('kicked', onKicked);
-        }
-      };
-
-      if (timeoutMs > 0) {
-        timer = setTimeout(() => {
-          cleanup();
-          reject(new Error(`Bot '${this.username}' timed out after ${timeoutMs}ms waiting for spawn`));
-        }, timeoutMs);
-      }
-
-      this.bot.once('spawn', onSpawn);
-      this.bot.once('error', onError);
-      this.bot.once('end', onEnd);
-      this.bot.once('kicked', onKicked);
-    });
+    return this;
   }
 
   runCommand(command) {
     if (!this.bot) {
       throw new Error(`Bot '${this.username}' is not initialized`);
     }
-    const cmd = command.startsWith('/') ? command : `/${command}`;
-    this.bot.chat(cmd);
+    const cleanCmd = command.startsWith('/') ? command.slice(1) : command;
+    if (this.bot._client) {
+      try {
+        this.bot._client.write('chat_command', { command: cleanCmd });
+        return;
+      } catch {
+        // Fallback to bot.chat
+      }
+    }
+    this.bot.chat(`/${cleanCmd}`);
   }
 
   async waitForChat(pattern, timeoutMs = 15000, startIndex = 0) {
@@ -189,10 +281,13 @@ export class BotSession {
   }
 
   getTabListPlayers() {
-    if (!this.bot || !this.bot.players) {
-      return [];
+    const list = new Set(this.tablistPlayers);
+    if (this.bot && this.bot.players) {
+      for (const name of Object.keys(this.bot.players)) {
+        list.add(name);
+      }
     }
-    return Object.keys(this.bot.players);
+    return Array.from(list);
   }
 
   async assertPlayerVisible(targetUsername, timeoutMs = 10000) {

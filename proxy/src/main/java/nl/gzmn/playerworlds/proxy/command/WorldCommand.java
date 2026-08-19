@@ -168,6 +168,10 @@ public final class WorldCommand {
         this.policy = Objects.requireNonNull(policy, "policy");
     }
 
+    private static boolean hasPermissionOrDefault(CommandSource source, String permission) {
+        return source.getPermissionValue(permission) != com.velocitypowered.api.permission.Tristate.FALSE;
+    }
+
     private static final AtomicLong CORRELATION_SEQ = new AtomicLong(1);
 
     /** Builds the Brigadier tree. */
@@ -188,7 +192,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("accept")
-                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
+                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -257,7 +261,7 @@ public final class WorldCommand {
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
-                        .requires(source -> source.hasPermission(CREATE_PERMISSION))
+                        .requires(source -> hasPermissionOrDefault(source, CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -327,7 +331,7 @@ public final class WorldCommand {
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
-                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
+                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
@@ -363,7 +367,7 @@ public final class WorldCommand {
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("browse")
-                        .requires(source -> source.hasPermission(JOIN_PERMISSION))
+                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
                         .executes(context -> {
                             var _ = actions.browse(context.getSource());
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;

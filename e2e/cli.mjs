@@ -266,9 +266,9 @@ function stageVelocity(downloadsDir, proxyJar) {
 [database]
 url = "jdbc:postgresql://postgres:5432/gzmn_worlds"
 user = "gzmn"
-password: "${postgresPassword}"
-pool-size: 8
-connection-timeout-seconds: 10
+password = "${postgresPassword}"
+pool-size = 8
+connection-timeout-seconds = 10
 `;
   fs.writeFileSync(path.join(proxyConfigDir, 'config.toml'), proxyConfig);
 

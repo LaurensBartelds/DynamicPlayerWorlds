@@ -13,7 +13,7 @@ prevent-client-proxy-connections = false
 player-info-forwarding-mode = "modern"
 forwarding-secret-file = "forwarding.secret"
 announce-forge = false
-kick-existing-players = false
+kick-existing-players = true
 ping-passthrough = "DISABLED"
 
 [servers]
@@ -46,3 +46,7 @@ enabled = false
 port = 25565
 map = "gzmn-e2e"
 show-plugins = false
+
+[permissions]
+default = ["gzmn.worlds.create", "gzmn.worlds.join", "gzmn.worlds.public", "gzmn.worlds.admin"]
+

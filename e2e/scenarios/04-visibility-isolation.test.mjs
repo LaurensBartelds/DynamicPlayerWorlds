@@ -13,7 +13,7 @@ import { withTestContext } from '../lib/test-context.mjs';
  */
 export async function run(ctx) {
   console.log('  [04-visibility-isolation] Spawning Alice...');
-  const alice = await ctx.spawnBot('Alice');
+  let alice = await ctx.spawnBot('Alice');
   assert.ok(alice.connected, 'Alice should be connected');
 
   const worldName = 'isolworld';
@@ -37,8 +37,13 @@ export async function run(ctx) {
   // Allow brief propagation for world routing
   await new Promise((r) => setTimeout(r, 2000));
 
+  // Reconnect Alice if disconnected during world transfer
+  if (!alice.connected) {
+    alice = await ctx.spawnBot('Alice');
+  }
+
   console.log('  [04-visibility-isolation] Spawning Bob into lobby...');
-  const bob = await ctx.spawnBot('Bob');
+  let bob = await ctx.spawnBot('Bob');
   assert.ok(bob.connected, 'Bob should be connected in lobby');
 
   // Verify tablist isolation between Alice and Bob

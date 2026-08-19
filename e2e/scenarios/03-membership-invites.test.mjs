@@ -15,9 +15,9 @@ import { withTestContext } from '../lib/test-context.mjs';
  */
 export async function run(ctx) {
   console.log('  [03-membership-invites] Spawning Alice, Bob, and Charlie...');
-  const alice = await ctx.spawnBot('Alice');
-  const bob = await ctx.spawnBot('Bob');
-  const charlie = await ctx.spawnBot('Charlie');
+  let alice = await ctx.spawnBot('Alice');
+  let bob = await ctx.spawnBot('Bob');
+  let charlie = await ctx.spawnBot('Charlie');
 
   assert.ok(alice.connected, 'Alice should be connected');
   assert.ok(bob.connected, 'Bob should be connected');
@@ -42,6 +42,11 @@ export async function run(ctx) {
   assert.ok(worldRecord, `World '${worldName}' must exist in player_world`);
   const worldId = worldRecord.id;
 
+  // Reconnect Alice if disconnected during world creation transfer
+  if (!alice.connected) {
+    alice = await ctx.spawnBot('Alice');
+  }
+
   // 2. Alice invites Bob
   console.log(`  [03-membership-invites] Alice inviting Bob to '${worldName}'...`);
   const bobChatIndex = bob.chatLog.length;
@@ -55,7 +60,13 @@ export async function run(ctx) {
     console.log('  [03-membership-invites] Note: Verifying invite through PostgreSQL...');
   }
 
-  const invites = await ctx.db.query('SELECT * FROM player_world_invite WHERE world_id = $1', [worldId]);
+  let invites = [];
+  const invitePollStart = Date.now();
+  while (Date.now() - invitePollStart < 8000) {
+    invites = await ctx.db.query('SELECT * FROM player_world_invite WHERE world_id = $1', [worldId]);
+    if (invites.length > 0) break;
+    await new Promise((r) => setTimeout(r, 400));
+  }
   assert.ok(invites.length > 0, `player_world_invite row for world ${worldId} should exist`);
   console.log(`  [03-membership-invites] Found ${invites.length} invite row(s) in DB.`);
 

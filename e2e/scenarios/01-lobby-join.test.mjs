@@ -23,14 +23,15 @@ export async function run(ctx) {
   assert.ok(bob.connected, 'Bob should be connected to the lobby');
   console.log('  [01-lobby-join] Bob spawned successfully.');
 
-  console.log('  [01-lobby-join] Verifying tablist visibility between Alice and Bob...');
-  await alice.assertPlayerVisible('Bob', 15000);
-  await bob.assertPlayerVisible('Alice', 15000);
-
+  console.log('  [01-lobby-join] Verifying holding area isolation between Alice and Bob (FR-11)...');
   const aliceTabList = alice.getTabListPlayers();
   const bobTabList = bob.getTabListPlayers();
-  assert.ok(aliceTabList.includes('Bob'), `Alice's tablist must contain Bob. Current: [${aliceTabList.join(', ')}]`);
-  assert.ok(bobTabList.includes('Alice'), `Bob's tablist must contain Alice. Current: [${bobTabList.join(', ')}]`);
+  console.log(`  [01-lobby-join] Alice's tablist: [${aliceTabList.join(', ')}]`);
+  console.log(`  [01-lobby-join] Bob's tablist: [${bobTabList.join(', ')}]`);
+  assert.ok(aliceTabList.includes('Alice'), `Alice's tablist must contain Alice`);
+  assert.ok(bobTabList.includes('Bob'), `Bob's tablist must contain Bob`);
+  assert.ok(!aliceTabList.includes('Bob'), `Alice must not see Bob in holding area (FR-11)`);
+  assert.ok(!bobTabList.includes('Alice'), `Bob must not see Alice in holding area (FR-11)`);
 
   console.log('  [01-lobby-join] Querying Paper-A RCON for online status...');
   const rconStatus = await ctx.rcon('paper-a', 'e2e status');
