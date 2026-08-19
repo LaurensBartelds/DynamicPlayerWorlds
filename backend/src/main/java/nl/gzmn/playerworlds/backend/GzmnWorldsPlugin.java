@@ -15,6 +15,7 @@ import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.BackendWorldCommand;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.control.ApplySettingsHandler;
 import nl.gzmn.playerworlds.backend.control.BackendControlHandlers;
 import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
@@ -637,6 +638,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 lifecycle,
                 worldFolders,
                 worldCaches,
+                settingsCache,
                 openedDatabase,
                 nodeCommands,
                 pools,
@@ -688,6 +690,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldLifecycleService lifecycle,
             WorldFolders worldFolders,
             WorldCacheLoader worldCaches,
+            WorldSettingsCache settingsCache,
             Database openedDatabase,
             NodeCommandRepository nodeCommands,
             PluginExecutors pools,
@@ -726,6 +729,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 CommandKind.INVALIDATE_CACHE,
                 new InvalidateCacheHandler(
                         new NetworkSettings(openedDatabase), worldCaches, worldRegistry, pools.db()));
+        plane.register(
+                CommandKind.APPLY_SETTINGS,
+                new ApplySettingsHandler(worldCaches, settingsCache, worldRegistry, worldFolders, platform, pools));
         EjectPlayerHandler ejectHandler =
                 new EjectPlayerHandler(worldCaches, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);

@@ -1153,8 +1153,11 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     "UPDATE_FAILED", error(caller, "could not update world settings; try again"));
                         }
+                        // R9 / FR-9e: APPLY_SETTINGS refreshes the settings cache and
+                        // re-asserts PVP / mob-griefing gamerules on loaded dimensions.
+                        // INVALIDATE_CACHE alone left those gamerules stuck at load time.
                         enqueueToWorldOrAliveNodes(
-                                world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                                world.get(), CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
                         Component msg = success(
                                 caller,
                                 "set " + normKey + " = " + boolVal + " for '"

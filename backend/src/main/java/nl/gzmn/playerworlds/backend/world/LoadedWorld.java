@@ -73,7 +73,14 @@ public final class LoadedWorld {
     /** Sweeps still to wait before retrying a failed unload (FR-25a). Main-thread only. */
     private int retryWaitSweeps;
 
-    private final String settingsJson;
+    /**
+     * FR-9e settings JSON snapshot for the tick thread.
+     *
+     * <p>Volatile and updatable: {@code APPLY_SETTINGS} (R9) rewrites it when the
+     * owner changes settings on a loaded world, so a dimension materialised later
+     * (portal) applies the same values rather than the load-time snapshot.
+     */
+    private volatile String settingsJson;
 
     public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius) {
         this(id, ownerUuid, name, seed, borderRadius, 0L, PlayerWorld.EMPTY_SETTINGS);
@@ -135,6 +142,16 @@ public final class LoadedWorld {
 
     public String settingsJson() {
         return settingsJson;
+    }
+
+    /**
+     * Replaces the FR-9e settings snapshot (R9 / {@code APPLY_SETTINGS}).
+     *
+     * <p>Called after the database row and {@link WorldSettingsCache} have already
+     * been updated, so a later dimension materialisation reads the same values.
+     */
+    public void updateSettingsJson(String settingsJson) {
+        this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
     }
 
     /** Shared by all three dimensions, so one materialised later matches (FR-2). */

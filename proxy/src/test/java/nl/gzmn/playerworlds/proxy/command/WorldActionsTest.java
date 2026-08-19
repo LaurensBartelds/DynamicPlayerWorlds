@@ -369,7 +369,16 @@ class WorldActionsTest {
         playersByUuid.put(owner, player);
 
         WorldId worldId = WorldId.random();
-        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+        PlayerWorld created = worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+        // Assign a node so setSetting has somewhere to enqueue APPLY_SETTINGS (R9).
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
 
         ActionResult result = actions.setSetting(player, "pvp", "on").get();
         assertThat(result).isInstanceOf(ActionResult.Ok.class);
@@ -378,6 +387,15 @@ class WorldActionsTest {
 
         PlayerWorld updated = worlds.findById(worldId).orElseThrow();
         assertThat(WorldSettings.fromJson(updated.settingsJson()).pvp()).isTrue();
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        assertThat(ids).isNotEmpty();
+        var cmd = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(cmd.command())
+                .as("R9: /world set must send APPLY_SETTINGS, not only INVALIDATE_CACHE")
+                .isEqualTo(nl.gzmn.playerworlds.core.control.CommandKind.APPLY_SETTINGS.name());
+        assertThat(cmd.worldId()).isEqualTo(worldId);
+        assertThat(cmd.generation()).isEqualTo(created.generation());
     }
 
     @Test

@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B in progress (R6–R8 landed). Next is R9.
+Status: in progress — Phase A complete; Phase B in progress (R6–R9 landed). Next is R10.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -564,24 +564,29 @@ abort there are zero uploads, no `forget`/quarantine, and the exception names
 registration not fencing.
 **Acceptance:** `COMMIT_FENCED` is raised only for a genuine MN-3a outcome.
 
-#### R9 — Implement `APPLY_SETTINGS`
+#### R9 — Implement `APPLY_SETTINGS` — DONE
 
 **Requirement:** FR-9e, CP-6, §6.
 **Files:** new `backend/control/ApplySettingsHandler.java`,
-`backend/GzmnWorldsPlugin.java`, `proxy/command/WorldActions.java`.
+`backend/GzmnWorldsPlugin.java`, `proxy/command/WorldActions.java`,
+`backend/world/LoadedWorld.java`.
 
-`CommandKind.APPLY_SETTINGS` is declared and has no handler anywhere, so if it
-were sent, a node would complete it `no handler for APPLY_SETTINGS`. Meanwhile
-`runtime.setPvp` and `runtime.setMobGriefing` are called only from
-`applySettings` at load time, so `/world set pvp on` reports success and changes
-nothing on a loaded world.
+**Landed.** `ApplySettingsHandler` refreshes `WorldSettingsCache` via
+`WorldCacheLoader` (R4), updates the `LoadedWorld` settings snapshot so a later
+portal materialisation does not re-apply the load-time values, and re-asserts
+PVP + mob-griefing gamerules on the main thread across every materialised
+dimension. Container/interact settings take effect from the cache alone
+(`RoleEnforcementListener`). `WorldActions.setSetting` enqueues
+`APPLY_SETTINGS` instead of `INVALIDATE_CACHE`. Registered in
+`GzmnWorldsPlugin.startControlPlane`.
 
-The handler re-reads `player_world.settings`, refreshes `WorldSettingsCache`
-(R4), and re-applies PVP and the mob-griefing gamerule on the main thread across
-all materialised dimensions. `WorldActions.setSetting` sends it instead of
-`INVALIDATE_CACHE`.
-
-**Failing test first:** `applySettingsChangesPvpOnALoadedWorld_FR9e`.
+**Failing test first (proven by temporary revert of the gamerule write):**
+`BackendControlHandlersTest#applySettingsChangesPvpOnALoadedWorld_FR9e` —
+loaded overworld with defaults, DB updated to pvp=true / mobGriefing=false;
+without the main-thread `setPvp`/`setMobGriefing` the cache moves but the
+gamerules stay at load-time; with it both gamerules flip without unload.
+Also: `applySettingsIsOkWhenWorldNotHeldHere`, `applySettingsRequiresWorldId`,
+`WorldActionsTest#setSettingValidSucceeds` asserts `APPLY_SETTINGS` is enqueued.
 **Acceptance:** every setting FR-9e names takes effect on a loaded world without
 an unload.
 
