@@ -354,13 +354,17 @@ public final class WorldActions {
                     error(caller, "'" + world.name() + "' must be archived before it can be permanently deleted"));
         }
         if (!confirmed) {
-            info(caller, "this permanently destroys '" + world.name() + "' and all backup archives. This cannot be undone.");
+            info(
+                    caller,
+                    "this permanently destroys '" + world.name() + "' and all backup archives. This cannot be undone.");
             return ActionResult.failure(
-                    "UNCONFIRMED", info(caller, "type /world delete " + world.name() + " hard confirm to permanently delete"));
+                    "UNCONFIRMED",
+                    info(caller, "type /world delete " + world.name() + " hard confirm to permanently delete"));
         }
         if (!worlds.deleteHard(world.id())) {
             return ActionResult.failure(
-                    "STATE_CHANGED", error(caller, "'" + world.name() + "' changed while you were confirming; try again"));
+                    "STATE_CHANGED",
+                    error(caller, "'" + world.name() + "' changed while you were confirming; try again"));
         }
         log.info("world {} ('{}') permanently deleted by owner {}", world.id(), world.name(), caller.getUsername());
         return ActionResult.success(

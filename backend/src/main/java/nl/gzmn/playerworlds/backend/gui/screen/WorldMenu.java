@@ -168,7 +168,8 @@ public final class WorldMenu implements GuiScreen {
                             Component.text("⚠ Irreversible Action", NamedTextColor.RED, TextDecoration.BOLD),
                             Component.text("Permanently destroys all chunks and backup archives.", NamedTextColor.GRAY),
                             Component.empty(),
-                            Component.text("▶ Click to delete permanently (requires confirm)", NamedTextColor.DARK_RED)));
+                            Component.text(
+                                    "▶ Click to delete permanently (requires confirm)", NamedTextColor.DARK_RED)));
         } else {
             inventory.setItem(
                     SLOT_ARCHIVE,
@@ -257,7 +258,9 @@ public final class WorldMenu implements GuiScreen {
                     menuService.openConfirmMenu(
                             player,
                             Component.text(
-                                    "Permanently Delete '" + world.name() + "'?", NamedTextColor.DARK_RED, TextDecoration.BOLD),
+                                    "Permanently Delete '" + world.name() + "'?",
+                                    NamedTextColor.DARK_RED,
+                                    TextDecoration.BOLD),
                             Component.text(
                                     "Permanently destroy '" + world.name() + "'? All archives will be lost forever.",
                                     NamedTextColor.RED),
@@ -267,7 +270,8 @@ public final class WorldMenu implements GuiScreen {
                                             .sendIntent(player, new MenuIntent.HardDeleteWorld(world.id()))
                                             .whenComplete((result, ex) -> {
                                                 if (result instanceof MenuResult.Ok ok) {
-                                                    player.sendMessage(Component.text(ok.message(), NamedTextColor.GREEN));
+                                                    player.sendMessage(
+                                                            Component.text(ok.message(), NamedTextColor.GREEN));
                                                     var _ = menuService.openMyWorldsMenu(player);
                                                 } else if (result instanceof MenuResult.Failed failed) {
                                                     player.sendMessage(Component.text(
