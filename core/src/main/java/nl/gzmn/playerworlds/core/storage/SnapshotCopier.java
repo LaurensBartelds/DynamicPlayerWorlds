@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,7 +66,8 @@ public final class SnapshotCopier {
      * @param snapshotRoot empty-or-existing per-sync snapshot directory
      * @param relativePaths paths relative to {@code liveRoot}; empty collection
      *     is a no-op success
-     * @return one result per input path, in input order
+     * @return one result per input path that still existed, in input order.
+     *     Paths that disappeared between the scan and the copy are omitted.
      * @throws UnstableFileException if a source will not settle
      * @throws StorageException on IO failure
      */
@@ -80,15 +82,21 @@ public final class SnapshotCopier {
         }
         List<CopiedFile> results = new ArrayList<>(relativePaths.size());
         for (Path relative : relativePaths) {
-            results.add(copyOne(liveRoot, snapshotRoot, relative));
+            CopiedFile copied = copyOne(liveRoot, snapshotRoot, relative);
+            if (copied != null) {
+                results.add(copied);
+            }
         }
         return List.copyOf(results);
     }
 
     /**
      * Copies a single relative path. See {@link #copyAll(Path, Path, Collection)}.
+     *
+     * @return the settled snapshot copy, or {@code null} when the source no
+     *     longer exists
      */
-    public CopiedFile copyOne(Path liveRoot, Path snapshotRoot, Path relative) {
+    public @Nullable CopiedFile copyOne(Path liveRoot, Path snapshotRoot, Path relative) {
         Objects.requireNonNull(liveRoot, "liveRoot");
         Objects.requireNonNull(snapshotRoot, "snapshotRoot");
         Objects.requireNonNull(relative, "relative");
@@ -107,8 +115,23 @@ public final class SnapshotCopier {
         IOException lastIo = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
+                if (!Files.exists(source)) {
+                    // Gone between the dirty scan and now. That is not a fault and
+                    // must not abort the sync: the server writes and removes
+                    // transient files under data/ (chunk_tickets.dat is the one
+                    // that showed up first) while the scan result is in flight, so
+                    // treating a vanished file as fatal means no snapshot ever
+                    // completes and object storage stays empty.
+                    //
+                    // MN-5a's "abort this sync" rule is about a file that will not
+                    // settle, which is a torn-read risk. A file that no longer
+                    // exists carries no such risk — it is simply not part of the
+                    // world state this snapshot describes.
+                    log.debug("source vanished between scan and copy, skipping: {}", source);
+                    return null;
+                }
                 if (!Files.isRegularFile(source)) {
-                    throw new StorageException("source missing or not a regular file: " + source);
+                    throw new StorageException("source is not a regular file: " + source);
                 }
                 FileFingerprint before = FileFingerprint.of(source);
                 cloner.copy(source, target);

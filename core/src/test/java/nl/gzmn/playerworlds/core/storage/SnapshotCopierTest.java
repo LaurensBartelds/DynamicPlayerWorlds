@@ -149,4 +149,40 @@ class SnapshotCopierTest {
         long now = System.currentTimeMillis();
         Files.setLastModifiedTime(src, FileTime.fromMillis(now + 60_000L + current.length));
     }
+
+    @Test
+    @DisplayName("a source that vanished between the scan and the copy is skipped, not fatal (MN-5a)")
+    void vanishedSourceIsSkippedRatherThanAbortingTheSync() throws Exception {
+        Path live = Files.createDirectories(temp.resolve("live"));
+        Path snap = temp.resolve("snap");
+
+        Path kept = live.resolve("region").resolve("r.0.0.mca");
+        Files.createDirectories(kept.getParent());
+        Files.writeString(kept, "region-bytes", StandardCharsets.UTF_8);
+
+        // Named by the scan, gone by the time the copy runs. Paper writes and
+        // removes transient files under data/ around every save, so this is the
+        // normal case rather than an exotic one — and when it aborted the sync,
+        // no snapshot ever completed and object storage stayed empty.
+        Path vanished = Path.of("data", "minecraft", "chunk_tickets.dat");
+
+        SnapshotCopier copier = new SnapshotCopier(PlainFileCloner.INSTANCE, 3);
+        List<SnapshotCopier.CopiedFile> copied =
+                copier.copyAll(live, snap, List.of(Path.of("region", "r.0.0.mca"), vanished));
+
+        assertThat(copied).hasSize(1);
+        assertThat(copied.get(0).relative()).isEqualTo(Path.of("region", "r.0.0.mca"));
+        assertThat(Files.exists(snap.resolve("region").resolve("r.0.0.mca"))).isTrue();
+        assertThat(Files.exists(snap.resolve(vanished))).isFalse();
+    }
+
+    @Test
+    @DisplayName("copyOne reports a vanished source as null rather than throwing")
+    void copyOneReturnsNullForAVanishedSource() throws Exception {
+        Path live = Files.createDirectories(temp.resolve("live2"));
+        Path snap = temp.resolve("snap2");
+
+        assertThat(new SnapshotCopier(PlainFileCloner.INSTANCE, 3).copyOne(live, snap, Path.of("gone.dat")))
+                .isNull();
+    }
 }
