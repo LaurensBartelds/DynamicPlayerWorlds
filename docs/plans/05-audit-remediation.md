@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A, B and C complete (R0–R15 landed). Next is Phase D (R16), which is blocked on confirming D18.
+Status: in progress — Phases A, B and C complete (R0–R15), plus R21. Next is R22, then Phase D from R16.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -162,7 +162,7 @@ to hold for an `Error` too.
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
-| E | R21–R23 | Storage-model correctness. |
+| E | R21–R23 | Storage-model correctness. **R21 done.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
 ---
@@ -949,26 +949,46 @@ manifests age out.
 
 ### Phase E — storage-model correctness
 
-#### R21 — Manifests express deletions; materialise mirrors the manifest (D16)
+#### R21 — Manifests express deletions; materialise mirrors the manifest (D16) — **DONE**
 
 **Requirement:** MN-3, MN-4, MN-2b.
 **Files:** `core/storage/DirtyScanner.java`, `core/storage/SnapshotEngine.java`,
-`core/storage/WorldDownloader.java`.
+`core/storage/WorldDownloader.java`, `backend/world/WorldFolders.java`,
+`backend/profile/WorldCommitService.java`, `backend/storage/WorldRestorer.java`,
+`backend/storage/WorldArchiver.java`, `backend/world/WorldLifecycleService.java`.
 
-`DirtyScanner` returns the observed path set alongside the dirty subset;
-`SnapshotEngine` builds `newEntries` from the observed set rather than from the
-baseline; `WorldDownloader.materialize` removes local files under the world's
-folders that the manifest does not list.
+**Landed.** `DirtyScanner.scan` returns a `Scan(dirty, observed)` — the walk
+already visited every file, so the full set costs nothing. `SnapshotEngine`
+builds `newEntries` from `observed` (baseline entry where unchanged, new entry
+where dirty) instead of starting from `baselineEntries`, so a file that is gone
+from disk is gone from the manifest. `WorldCommitService` also had to learn that
+a deletion is a change: with an empty dirty set it used to skip the snapshot
+entirely, so it now compares the observed count against the baseline's.
 
-While in `DirtyScanner`: it re-derives `base + "_nether"` and `base + "_the_end"`
-as string literals, which is exactly the hardcoding `WorldFolders` exists to
-prevent — *"The suffixes are never hardcoded here — they are recovered from the
-layout itself"*. `QuarantineManager` does the same. `:core` cannot see
-`WorldLayout` (CONTRIBUTING rule 2), so the caller passes the three folder names
-in. Three call sites, one source of truth.
+`WorldDownloader.materialize` takes the world's dimension folders and deletes
+files under them that the manifest does not list, so a materialised world
+*matches* its manifest rather than being the union of the manifest and whatever
+the folder held. Empty directories are left alone — Minecraft recreates the ones
+it wants, and removing them would race the server. The roots bound what may be
+deleted and come from the caller for the same reason `DirtyScanner`'s do.
 
-**Failing test first:** `aDeletedFileLeavesTheNextManifest_MN3`, and
-`materialiseRemovesFilesTheManifestDoesNotList_MN4`.
+**Layout hardcoding.** `DirtyScanner`'s `base + "_nether"` / `base + "_the_end"`
+overload is gone; the archive's flat layout now has one definition,
+`WorldFolders.archiveDimensionFolders`, which recovers the names from the layout
+the way `resolve` already does. `WorldRestorer` gained a `WorldFolders` for it —
+it had no layout at all and was deriving folder names from string literals.
+`QuarantineManager` still hardcodes both the suffixes *and* the Paper 26 nesting;
+that is left to **R16**, which rewrites `sweepStartup` for MN-4's marker and
+would otherwise churn the same method twice.
+
+**Failing test first (proven by temporary revert):**
+`SnapshotEngineTest#aDeletedFileLeavesTheNextManifest_MN3` — deletes a region
+file, asserts the dirty set is empty and the next manifest has lost the entry
+anyway; reverted to the overlay it still contains the key.
+`WorldDownloaderTest#materialiseRemovesFilesTheManifestDoesNotList_MN4` — plants
+debris inside the world's folders and an unrelated file outside them, asserts the
+first goes and the second stays; reverted, the debris survives.
+`DirtyScannerTest#aDeletedFileLeavesTheObservedSet` covers the scanner half.
 
 #### R22 — A restore preserves profiles and its generation (D17)
 
@@ -1160,15 +1180,22 @@ budget (R15).
 
 ## 5. Blocked on a decision
 
-These tasks have a defensible answer in the plan but should not be written until
-the answer is confirmed, because each changes observable behaviour:
+Each of these changes observable behaviour, so none was written before its
+answer was confirmed.
+
+### Confirmed 2026-08-20
+
+| Task | Question | Answer |
+| --- | --- | --- |
+| R16 | Confirm D18: is a cleanly unloaded world's scratch directory a warm cache to keep, or crash debris to quarantine? | **D18 as written.** Key on MN-4's completion marker, extended to name the `manifest_key` it was written against. Marker present and matching → warm cache; absent or naming a different manifest → crash debris, quarantined per MN-13. §4 item 2 stands. |
+| R20 | FR-34's warnings need a delivery channel. | **`node_command` on `gzmn_proxy`, delivered on next login**, beside the transfer-request reminder `onPostLogin` already sends. The warning is recorded on the row so it is not re-sent every sweep. No Discord path: it needs a token, a uuid→Discord-id mapping and an outbound HTTP dependency in the plugin jar, none of which exist. |
+| R22 | Confirm D17 before the migration is written. | **D17 as written.** `completeRestore` re-keys the newest surviving profile snapshot onto the restore's `(generation, sequence)` inside the transaction that moves `manifest_key`. §4 item 1 stands. |
+| R28 | Implement `lastLocation` or delete it? | **Implement it.** Materialise the stored dimension, clamp inside the world border, teleport there instead of to overworld spawn. FR-14 lists last location as in scope, so this is the spec's own reading. |
+
+### Still open
 
 | Task | Question |
 | --- | --- |
-| R16 | Confirm D18: is a cleanly unloaded world's scratch directory a warm cache to keep, or crash debris to quarantine? |
-| R20 | FR-34's warnings need a delivery channel. Is a `gzmn_proxy` command delivered on next login acceptable, or is the Discord DM path in FR-34 the intended one? |
-| R22 | Confirm D17 before the migration is written. |
-| R28 | Implement `lastLocation` or delete it? |
 | — | OQ-14's retention period for `player_world_report` chat logs — 30 days, 90, or until handled? R19's sweep is where it lands. |
 | — | Is multi-proxy in scope? Both proxies would use `targetNode = "proxy"` on one shared channel, so an `EJECT_PLAYER` claimed by the proxy the player is *not* on is silently dropped (`ProxyEjectHandler` returns `ok()`). If yes, ejects need per-proxy addressing and this becomes a Phase C task. |
 

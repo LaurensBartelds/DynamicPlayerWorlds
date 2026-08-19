@@ -67,6 +67,25 @@ public final class WorldFolders {
         return List.copyOf(roots);
     }
 
+    /**
+     * Relative folders inside an archive's extract tree, one per dimension.
+     *
+     * <p>Flat, not nested: {@code ArchivePacker} names each tar entry
+     * {@code <bukkitWorldName>/<path>} because it walks the dimension directories
+     * it is handed and uses their own names. This is the inverse of that, and the
+     * only other place that has to agree about it — recovered from the layout
+     * rather than by appending {@code _nether} and {@code _the_end}, for the same
+     * reason {@link #resolve} does not hardcode them.
+     */
+    public List<Path> archiveDimensionFolders(WorldId id) {
+        Objects.requireNonNull(id, "id");
+        List<Path> roots = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            roots.add(Path.of(bukkitWorldName(id, dimension)));
+        }
+        return List.copyOf(roots);
+    }
+
     /** Absolute on-disk folder for one dimension under the world container. */
     public Path onDiskFolder(Path scratchRoot, String primaryLevelName, WorldId id, DimensionKind dimension) {
         Objects.requireNonNull(scratchRoot, "scratchRoot");

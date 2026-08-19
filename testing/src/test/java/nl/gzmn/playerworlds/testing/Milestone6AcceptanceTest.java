@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.stream.Stream;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.storage.DirtyScanner;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.PlainFileCloner;
 import nl.gzmn.playerworlds.core.storage.RegionStructureException;
@@ -45,9 +46,13 @@ class Milestone6AcceptanceTest {
             SnapshotCopier copier = new SnapshotCopier(PlainFileCloner.INSTANCE);
             SnapshotEngine engine = new SnapshotEngine(store, engineCache, copier);
 
-            List<Path> dirty = expectedPaths.stream().map(Path::of).toList();
+            DirtyScanner.Scan scan = DirtyScanner.scan(
+                    scratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    Map.of(),
+                    List.of("session.lock", "uid.dat"));
             SnapshotEngine.SnapshotResult snapResult =
-                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true);
+                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), scan, true);
 
             assertThat(snapResult.dirtyCount()).isEqualTo(expectedPaths.size());
             assertThat(snapResult.manifest().entries()).hasSameSizeAs(expectedPaths);
@@ -56,7 +61,8 @@ class Milestone6AcceptanceTest {
             LocalObjectCache downloaderCache = new LocalObjectCache(downloaderCacheRoot, PlainFileCloner.INSTANCE);
             WorldDownloader downloader = new WorldDownloader(store, downloaderCache, PlainFileCloner.INSTANCE);
 
-            WorldDownloader.Result coldResult = downloader.materialize(snapResult.manifest(), restoreScratch);
+            WorldDownloader.Result coldResult = downloader.materialize(
+                    snapResult.manifest(), restoreScratch, WorldFixture.relativeDimensionFolders(worldId));
 
             assertThat(coldResult.wasWarm()).isFalse();
             assertThat(coldResult.filesChecked()).isEqualTo(expectedPaths.size());
@@ -78,7 +84,8 @@ class Milestone6AcceptanceTest {
             }
 
             // Second materialization on populated directory: warm check
-            WorldDownloader.Result warmResult = downloader.materialize(snapResult.manifest(), restoreScratch);
+            WorldDownloader.Result warmResult = downloader.materialize(
+                    snapResult.manifest(), restoreScratch, WorldFixture.relativeDimensionFolders(worldId));
 
             assertThat(warmResult.wasWarm()).isTrue();
             assertThat(warmResult.filesChecked()).isEqualTo(expectedPaths.size());
@@ -95,7 +102,6 @@ class Milestone6AcceptanceTest {
         Path cacheRoot = tempDir.resolve("cache");
 
         WorldId worldId = WorldFixture.materialize(scratch);
-        List<String> expectedPaths = WorldFixture.syncedRelativePaths(scratch, worldId);
 
         // Corrupt r.0.0.mca sector header (e.g. invalid sector offset pointing inside header)
         Path mca = WorldFixture.dimensionFolder(scratch, worldId.folder())
@@ -114,10 +120,14 @@ class Milestone6AcceptanceTest {
             SnapshotCopier copier = new SnapshotCopier(PlainFileCloner.INSTANCE);
             SnapshotEngine engine = new SnapshotEngine(store, cache, copier);
 
-            List<Path> dirty = expectedPaths.stream().map(Path::of).toList();
+            DirtyScanner.Scan scan = DirtyScanner.scan(
+                    scratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    Map.of(),
+                    List.of("session.lock", "uid.dat"));
 
             assertThatThrownBy(
-                            () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true))
+                            () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), scan, true))
                     .isInstanceOf(RegionStructureException.class);
 
             // Verify manifest was NOT uploaded to S3

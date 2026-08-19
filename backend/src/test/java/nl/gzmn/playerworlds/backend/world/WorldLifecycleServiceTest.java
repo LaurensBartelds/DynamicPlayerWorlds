@@ -189,13 +189,13 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Perform an initial snapshot of the fixture to populate S3
-        List<Path> dirty = DirtyScanner.scanDirty(
+        DirtyScanner.Scan scan = DirtyScanner.scan(
                 fixtureDir,
                 folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
                 Map.of(),
                 List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
-                fixtureDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
+                fixtureDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), scan, true);
         Manifest manifest = snapResult.manifest();
 
         // Create world row with the manifest key pointing to S3
@@ -262,13 +262,13 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Snapshot to S3 and populate object store and cache
-        List<Path> dirty = DirtyScanner.scanDirty(
+        DirtyScanner.Scan scan = DirtyScanner.scan(
                 scratchDir,
                 folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
                 Map.of(),
                 List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
-                scratchDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
+                scratchDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), scan, true);
         Manifest manifest = snapResult.manifest();
 
         onDb(() -> {

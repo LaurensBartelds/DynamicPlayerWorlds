@@ -237,7 +237,10 @@ public final class WorldArchiver {
                     LocalObjectCache cache =
                             new LocalObjectCache(tempMaterializeDir.resolve(".cache"), PlainFileCloner.INSTANCE);
                     WorldDownloader downloader = new WorldDownloader(objectStore, cache, PlainFileCloner.INSTANCE);
-                    downloader.materialize(manifest, tempMaterializeDir);
+                    // Fresh temp directory, so the mirror half has nothing to
+                    // remove; the roots are passed because materialize will not
+                    // guess which files it is allowed to delete.
+                    downloader.materialize(manifest, tempMaterializeDir, relativeDimensionFolders(folderBase));
 
                     for (DimensionKind dimension : DimensionKind.values()) {
                         Path matDir = worldLayout.bukkitWorldFolder(
@@ -365,6 +368,19 @@ public final class WorldArchiver {
         } catch (IOException e) {
             log.debug("Could not delete temporary archive file {}", file, e);
         }
+    }
+
+    /**
+     * The world's dimension folders relative to a scratch root, which is what
+     * {@link WorldDownloader#materialize} needs to know before it may delete
+     * anything.
+     */
+    private List<Path> relativeDimensionFolders(String folderBase) {
+        List<Path> roots = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            roots.add(worldLayout.relativeWorldFolder(primaryLevelName, folderBase, dimension));
+        }
+        return List.copyOf(roots);
     }
 
     private static void deleteDirectoryRecursively(@Nullable Path dir) {

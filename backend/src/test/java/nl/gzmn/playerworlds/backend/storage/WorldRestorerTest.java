@@ -11,6 +11,8 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import nl.gzmn.playerworlds.backend.platform.Platform;
+import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
+import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -42,6 +44,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class WorldRestorerTest {
+
+    /** The archive extract tree is flat; WorldFolders owns that layout (R21). */
+    private static final WorldFolders FOLDERS =
+            new WorldFolders(Platform.create(new ServerIdentity("26.2", Platform.BUILD_DATA_VERSION))
+                    .worldLayout());
 
     @TempDir
     Path tempDir;
@@ -128,6 +135,7 @@ class WorldRestorerTest {
                     snapshotEngine,
                     store,
                     scratchRoot,
+                    FOLDERS,
                     NetworkPolicy::defaults,
                     "node-1",
                     Platform.BUILD_DATA_VERSION,
@@ -192,6 +200,7 @@ class WorldRestorerTest {
                 null,
                 null,
                 scratchRoot,
+                FOLDERS,
                 NetworkPolicy::defaults,
                 "node-1",
                 Platform.BUILD_DATA_VERSION,
@@ -246,6 +255,7 @@ class WorldRestorerTest {
                 null,
                 null,
                 scratchRoot,
+                FOLDERS,
                 NetworkPolicy::defaults,
                 "node-1",
                 Platform.BUILD_DATA_VERSION,
@@ -289,6 +299,7 @@ class WorldRestorerTest {
                 null,
                 null,
                 scratchRoot,
+                FOLDERS,
                 NetworkPolicy::defaults,
                 "node-1",
                 Platform.BUILD_DATA_VERSION,
@@ -322,6 +333,7 @@ class WorldRestorerTest {
                 null,
                 null,
                 scratchRoot,
+                FOLDERS,
                 NetworkPolicy::defaults,
                 "node-1",
                 Platform.BUILD_DATA_VERSION,

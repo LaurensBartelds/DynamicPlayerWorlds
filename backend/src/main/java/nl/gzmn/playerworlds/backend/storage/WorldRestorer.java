@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.ArchiveRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -54,6 +55,9 @@ public final class WorldRestorer {
     private final @Nullable SnapshotEngine snapshotEngine;
     private final @Nullable ObjectStore objectStore;
     private final Path scratchRoot;
+    /** Owns the archive's flat layout as well as the node's nested one (R21). */
+    private final WorldFolders folders;
+
     private final Supplier<NetworkPolicy> policy;
     private final String nodeId;
     private final int nodeDataVersion;
@@ -84,6 +88,7 @@ public final class WorldRestorer {
             @Nullable SnapshotEngine snapshotEngine,
             @Nullable ObjectStore objectStore,
             Path scratchRoot,
+            WorldFolders folders,
             Supplier<NetworkPolicy> policy,
             String nodeId,
             int nodeDataVersion,
@@ -94,6 +99,7 @@ public final class WorldRestorer {
         this.snapshotEngine = snapshotEngine;
         this.objectStore = objectStore;
         this.scratchRoot = Objects.requireNonNull(scratchRoot, "scratchRoot");
+        this.folders = Objects.requireNonNull(folders, "folders");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.nodeDataVersion = nodeDataVersion;
@@ -192,7 +198,10 @@ public final class WorldRestorer {
         long liveStorageBytes;
         if (snapshotEngine != null && objectStore != null) {
             try {
-                List<Path> dirty = DirtyScanner.scanDirty(tempExtractDir, worldId, Map.of(), List.of());
+                // The extract tree is flat, which is the archive's layout rather
+                // than the node's; WorldFolders owns both so the two cannot drift.
+                DirtyScanner.Scan scan = DirtyScanner.scan(
+                        tempExtractDir, folders.archiveDimensionFolders(worldId), Map.of(), List.of());
                 SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
                         tempExtractDir,
                         worldId,
@@ -201,7 +210,7 @@ public final class WorldRestorer {
                         archive.dataVersion(),
                         nodeMcVersion,
                         Map.of(),
-                        dirty,
+                        scan,
                         currentPolicy.verifyRegionStructure());
                 Manifest manifest = snapResult.manifest();
                 manifestKey = manifest.manifestKey();

@@ -668,6 +668,7 @@ class BackendControlHandlersTest {
                         null,
                         null,
                         tempDir.resolve("scratch"),
+                        folders,
                         NetworkPolicy::defaults,
                         "node-1",
                         Platform.BUILD_DATA_VERSION,

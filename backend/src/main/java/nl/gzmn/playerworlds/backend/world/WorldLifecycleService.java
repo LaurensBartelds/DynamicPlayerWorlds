@@ -607,7 +607,11 @@ public final class WorldLifecycleService implements WorldLoader {
                 byte[] manifestBytes = objectStore.getBytes(row.manifestKey());
                 String manifestJson = new String(manifestBytes, StandardCharsets.UTF_8);
                 Manifest manifest = ManifestCodec.decode(manifestJson);
-                WorldDownloader.Result dlResult = worldDownloader.materialize(manifest, worldContainer);
+                // MN-4: match the manifest rather than merge into whatever the
+                // folder held, so a stale file from an earlier generation cannot
+                // survive a cold load and be re-uploaded by the next snapshot.
+                WorldDownloader.Result dlResult = worldDownloader.materialize(
+                        manifest, worldContainer, folders.relativeDimensionFolders(primaryLevelName, row.id()));
                 isCold = !dlResult.wasWarm();
                 if (commitService != null) {
                     // R7: successful materialize clears any prior self-fence on this id.

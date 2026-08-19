@@ -49,11 +49,16 @@ class DirtyScannerTest {
                 baselineClean.path(), baselineClean,
                 baselineOldModified.path(), baselineOldModified);
 
-        List<Path> dirty = DirtyScanner.scanDirty(tempDir, id, baseline, List.of("session.lock", "uid.dat"));
+        DirtyScanner.Scan scan = DirtyScanner.scan(tempDir, flat(id), baseline, List.of("session.lock", "uid.dat"));
 
         // f1 is clean, f2 is excluded, f3 is new, f4 is modified
-        assertThat(dirty)
+        assertThat(scan.dirty())
                 .containsExactly(Path.of(folder, "entities", "r.0.0.mca"), Path.of(folder, "region", "r.0.0.mca"));
+        // MN-3: the clean file is in the observed set even though it is not
+        // dirty, because the next manifest has to keep describing it. The
+        // excluded one is not: it is node-local and never belongs in a manifest.
+        assertThat(scan.observed())
+                .containsExactly(folder + "/entities/r.0.0.mca", folder + "/level.dat", folder + "/region/r.0.0.mca");
     }
 
     @Test
@@ -78,9 +83,9 @@ class DirtyScannerTest {
         Files.write(netherFile, new byte[] {2});
         Files.write(endFile, new byte[] {3});
 
-        List<Path> dirty = DirtyScanner.scanDirty(tempDir, id, Map.of(), List.of("session.lock", "uid.dat"));
+        DirtyScanner.Scan scan = DirtyScanner.scan(tempDir, flat(id), Map.of(), List.of("session.lock", "uid.dat"));
 
-        assertThat(dirty)
+        assertThat(scan.dirty())
                 .containsExactly(
                         Path.of(base, "level.dat"),
                         Path.of(base + "_nether", "DIM-1", "r.0.0.mca"),
@@ -104,9 +109,11 @@ class DirtyScannerTest {
         ManifestEntry entry = new ManifestEntry(folder + "/level.dat", "a".repeat(64), 3L, 5000L);
         Map<String, ManifestEntry> baseline = Map.of(entry.path(), entry);
 
-        List<Path> dirty = DirtyScanner.scanDirty(tempDir, id, baseline, List.of("session.lock", "uid.dat"));
+        DirtyScanner.Scan scan = DirtyScanner.scan(tempDir, flat(id), baseline, List.of("session.lock", "uid.dat"));
 
-        assertThat(dirty).isEmpty();
+        assertThat(scan.dirty()).isEmpty();
+        // Clean, not absent: an unchanged file still belongs in the manifest.
+        assertThat(scan.observed()).containsExactly(folder + "/level.dat");
     }
 
     @Test
@@ -116,10 +123,40 @@ class DirtyScannerTest {
         Map<String, ManifestEntry> baseline = Map.of();
         List<String> excludes = List.of();
 
-        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(null, id, baseline, excludes));
-        assertThatNullPointerException()
-                .isThrownBy(() -> DirtyScanner.scanDirty(tempDir, (WorldId) null, baseline, excludes));
-        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(tempDir, id, null, excludes));
-        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scanDirty(tempDir, id, baseline, null));
+        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scan(null, flat(id), baseline, excludes));
+        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scan(tempDir, null, baseline, excludes));
+        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scan(tempDir, flat(id), null, excludes));
+        assertThatNullPointerException().isThrownBy(() -> DirtyScanner.scan(tempDir, flat(id), baseline, null));
+    }
+
+    @Test
+    @DisplayName("a file deleted since the baseline leaves the observed set (MN-3)")
+    void aDeletedFileLeavesTheObservedSet(@TempDir Path tempDir) throws Exception {
+        WorldId id = WorldId.random();
+        String folder = id.folder();
+        Path worldFolder = tempDir.resolve(folder);
+        Files.createDirectories(worldFolder.resolve("region"));
+
+        Path kept = worldFolder.resolve("level.dat");
+        Files.write(kept, new byte[] {1, 2});
+        Files.setLastModifiedTime(kept, FileTime.fromMillis(1000));
+
+        ManifestEntry keptEntry = new ManifestEntry(folder + "/level.dat", "0".repeat(64), 2L, 1000L);
+        // In the baseline, gone from disk: the region file the player's world
+        // trimmed away. Nothing is dirty, and without the observed set nothing
+        // would ever notice.
+        ManifestEntry goneEntry = new ManifestEntry(folder + "/region/r.9.9.mca", "1".repeat(64), 4L, 1000L);
+        Map<String, ManifestEntry> baseline = Map.of(keptEntry.path(), keptEntry, goneEntry.path(), goneEntry);
+
+        DirtyScanner.Scan scan = DirtyScanner.scan(tempDir, flat(id), baseline, List.of());
+
+        assertThat(scan.dirty()).isEmpty();
+        assertThat(scan.observed()).containsExactly(folder + "/level.dat").doesNotContain(goneEntry.path());
+    }
+
+    /** The flat archive-style triple these fixtures are written in. */
+    private static List<Path> flat(WorldId id) {
+        String base = id.folder();
+        return List.of(Path.of(base), Path.of(base + "_nether"), Path.of(base + "_the_end"));
     }
 }

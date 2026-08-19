@@ -775,6 +775,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 snapshotEngine,
                 store,
                 node.scratchPath(),
+                worldFolders,
                 this::policy,
                 node.nodeId(),
                 identity.dataVersion(),

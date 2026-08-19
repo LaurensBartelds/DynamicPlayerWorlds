@@ -463,16 +463,22 @@ public final class WorldCommitService {
             // commitSnapshot(false) → selfFence(COMMIT_FENCED).
             long generation = resolveCommitGeneration(worldId, baseline);
 
-            List<Path> dirty = DirtyScanner.scanDirty(
+            DirtyScanner.Scan scan = DirtyScanner.scan(
                     scratchRoot,
                     folders.relativeDimensionFolders(primaryLevelName, worldId),
                     baselineEntries,
                     policy.excludeGlobs());
+            List<Path> dirty = scan.dirty();
 
             int sequence = baseline != null ? baseline.sequence() + 1 : 1;
 
             SnapshotEngine.SnapshotResult snapshotResult = null;
-            if (!dirty.isEmpty() || baseline == null) {
+            // MN-3 / D16: a deletion is a change even though nothing is dirty.
+            // Comparing the observed set against the baseline is what notices it;
+            // before the manifest could express a deletion there was nothing for
+            // this branch to do about one.
+            boolean deletions = baseline != null && scan.observed().size() != baselineEntries.size();
+            if (!dirty.isEmpty() || deletions || baseline == null) {
                 Duration quiet = policy.snapshotQuiet();
                 if (!quiet.isZero() && !quiet.isNegative()) {
                     try {
@@ -491,7 +497,7 @@ public final class WorldCommitService {
                             dataVersion,
                             mcVersion,
                             baselineEntries,
-                            dirty,
+                            scan,
                             policy.verifyRegionStructure());
                 }
             }
