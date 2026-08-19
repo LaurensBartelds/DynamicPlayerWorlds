@@ -127,6 +127,20 @@ public final class ConfigValidator {
                     + policy.holdingTimeout().toSeconds()
                     + "s); the kick/join paths cannot wait longer than the holding area allows");
         }
+
+        // The same argument, for the other wait the join path takes: NFR-1's cold
+        // load happens while the player stands in the holding area, so a cold-load
+        // budget at or above the holding timeout is a budget that can never be
+        // spent — the deadline ejects them first. Left unchecked this was the
+        // shipped configuration (60s against 30s), which made every cold load
+        // slower than half its own budget a guaranteed eject.
+        if (policy.coldLoadBudget().compareTo(policy.holdingTimeout()) >= 0) {
+            throw new ConfigException(NetworkPolicy.KEY_COLD_LOAD_BUDGET_SECONDS + " ("
+                    + policy.coldLoadBudget().toSeconds() + "s) must be strictly less than "
+                    + NetworkPolicy.KEY_HOLDING_TIMEOUT_SECONDS + " ("
+                    + policy.holdingTimeout().toSeconds()
+                    + "s); a cold load cannot outlive the holding area it happens in (NFR-1, FR-11)");
+        }
     }
 
     private static void validateNodeAgainstPolicy(NodeConfig node, NetworkPolicy policy) {

@@ -59,7 +59,7 @@ import org.slf4j.LoggerFactory;
  * before creation (FR-1a, milestone 7), the initial and pre-unload snapshot
  * commits (MN-6a, milestone 6), and per-world profiles (FR-14, milestone 4).
  */
-public final class WorldLifecycleService {
+public final class WorldLifecycleService implements WorldLoader {
 
     private static final Logger log = LoggerFactory.getLogger(WorldLifecycleService.class);
     private static final EventLogger events = EventLogger.create(WorldLifecycleService.class);
@@ -454,6 +454,7 @@ public final class WorldLifecycleService {
      * acquired the lease before routing; without this release the world stays
      * pinned to a node that never loaded it for the full {@code nodes.lease-seconds}.
      */
+    @Override
     public CompletableFuture<LoadOutcome> load(WorldId id) {
         Objects.requireNonNull(id, "id");
         Optional<LoadedWorld> already = registry.find(id);

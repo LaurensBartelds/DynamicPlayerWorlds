@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R12 landed). Next is R13.
+Status: in progress — Phase A complete; Phase B complete; Phase C in progress (R11–R13 landed). Next is R14.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -160,7 +160,7 @@ to hold for an `Error` too.
 | --- | --- | --- |
 | A | R1–R5 | Data loss and access control. No open decisions. **R1, R4 done.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. |
-| C | R11–R15 | Lease and lifecycle hygiene. |
+| C | R11–R15 | Lease and lifecycle hygiene. **R11–R13 done.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. |
 | E | R21–R23 | Storage-model correctness. |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
@@ -682,25 +682,54 @@ proxy release, holder stays `"paper-a"` after `NOT_ROUTABLE`.
 **Acceptance:** after a load failure, `placementContext` reports no live lease
 and the next join is placed normally.
 
-#### R13 — Implement FR-11's holding timeout
+#### R13 — Implement FR-11's holding timeout — **DONE**
 
 **Requirement:** FR-11, §9, NFR-1.
-**Files:** `backend/node/TransferJoinListener.java`, `core/obs/WorldsMetrics.java`.
+**Files:** `backend/node/TransferJoinListener.java`, `backend/world/WorldLoader.java`,
+`core/config/NetworkPolicy.java`, `core/config/ConfigValidator.java`.
 
-`transfers.holding-timeout-seconds` is used in seven places, all as the TTL of a
-`node_command` row. Nothing bounds how long a player sits in the holding area.
-`WorldsMetrics.holdingTimeout()` exists as a counter and is incremented nowhere
-outside its own test. `ConfigValidator` enforces `commitTimeout < holdingTimeout`
-on the grounds that "the kick/join paths cannot wait longer than the holding
-area allows" — protecting a budget that is not enforced.
+`transfers.holding-timeout-seconds` was used in seven places, all as the TTL of
+a `node_command` row. Nothing bounded how long a player sits in the holding
+area. `WorldsMetrics.holdingTimeout()` existed as a counter and was incremented
+nowhere outside its own test. `ConfigValidator` enforced
+`commitTimeout < holdingTimeout` on the grounds that "the kick/join paths cannot
+wait longer than the holding area allows" — protecting a budget that was not
+enforced.
 
-Wrap the `lifecycle.load(...)` future in a deadline. On expiry: message, eject,
-increment the counter. The refusal path already exists; only the timer is
-missing.
+**The budget conflict this surfaced.** FR-11's holding timeout defaulted to 30s
+and NFR-1's cold-load budget to 60s, so implementing the deadline literally
+would have ejected every cold load still well inside the time NFR-1 grants it.
+The two were never reconciled because neither was enforced. Resolved by the
+nesting the `commitTimeout < holdingTimeout` rule already implied: **the holding
+timeout is the outer budget of the join path**. `ConfigValidator` now also
+refuses `coldLoadBudget >= holdingTimeout`, and the default holding timeout
+moves 30 → 90 so NFR-1's 60 fits inside it with room for the profile restore and
+teleport. Of the two numbers, NFR-1's is the one with a derivation behind it.
+§4 item 5a records the spec change.
 
-**Failing test first:** `aJoinThatNeverCompletesEjectsAtTheHoldingTimeout_FR11`.
+**Landed.** The deadline is armed once the transfer is claimed and measured from
+the join event, so a saturated db executor cannot spend the budget before the
+load is even asked for. An `Arrival` holds a single-shot latch: the load
+completing, the deadline expiring and the player disconnecting all race for it
+and exactly one wins, so a player is never both teleported and ejected and a
+late load cannot teleport somebody already sent to lobby. `expire` re-checks
+`isOnline` on the main thread, so a disconnect inside the window between join
+and claim — too early for `onQuit` to stand the deadline down — still neither
+ejects nor moves the counter. `TransferJoinListener` now depends on a one-method
+`WorldLoader` rather than on the final `WorldLifecycleService`; that is the seam
+that makes a never-answering load reproducible without a real stalled download.
+
+**Failing test first (proven by temporary revert):**
+`TransferJoinListenerTest#aJoinThatNeverCompletesEjectsAtTheHoldingTimeout_FR11`
+— without the deadline no message ever reaches the player and no `EJECT_PLAYER`
+is enqueued. `#disconnectingBeforeTheWorldArrivesStandsTheDeadlineDown_FR11` —
+without the `isOnline` re-check the counter reads 1.0 for a player who left.
+`ConfigValidatorTest#coldLoadBudgetMustStayInsideTheHoldingTimeout` fails
+against the old defaults, which is the point of it.
 **Acceptance:** a stalled cold load ejects at the configured deadline and
-`worlds_holding_timeouts_total` moves.
+`holding_timeouts_total` moves. (This plan previously called that meter
+`worlds_holding_timeouts_total`; `MetricNames.HOLDING_TIMEOUTS` is
+`holding.timeouts`, which scrapes without a prefix.)
 
 #### R14 — Shutdown releases leases after unloading, not before
 
@@ -1045,6 +1074,14 @@ missing, and each one is a decision the code has already taken implicitly.
 4. **§6 — `/world admin drain`.** Already reported in `NEXT-STEPS.md` and still
    open: MN-22 is an operational requirement with no row in §6's table. Either
    §6 gains the row or MN-22 names the mechanism.
+5a. **§5.3, §7, §8 and §9 — the holding timeout is the outer budget (R13).**
+   FR-11 gave the holding area 30 seconds and NFR-1 gave a cold load 60, and the
+   two were never reconciled because neither was enforced. Enforcing FR-11
+   literally would eject a cold load still inside its own budget. Adopted: the
+   holding timeout is the outer budget of the join path, both
+   `storage.cold-load-budget-seconds` and `storage.commit-timeout-seconds` must
+   be strictly smaller, startup validation enforces it, and the FR-11 default
+   moves 30 → 90. Applied to `docs/spec/v0.4.md` with R13.
 5. **§7 and §12.8 — `archive.compression` (R0b).** The documented default
    `zstd-3` cannot work: zstd-jni is native and its JNI symbols are bound to a
    package the plugin jar must relocate, so the default threw

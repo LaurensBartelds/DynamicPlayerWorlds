@@ -21,7 +21,10 @@ class NetworkPolicyTest {
         assertThat(policy.fenceSafetyMargin()).isEqualTo(Duration.ofSeconds(30));
         assertThat(policy.manifestRetentionCount()).isEqualTo(3);
         assertThat(policy.commitTimeout()).isEqualTo(Duration.ofSeconds(15));
-        assertThat(policy.holdingTimeout()).isEqualTo(Duration.ofSeconds(30));
+        // 90, not the specification's 30: the holding timeout is the outer budget
+        // of the join path and NFR-1's 60s cold load has to fit inside it.
+        assertThat(policy.holdingTimeout()).isEqualTo(Duration.ofSeconds(90));
+        assertThat(policy.coldLoadBudget()).isEqualTo(Duration.ofSeconds(60));
         assertThat(policy.snapshotQuiesceTimeout()).isEqualTo(Duration.ofSeconds(5));
         assertThat(policy.archiveWarnDays()).containsExactly(14, 3);
         assertThat(policy.excludeGlobs()).containsExactly("session.lock", "uid.dat");

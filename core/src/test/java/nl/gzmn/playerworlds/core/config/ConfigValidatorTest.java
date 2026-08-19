@@ -97,6 +97,20 @@ class ConfigValidatorTest {
     }
 
     @Test
+    @DisplayName("the cold-load budget must stay strictly inside the holding timeout (NFR-1, FR-11)")
+    void coldLoadBudgetMustStayInsideTheHoldingTimeout() {
+        // The configuration the specification's own defaults described: a cold load
+        // allowed 60s inside a holding area that ejects at 30.
+        NetworkPolicy policy = policyWith(Map.of(
+                NetworkPolicy.KEY_COLD_LOAD_BUDGET_SECONDS, "60",
+                NetworkPolicy.KEY_HOLDING_TIMEOUT_SECONDS, "30"));
+
+        assertThatThrownBy(() -> ConfigValidator.validatePolicy(policy))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining(NetworkPolicy.KEY_COLD_LOAD_BUDGET_SECONDS);
+    }
+
+    @Test
     @DisplayName("a non-writable scratch path refuses enable")
     void nonWritableScratchPathRefusesEnable() throws Exception {
         Path file = tempDir.resolve("not-a-dir");
