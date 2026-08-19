@@ -130,8 +130,7 @@ public final class ArchivePacker {
         try (OutputStream fos = Files.newOutputStream(targetArchiveFile);
                 BufferedOutputStream bos = new BufferedOutputStream(fos, BUFFER_SIZE);
                 DigestOutputStream dos = new DigestOutputStream(bos, sha256Digest);
-                OutputStream compressionStream =
-                        useZstd ? new ZstdOutputStream(dos, DEFAULT_ZSTD_LEVEL) : new GZIPOutputStream(dos);
+                OutputStream compressionStream = useZstd ? openZstd(dos) : new GZIPOutputStream(dos);
                 TarArchiveOutputStream tarOut = new TarArchiveOutputStream(compressionStream)) {
 
             tarOut.setLongFileMode(TarArchiveOutputStream.LONGFILE_POSIX);
@@ -253,6 +252,29 @@ public final class ArchivePacker {
      * @return lowercase 64-character hex string
      * @throws StorageException if reading the file fails
      */
+    /**
+     * zstd, or a diagnosis instead of a linkage error.
+     *
+     * <p>zstd-jni binds its JNI symbols to {@code com.github.luben.zstd}, and the
+     * plugin jar relocates every dependency into {@code nl.gzmn.playerworlds.libs}
+     * because it shares a classloader with other plugins. The two are
+     * irreconcilable: shaded, the first archive throws
+     * {@code UnsatisfiedLinkError} from a static initialiser, deep inside a
+     * control-plane handler. Naming the cause here is the difference between an
+     * operator changing one config key and an operator reading a JNI stack trace.
+     */
+    private static OutputStream openZstd(OutputStream sink) throws IOException {
+        try {
+            return new ZstdOutputStream(sink, DEFAULT_ZSTD_LEVEL);
+        } catch (UnsatisfiedLinkError | NoClassDefFoundError e) {
+            throw new StorageException(
+                    "archive.compression requested zstd, but zstd-jni cannot run from a relocated plugin jar: "
+                            + "its native entry points are bound to com.github.luben.zstd and the jar relocates that "
+                            + "package. Set archive.compression to 'gzip'.",
+                    e);
+        }
+    }
+
     public static String computeSha256(Path file) {
         Objects.requireNonNull(file, "file");
         return ContentHasher.hash(file).sha256Hex();

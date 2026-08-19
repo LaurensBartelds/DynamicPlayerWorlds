@@ -158,7 +158,23 @@ public record NetworkPolicy(
     public static final List<String> DEFAULT_ALLOWED_COMMANDS = List.of();
     public static final int DEFAULT_ARCHIVE_AFTER_DAYS = 90;
     public static final List<Integer> DEFAULT_ARCHIVE_WARN_DAYS = List.of(14, 3);
-    public static final String DEFAULT_ARCHIVE_COMPRESSION = "zstd-3";
+    /**
+     * Archive compression (FR-35, spec §7).
+     *
+     * <p>{@code gzip}, not the specification's {@code zstd-3}. zstd-jni is a
+     * native library whose JNI entry points are bound to its original package
+     * name, so it cannot survive the relocation every dependency in a plugin jar
+     * has to undergo (CONTRIBUTING, "Adding a dependency"). Shaded, it throws
+     * {@code UnsatisfiedLinkError} the first time an archive is packed — which
+     * is to say archival never worked with the documented default.
+     *
+     * <p>The cost is small and the specification says so itself: region files
+     * are already zlib-compressed internally, so the stronger codec "cost[s]
+     * several times the CPU for a few percent of size". GZIP is in the JDK and
+     * has no native component.
+     */
+    public static final String DEFAULT_ARCHIVE_COMPRESSION = "gzip";
+
     public static final Duration DEFAULT_INVITE_EXPIRY = Duration.ofMinutes(10);
     public static final Duration DEFAULT_TRANSFER_PENDING_EXPIRY = Duration.ofDays(7);
     public static final Duration DEFAULT_TRANSFER_EXPIRY = Duration.ofSeconds(60);
