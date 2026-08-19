@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete (R0–R5). Next is Phase B starting at R6.
+Status: in progress — Phase A complete; Phase B started (R6 landed). Next is R7.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -501,26 +501,21 @@ visibility stays PRIVATE.
 
 ### Phase B — the commit path
 
-#### R6 — Departing profiles survive a failed commit
+#### R6 — Departing profiles survive a failed commit — DONE
 
 **Requirement:** FR-15, FR-15a, FR-16.
 **Files:** `backend/profile/WorldCommitService.java`.
 
-`phase1MainThread` does `pendingDepartures.remove(worldId)` and folds the
-payloads into the in-flight commit. If phase 2 or 3 throws — a torn region, an
-`UnstableFileException`, an object-storage outage, a `commitSnapshot` that
-returns false — those payloads are gone, and the next commit cannot re-capture
-them because the player has left and `captureWorld` will not see them.
+**Landed.** Phase 1 still takes departures out of `pendingDepartures` for the
+in-flight commit, but on any phase-2/3 failure `restoreDepartures` merges them
+back with `putIfAbsent` (a departure that landed during the failed commit wins).
+On success `clearTakenDepartures` drops only the payloads this commit wrote.
 
-Take a copy in phase 1; remove only on success in `phase4Completion`; on failure
-merge back (`merge`, not `put`, so a departure recorded during the failed commit
-wins). This is the difference between FR-15's documented bound — one sync
-interval, for world and profile *together* — and losing a profile while the
-world rolls back, which is FR-15a's duplication window with the halves swapped.
-
-**Failing test first:** `departingProfileSurvivesAFailedCommit_FR15`.
-**Acceptance:** a commit that throws in phase 2 leaves `pendingDepartures`
-non-empty, and the next commit writes the profile.
+**Failing test first (proven by temporary revert of `restoreDepartures`):**
+`WorldCommitServiceTest#departingProfileSurvivesAFailedCommit_FR15` — object
+store fails phase-2 uploads; without restore the staged departure is gone and
+the next commit cannot re-capture the player (already in lobby); with restore
+the departure remains and the retry persists emerald×9 / level 11.
 
 #### R7 — A fenced world stops committing, and stops re-uploading itself
 

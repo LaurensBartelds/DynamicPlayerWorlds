@@ -36,10 +36,12 @@ import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.Manifest;
+import nl.gzmn.playerworlds.core.storage.ObjectStore;
 import nl.gzmn.playerworlds.core.storage.PlainFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
+import nl.gzmn.playerworlds.core.storage.StorageException;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import nl.gzmn.playerworlds.testing.TestObjectStore;
 import nl.gzmn.playerworlds.testing.WorldFixture;
@@ -230,6 +232,133 @@ class WorldCommitServiceTest {
         ItemStack[] deserializedItems = PaperItemCodec.INSTANCE.deserializeItems(envelope.inventory());
         assertThat(deserializedItems)
                 .anyMatch(item -> item != null && item.getType() == Material.DIAMOND && item.getAmount() == 16);
+    }
+
+    @Test
+    @DisplayName("departing profile survives a failed commit and is written on the next one (R6, FR-15)")
+    void departingProfileSurvivesAFailedCommit_FR15() throws Exception {
+        Path scratch = tempDir.resolve("scratch");
+        WorldId worldId = WorldFixture.materialize(scratch);
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "r6-world", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        WorldMock overworld = server.addSimpleWorld(overworldName);
+
+        PlayerMock departingPlayer = server.addPlayer();
+        departingPlayer.teleport(overworld.getSpawnLocation());
+        departingPlayer.getInventory().addItem(new ItemStack(Material.EMERALD, 9));
+        departingPlayer.setLevel(11);
+
+        // Object store that fails the first commit's uploads (phase 2), then works.
+        java.util.concurrent.atomic.AtomicBoolean failUploads = new java.util.concurrent.atomic.AtomicBoolean(true);
+        ObjectStore flakyStore = new ObjectStore() {
+            @Override
+            public void putObject(String key, Path sourceFile) {
+                if (failUploads.get()) {
+                    throw new StorageException("injected phase-2 failure for R6");
+                }
+                objectStore.putObject(key, sourceFile);
+            }
+
+            @Override
+            public void putBytes(String key, byte[] bytes, String contentType) {
+                if (failUploads.get()) {
+                    throw new StorageException("injected phase-2 failure for R6");
+                }
+                objectStore.putBytes(key, bytes, contentType);
+            }
+
+            @Override
+            public void getObject(String key, Path destinationFile) {
+                objectStore.getObject(key, destinationFile);
+            }
+
+            @Override
+            public byte[] getBytes(String key) {
+                return objectStore.getBytes(key);
+            }
+
+            @Override
+            public boolean exists(String key) {
+                return objectStore.exists(key);
+            }
+
+            @Override
+            public void deleteObject(String key) {
+                objectStore.deleteObject(key);
+            }
+
+            @Override
+            public void deletePrefix(String prefix) {
+                objectStore.deletePrefix(prefix);
+            }
+
+            @Override
+            public long getObjectSize(String key) {
+                return objectStore.getObjectSize(key);
+            }
+
+            @Override
+            public void close() {
+                // underlying store closed in tearDown
+            }
+        };
+
+        SnapshotEngine flakyEngine =
+                new SnapshotEngine(flakyStore, objectCache, new SnapshotCopier(PlainFileCloner.INSTANCE));
+        WorldCommitService flakyService = new WorldCommitService(
+                profileRepo,
+                worldRepo,
+                profileService,
+                folders,
+                platform,
+                executors,
+                flakyEngine,
+                NetworkPolicy::defaults,
+                scratch,
+                "node-test",
+                WorldFixture.PRIMARY_LEVEL_NAME);
+
+        // Player leaves — payload staged, commit starts and fails in phase 2.
+        var failed = flakyService.commitDeparture(worldId, departingPlayer, overworldName);
+        // Leave the world so captureWorld cannot re-capture them on the retry.
+        departingPlayer.teleport(server.addSimpleWorld("lobby").getSpawnLocation());
+        flushExecutors();
+        try {
+            failed.join();
+        } catch (Exception expected) {
+            // phase-2 StorageException wrapped in CompletionException
+        }
+        flushExecutors();
+
+        assertThat(flakyService.hasPendingDeparture(worldId, departingPlayer.getUniqueId()))
+                .as("R6: departure must still be staged after the failed commit")
+                .isTrue();
+        assertThat(onDb(() -> profileRepo.latestSnapshot(worldId))).isEmpty();
+
+        // Next commit succeeds and writes the staged departure.
+        failUploads.set(false);
+        var ok = flakyService.requestCommit(worldId);
+        flushExecutors();
+        ok.join();
+        flushExecutors();
+
+        assertThat(flakyService.hasPendingDeparture(worldId, departingPlayer.getUniqueId()))
+                .isFalse();
+        ProfileRepository.Snapshot snap =
+                onDb(() -> profileRepo.latestSnapshot(worldId)).orElseThrow();
+        var stored = onDb(() -> profileRepo.load(worldId, departingPlayer.getUniqueId(), snap));
+        assertThat(stored).isPresent();
+        ProfileEnvelope envelope =
+                ProfileCodec.decode(stored.get().data(), stored.get().formatVersion());
+        assertThat(envelope.xpLevel()).isEqualTo(11);
+        ItemStack[] items = PaperItemCodec.INSTANCE.deserializeItems(envelope.inventory());
+        assertThat(items).anyMatch(item -> item != null && item.getType() == Material.EMERALD && item.getAmount() == 9);
     }
 
     @Test

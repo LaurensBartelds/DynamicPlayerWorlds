@@ -205,38 +205,71 @@ public final class WorldCommitService {
      */
     private CompletableFuture<Void> runCommit(WorldId worldId) {
         if (snapshotEngine == null || playerWorlds == null) {
-            CompletableFuture<Map<UUID, byte[]>> captured = new CompletableFuture<>();
+            CompletableFuture<Phase1Result> captured = new CompletableFuture<>();
             executors.main().execute(() -> {
                 try {
                     Map<UUID, byte[]> payloads = captureWorld(worldId);
-                    Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
-                    if (departures != null) {
-                        payloads.putAll(departures);
-                    }
-                    captured.complete(payloads);
+                    Map<UUID, byte[]> takenDepartures = takeDeparturesCopy(worldId);
+                    payloads.putAll(takenDepartures);
+                    captured.complete(new Phase1Result(worldId, payloads, takenDepartures, List.of(), List.of()));
                 } catch (RuntimeException e) {
                     captured.completeExceptionally(e);
                 }
             });
-            return captured.thenApplyAsync(
-                    payloads -> {
-                        try {
-                            profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, payloads);
-                        } catch (SQLException e) {
-                            throw new CompletionException(e);
+            return captured.thenCompose(phase1 -> CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, phase1.payloads());
+                                } catch (SQLException e) {
+                                    throw new CompletionException(e);
+                                }
+                                if (!phase1.payloads().isEmpty()) {
+                                    log.info(
+                                            "committed {} profile(s) for world {} (FR-15)",
+                                            phase1.payloads().size(),
+                                            worldId);
+                                }
+                                return phase1;
+                            },
+                            executors.db())
+                    .handle((ignored, failure) -> {
+                        if (failure != null) {
+                            restoreDepartures(worldId, phase1.takenDepartures());
+                            throw new CompletionException(failure);
                         }
-                        if (!payloads.isEmpty()) {
-                            log.info("committed {} profile(s) for world {} (FR-15)", payloads.size(), worldId);
-                        }
+                        clearTakenDepartures(worldId, phase1.takenDepartures());
                         return null;
-                    },
-                    executors.db());
+                    }));
         }
 
+        // Snapshot path: departures taken in phase 1 are restored on any later failure (R6).
+        return runSnapshotCommit(worldId);
+    }
+
+    /**
+     * Full snapshot commit with departure recovery (R6 / FR-15).
+     *
+     * <p>Departures are copied out of {@link #pendingDepartures} in phase 1 so the
+     * commit can write them, but they are only cleared on success. A phase-2 or
+     * phase-3 failure merges them back ({@code putIfAbsent}) so a departure that
+     * landed during the failed commit wins.
+     */
+    private CompletableFuture<Void> runSnapshotCommit(WorldId worldId) {
         return phase1MainThread(worldId)
-                .thenApplyAsync(this::phase2IoThread, executors.io())
-                .thenApplyAsync(this::phase3DbThread, executors.db())
-                .thenAccept(this::phase4Completion);
+                .thenCompose(p1 -> CompletableFuture.completedFuture(p1)
+                        .thenApplyAsync(this::phase2IoThread, executors.io())
+                        .thenApplyAsync(this::phase3DbThread, executors.db())
+                        .handle((phase3, failure) -> {
+                            if (failure != null) {
+                                restoreDepartures(p1.worldId(), p1.takenDepartures());
+                                throw new CompletionException(failure);
+                            }
+                            // Success — the payloads were written with the snapshot. Drop only
+                            // the ones this commit took; a newer departure keeps its entry.
+                            clearTakenDepartures(p1.worldId(), p1.takenDepartures());
+                            phase4Completion(phase3);
+                            return null;
+                        }));
     }
 
     private CompletableFuture<Phase1Result> phase1MainThread(WorldId worldId) {
@@ -267,12 +300,12 @@ public final class WorldCommitService {
                 }
 
                 Map<UUID, byte[]> payloads = captureWorld(worldId);
-                Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
-                if (departures != null) {
-                    payloads.putAll(departures);
-                }
+                // R6: copy-and-remove so the in-flight commit owns these payloads, but
+                // restoreDepartures can put them back if phase 2/3 fails.
+                Map<UUID, byte[]> takenDepartures = takeDeparturesCopy(worldId);
+                payloads.putAll(takenDepartures);
 
-                future.complete(new Phase1Result(worldId, payloads, quiesced, watchdogs));
+                future.complete(new Phase1Result(worldId, payloads, takenDepartures, quiesced, watchdogs));
             } catch (Exception e) {
                 future.completeExceptionally(e);
             }
@@ -280,17 +313,82 @@ public final class WorldCommitService {
         return future;
     }
 
+    /**
+     * Atomically takes the current departure map for {@code worldId}.
+     * Empty when nobody has left since the last successful commit.
+     */
+    private Map<UUID, byte[]> takeDeparturesCopy(WorldId worldId) {
+        Map<UUID, byte[]> removed = pendingDepartures.remove(worldId);
+        if (removed == null || removed.isEmpty()) {
+            return Map.of();
+        }
+        // Defensive copy: the map we removed is no longer shared, but callers may
+        // retain the reference across async boundaries.
+        return Map.copyOf(removed);
+    }
+
+    /**
+     * On commit failure, put taken departures back. {@code putIfAbsent} so a
+     * departure captured while this commit was failing keeps the newer payload (R6).
+     */
+    private void restoreDepartures(WorldId worldId, Map<UUID, byte[]> taken) {
+        if (taken.isEmpty()) {
+            return;
+        }
+        pendingDepartures.compute(worldId, (id, existing) -> {
+            Map<UUID, byte[]> map = existing != null ? existing : new ConcurrentHashMap<>();
+            for (Map.Entry<UUID, byte[]> entry : taken.entrySet()) {
+                map.putIfAbsent(entry.getKey(), entry.getValue());
+            }
+            return map;
+        });
+        log.warn(
+                "restored {} departing profile(s) for world {} after a failed commit (FR-15/R6)",
+                taken.size(),
+                worldId);
+    }
+
+    /**
+     * On commit success, drop any staged departure that still holds the payload
+     * this commit wrote. A newer departure for the same player (re-enter then leave
+     * during the commit) is left for the next cycle.
+     */
+    private void clearTakenDepartures(WorldId worldId, Map<UUID, byte[]> taken) {
+        if (taken.isEmpty()) {
+            return;
+        }
+        pendingDepartures.computeIfPresent(worldId, (id, existing) -> {
+            for (Map.Entry<UUID, byte[]> entry : taken.entrySet()) {
+                existing.remove(entry.getKey(), entry.getValue());
+            }
+            return existing.isEmpty() ? null : existing;
+        });
+    }
+
+    /** Visible for tests: whether a departure payload is still staged (R6). */
+    boolean hasPendingDeparture(WorldId worldId, UUID playerId) {
+        Map<UUID, byte[]> pending = pendingDepartures.get(worldId);
+        return pending != null && pending.containsKey(playerId);
+    }
+
     private record Phase1Result(
             WorldId worldId,
             Map<UUID, byte[]> payloads,
+            Map<UUID, byte[]> takenDepartures,
             List<World> quiescedWorlds,
             List<ScheduledFuture<?>> watchdogs) {}
 
     private record Phase2Result(
             WorldId worldId,
             Map<UUID, byte[]> profiles,
+            Map<UUID, byte[]> takenDepartures,
             @Nullable Manifest newManifest,
             @Nullable Manifest baselineManifest) {}
+
+    private record Phase3Result(
+            WorldId worldId,
+            Map<UUID, byte[]> takenDepartures,
+            @Nullable Manifest committedManifest) {}
 
     private Phase2Result phase2IoThread(Phase1Result phase1) {
         WorldId worldId = phase1.worldId();
@@ -344,17 +442,17 @@ public final class WorldCommitService {
             }
 
             Manifest newManifest = snapshotResult != null ? snapshotResult.manifest() : null;
-            return new Phase2Result(worldId, phase1.payloads(), newManifest, baseline);
+            return new Phase2Result(worldId, phase1.payloads(), phase1.takenDepartures(), newManifest, baseline);
         } finally {
             restoreAutoSave(phase1.quiescedWorlds(), phase1.watchdogs());
         }
     }
 
-    private @Nullable Manifest phase3DbThread(Phase2Result phase2) {
+    private Phase3Result phase3DbThread(Phase2Result phase2) {
         WorldId worldId = phase2.worldId();
         Manifest manifestToCommit = phase2.newManifest() != null ? phase2.newManifest() : phase2.baselineManifest();
         if (manifestToCommit == null || playerWorlds == null) {
-            return null;
+            return new Phase3Result(worldId, phase2.takenDepartures(), null);
         }
 
         ProfileRepository.Snapshot snapshot =
@@ -382,13 +480,14 @@ public final class WorldCommitService {
                 throw new StorageException(
                         "Failed to commit snapshot for world " + worldId + ": fenced or row missing");
             }
-            return manifestToCommit;
+            return new Phase3Result(worldId, phase2.takenDepartures(), manifestToCommit);
         } catch (SQLException e) {
             throw new CompletionException(e);
         }
     }
 
-    private void phase4Completion(@Nullable Manifest committedManifest) {
+    private void phase4Completion(Phase3Result phase3) {
+        Manifest committedManifest = phase3.committedManifest();
         if (committedManifest != null) {
             cachedManifests.put(committedManifest.worldId(), committedManifest);
             log.debug(
