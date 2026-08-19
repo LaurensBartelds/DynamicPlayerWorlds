@@ -30,7 +30,14 @@ export async function runTests(options = {}) {
   }
 
   let testFiles = findTestFiles(scenariosDir);
-  const filter = options.filter || (process.argv[2] && !process.argv[2].startsWith('-') ? process.argv[2] : null);
+  let filter = null;
+  if (typeof options === 'string') {
+    filter = options;
+  } else if (options && typeof options.filter === 'string') {
+    filter = options.filter;
+  } else if (isDirect && process.argv[2] && !process.argv[2].startsWith('-')) {
+    filter = process.argv[2];
+  }
 
   if (filter) {
     testFiles = testFiles.filter((f) => {

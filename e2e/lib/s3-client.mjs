@@ -3,6 +3,7 @@ import {
   ListObjectsV2Command,
   GetObjectCommand,
   PutObjectCommand,
+  DeleteObjectCommand,
   DeleteObjectsCommand,
   HeadBucketCommand,
 } from '@aws-sdk/client-s3';
@@ -60,6 +61,15 @@ export class S3Helper {
         Bucket: this.bucket,
         Key: key,
         Body: body,
+      })
+    );
+  }
+
+  async deleteObject(key) {
+    return await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
       })
     );
   }

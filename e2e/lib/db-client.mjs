@@ -37,6 +37,12 @@ export class DbClient {
         IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'player_world') THEN
           TRUNCATE TABLE player_world CASCADE;
         END IF;
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'world_lease') THEN
+          TRUNCATE TABLE world_lease CASCADE;
+        END IF;
+        IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'player_profile') THEN
+          TRUNCATE TABLE player_profile CASCADE;
+        END IF;
       END $$;
     `);
   }
