@@ -301,10 +301,10 @@ public final class WorldCommitService {
             Map<String, ManifestEntry> baselineEntries = baseline != null ? baseline.entries() : Map.of();
 
             List<Path> dirty = DirtyScanner.scanDirty(
-                                scratchRoot,
-                                folders.relativeDimensionFolders(primaryLevelName, worldId),
-                                baselineEntries,
-                                policy.excludeGlobs());
+                    scratchRoot,
+                    folders.relativeDimensionFolders(primaryLevelName, worldId),
+                    baselineEntries,
+                    policy.excludeGlobs());
 
             long generation = 0L;
             if (registry != null) {

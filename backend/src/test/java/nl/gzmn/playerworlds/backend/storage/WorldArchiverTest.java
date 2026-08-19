@@ -137,7 +137,15 @@ class WorldArchiverTest {
             return null;
         });
 
-        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                null,
+                registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -170,7 +178,8 @@ class WorldArchiverTest {
         assertThat(archiveStorage.exists(result.archiveKey())).isTrue();
 
         // Check scratch directory deleted
-        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder()))).isFalse();
+        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder())))
+                .isFalse();
     }
 
     @Test
@@ -262,7 +271,15 @@ class WorldArchiverTest {
                 new NodeCommandRepository(database),
                 NetworkPolicy::defaults);
 
-        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                null,
+                registry,
                 handoff,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -287,7 +304,15 @@ class WorldArchiverTest {
             return worldRepo.acquireLease(worldId, "node-2", Platform.BUILD_DATA_VERSION, Duration.ofMinutes(5));
         });
 
-        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                null,
+                registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -315,7 +340,15 @@ class WorldArchiverTest {
             return null;
         });
 
-        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                null,
+                registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",
@@ -394,7 +427,15 @@ class WorldArchiverTest {
         // The old code logged that and packed the live folder anyway, which reads
         // region files the server is still writing (MN-5a) and then deletes them
         // from under a loaded Bukkit world.
-        WorldArchiver archiver = new WorldArchiver(worldRepo, database, archiveStorage, scratchRoot, platform.worldLayout(), WorldFixture.PRIMARY_LEVEL_NAME, null, registry,
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                archiveStorage,
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                null,
+                registry,
                 null,
                 NetworkPolicy::defaults,
                 "node-1",

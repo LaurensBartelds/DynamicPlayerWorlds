@@ -57,7 +57,8 @@ class WorldFixtureSmokeTest {
         assertThat(synced).anyMatch(path -> path.contains("dimensions/minecraft/") && path.contains("_the_end/"));
 
         // The excludes exist on disk; they are only filtered from the sync set.
-        assertThat(Files.exists(WorldFixture.dimensionFolder(scratch, id.folder()).resolve("session.lock")))
+        assertThat(Files.exists(
+                        WorldFixture.dimensionFolder(scratch, id.folder()).resolve("session.lock")))
                 .isTrue();
     }
 }

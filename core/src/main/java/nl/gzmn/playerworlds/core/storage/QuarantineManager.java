@@ -45,7 +45,8 @@ public final class QuarantineManager {
      * Absolute Paper 26 dimension directory under the world container for one Bukkit world name.
      */
     public static Path dimensionFolder(Path scratchRoot, String primaryLevelName, String bukkitWorldName) {
-        String level = primaryLevelName == null || primaryLevelName.isBlank() ? DEFAULT_PRIMARY_LEVEL : primaryLevelName;
+        String level =
+                primaryLevelName == null || primaryLevelName.isBlank() ? DEFAULT_PRIMARY_LEVEL : primaryLevelName;
         return scratchRoot
                 .resolve(level)
                 .resolve("dimensions")

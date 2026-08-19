@@ -170,8 +170,8 @@ class SnapshotEngineTest {
 
             // Corrupt r.0.0.mca header with invalid sector offset inside header
             Path mca = WorldFixture.dimensionFolder(scratch, worldId.folder())
-                                .resolve("region")
-                                .resolve("r.0.0.mca");
+                    .resolve("region")
+                    .resolve("r.0.0.mca");
             byte[] corrupted = new byte[8192];
             corrupted[0] = 0;
             corrupted[1] = 0;
@@ -179,8 +179,8 @@ class SnapshotEngineTest {
             corrupted[3] = 1; // 1 sector
             Files.write(mca, corrupted);
 
-            List<Path> dirty = List.of(
-                                Path.of("world", "dimensions", "minecraft", worldId.folder(), "region", "r.0.0.mca"));
+            List<Path> dirty =
+                    List.of(Path.of("world", "dimensions", "minecraft", worldId.folder(), "region", "r.0.0.mca"));
 
             assertThatThrownBy(
                             () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true))
