@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phase A complete; Phase B complete (R6–R10 landed). Next is R11 (Phase C).
+Status: in progress — Phase A complete; Phase B complete; Phase C started (R11 landed). Next is R12.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -620,23 +620,31 @@ profile for that world under any snapshot.
 
 ### Phase C — lease and lifecycle hygiene
 
-#### R11 — FR-16's refusal sends the player to lobby
+#### R11 — FR-16's refusal sends the player to lobby — **DONE**
 
 **Requirement:** FR-16, FR-16a.
-**Files:** `backend/profile/ProfileListener.java`.
+**Files:** `backend/profile/ProfileListener.java`, `backend/GzmnWorldsPlugin.java`.
 
-`enter` clears the inventory first, then on an unreadable profile tells the
-player *"Nothing has been overwritten"* and leaves them standing in the world
+`enter` cleared the inventory first, then on an unreadable profile told the
+player *"Nothing has been overwritten"* and left them standing in the world
 with an empty inventory. FR-16 requires the opposite: *"sending the player to
 lobby with an error rather than granting an empty inventory."* The javadoc
-defers it to milestone 5's transfer, which shipped — `TransferJoinListener.refuse`
+deferred it to milestone 5's transfer, which shipped — `TransferJoinListener.refuse`
 does exactly this, four files away.
 
-Reuse that path: enqueue `EJECT_PLAYER` to the proxy and correct the message.
-Move the `applyFresh` clear to *after* a successful read, so the FR-16 case
-never touches the player's state and the message stops being false.
+**Landed.** `ProfileListener.refuse` enqueues `EJECT_PLAYER` to the proxy the
+same way `TransferJoinListener` does (`NodeCommandRepository` + holding TTL).
+`applyFresh` runs only after a successful empty read (FR-5 never-played);
+successful stored profiles `restore`. Decode / SQL / R10 orphan / unparseable
+manifest refusals never mutate inventory. Message says the player is returning
+to lobby rather than claiming nothing was overwritten after a clear.
 
-**Failing test first:** `unreadableProfileEjectsRatherThanClearing_FR16`.
+**Failing test first (proven by temporary revert):**
+`WorldCommitServiceTest#unreadableProfileEjectsRatherThanClearing_FR16` — without
+the eject and with up-front `applyFresh`, the message still says *Nothing has
+been overwritten* and no `EJECT_PLAYER` is enqueued; with the fix, diamonds
+remain, level is unchanged, and the proxy command is present. R10 orphan refuse
+also keeps arrival inventory and ejects.
 **Acceptance:** an undecodable profile produces an eject command and no
 inventory mutation.
 

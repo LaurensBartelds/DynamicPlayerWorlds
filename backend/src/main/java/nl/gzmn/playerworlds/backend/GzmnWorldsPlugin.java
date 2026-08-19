@@ -535,7 +535,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                         },
                         10L,
                         10L);
-        // FR-15: profile commit triggers & manifest snapshot restores
+        // FR-15: profile commit triggers & manifest snapshot restores.
+        // R11: nodeCommands + policy so FR-16 refusals eject via EJECT_PLAYER.
         getServer()
                 .getPluginManager()
                 .registerEvents(
@@ -545,7 +546,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                                 profileRepository,
                                 worldRepository,
                                 worldCommitService,
-                                pools),
+                                pools,
+                                nodeCommands,
+                                this::policy),
                         this);
 
         PluginCommand command = getCommand("pworld");

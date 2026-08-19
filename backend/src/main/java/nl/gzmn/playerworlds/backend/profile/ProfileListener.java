@@ -3,10 +3,16 @@ package nl.gzmn.playerworlds.backend.profile;
 import java.sql.SQLException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository.Snapshot;
@@ -34,12 +40,11 @@ import org.slf4j.LoggerFactory;
  * treats the three as a single unit, and a nether portal is not a change of
  * profile any more than it is a change of visibility group.
  *
- * <p>Milestone 4 leaves one window open and it is worth naming: a player is in
- * the world for the tick or two it takes the database read to come back, holding
- * whatever they arrived with. FR-11's holding area is what closes it, and it
- * arrives with the transfer path in milestone 5. Until then the inventory is
- * cleared the moment they cross, so the window contains an empty inventory
- * rather than the wrong one — which can lose nothing into the world.
+ * <p>R11 / FR-16: inventory is not cleared until a successful read. An
+ * unreadable profile never mutates the player and ejects them to lobby via
+ * {@code EJECT_PLAYER}, matching {@link nl.gzmn.playerworlds.backend.node.TransferJoinListener}.
+ * FR-11's holding area is what keeps the brief window before the database
+ * answers from carrying a previous world's inventory into this one.
  */
 public final class ProfileListener implements Listener {
 
@@ -51,6 +56,8 @@ public final class ProfileListener implements Listener {
     private final @Nullable PlayerWorldRepository playerWorlds;
     private final WorldCommitService commits;
     private final PluginExecutors executors;
+    private final NodeCommandRepository nodeCommands;
+    private final Supplier<NetworkPolicy> policy;
 
     public ProfileListener(
             WorldFolders folders,
@@ -58,13 +65,17 @@ public final class ProfileListener implements Listener {
             ProfileRepository repository,
             @Nullable PlayerWorldRepository playerWorlds,
             WorldCommitService commits,
-            PluginExecutors executors) {
+            PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy) {
         this.folders = Objects.requireNonNull(folders, "folders");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.repository = Objects.requireNonNull(repository, "repository");
         this.playerWorlds = playerWorlds;
         this.commits = Objects.requireNonNull(commits, "commits");
         this.executors = Objects.requireNonNull(executors, "executors");
+        this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
+        this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     public ProfileListener(
@@ -72,8 +83,10 @@ public final class ProfileListener implements Listener {
             ProfileService profiles,
             ProfileRepository repository,
             WorldCommitService commits,
-            PluginExecutors executors) {
-        this(folders, profiles, repository, null, commits, executors);
+            PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy) {
+        this(folders, profiles, repository, null, commits, executors, nodeCommands, policy);
     }
 
     /**
@@ -114,9 +127,10 @@ public final class ProfileListener implements Listener {
     /**
      * Loads the profile for the snapshot this world is at (FR-15b).
      *
-     * <p>Clears first, on the tick the player crosses, so the gap before the
-     * database answers holds an empty inventory rather than the one they walked
-     * in with — an empty one can lose nothing into the world.
+     * <p>R11 / FR-16: does <em>not</em> clear inventory first. A failed read must
+     * leave the player untouched and send them to lobby; clearing up-front made
+     * the old "Nothing has been overwritten" message false. Successful empty
+     * (never played) still applies FR-5's fresh profile after the read.
      *
      * <p>R10: {@link ProfileRepository#latestSnapshot} is only for the
      * no-object-storage mode ({@code manifest_key IS NULL}). A present key is
@@ -124,8 +138,6 @@ public final class ProfileListener implements Listener {
      * profiles exist refuses rather than inventing a fresh inventory (§7).
      */
     private void enter(Player player, WorldId worldId) {
-        profiles.applyFresh(player);
-
         executors.db().execute(() -> {
             final Optional<StoredProfile> stored;
             try {
@@ -135,7 +147,13 @@ public final class ProfileListener implements Listener {
                             "manifest_key for world {} is present but unparseable; refusing profile load "
                                     + "rather than falling back to latestSnapshot (R10 / FR-15b)",
                             worldId);
-                    executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                    executors
+                            .main()
+                            .execute(() -> refuse(
+                                    player,
+                                    worldId,
+                                    "your inventory for this world could not be loaded",
+                                    "Profile load refused: unparseable manifest_key (FR-16)"));
                     return;
                 }
                 Optional<Snapshot> snapshot = resolution.snapshot();
@@ -154,19 +172,36 @@ public final class ProfileListener implements Listener {
                             player.getUniqueId(),
                             worldId,
                             snapshot.orElse(null));
-                    executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                    executors
+                            .main()
+                            .execute(() -> refuse(
+                                    player,
+                                    worldId,
+                                    "your inventory for this world could not be loaded",
+                                    "Profile load refused: snapshot row missing (FR-16)"));
                     return;
                 }
             } catch (SQLException e) {
                 log.error("could not read the profile of {} for world {}", player.getUniqueId(), worldId, e);
-                executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                executors
+                        .main()
+                        .execute(() -> refuse(
+                                player,
+                                worldId,
+                                "your inventory for this world could not be loaded",
+                                "Profile load refused: database error (FR-16)"));
                 return;
             }
 
             if (stored.isEmpty()) {
                 // FR-15b: no row for this snapshot means they have never played
-                // here, and FR-5 says that is a fresh profile — which they already
-                // have from the clear above.
+                // here, and FR-5 says that is a fresh profile — applied only after
+                // the successful empty read (R11).
+                executors.main().execute(() -> {
+                    if (player.isOnline()) {
+                        profiles.applyFresh(player);
+                    }
+                });
                 return;
             }
 
@@ -183,7 +218,13 @@ public final class ProfileListener implements Listener {
                         player.getUniqueId(),
                         worldId,
                         e);
-                executors.main().execute(() -> refuse(player, "your inventory for this world could not be read"));
+                executors
+                        .main()
+                        .execute(() -> refuse(
+                                player,
+                                worldId,
+                                "your inventory for this world could not be read",
+                                "Profile could not be deserialised (FR-16)"));
                 return;
             }
 
@@ -266,16 +307,31 @@ public final class ProfileListener implements Listener {
     }
 
     /**
-     * FR-16's refusal path.
+     * FR-16's refusal path (R11): message the player and eject to lobby.
      *
-     * <p>Sending the player to lobby is milestone 5's transfer; until it exists
-     * the honest thing is to say so loudly and leave them with the empty
-     * inventory they already have, rather than silently handing them a world's
-     * worth of nothing and calling it their profile.
+     * <p>Must not mutate inventory — the player still holds whatever they arrived
+     * with (holding-area state under FR-11). Reuses the same {@code EJECT_PLAYER}
+     * enqueue as {@link nl.gzmn.playerworlds.backend.node.TransferJoinListener}.
      */
-    private void refuse(Player player, String reason) {
-        player.sendMessage(Component.text(
-                reason + ". Nothing has been overwritten — ask an admin to check the server log (FR-16).",
-                NamedTextColor.RED));
+    private void refuse(Player player, @Nullable WorldId worldId, String message, String ejectReason) {
+        if (player.isOnline()) {
+            player.sendMessage(Component.text(
+                    message + ". Returning you to the lobby — ask an admin to check the server log (FR-16).",
+                    NamedTextColor.RED));
+        }
+        executors.db().execute(() -> {
+            try {
+                nodeCommands.enqueue(
+                        "proxy",
+                        worldId,
+                        null,
+                        CommandKind.EJECT_PLAYER.name(),
+                        EjectPayload.format(player.getUniqueId(), ejectReason),
+                        policy.get().holdingTimeout(),
+                        ControlChannels.PROXY);
+            } catch (SQLException e) {
+                log.warn("could not enqueue EJECT_PLAYER for {} after FR-16 profile refusal", player.getUniqueId(), e);
+            }
+        });
     }
 }

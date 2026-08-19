@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.profile;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +18,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.PaperItemCodec;
@@ -31,6 +34,9 @@ import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -80,6 +86,7 @@ class WorldCommitServiceTest {
     private ProfileService profileService;
     private ProfileRepository profileRepo;
     private PlayerWorldRepository worldRepo;
+    private NodeCommandRepository nodeCommands;
     private S3ObjectStore objectStore;
     private LocalObjectCache objectCache;
     private SnapshotEngine snapshotEngine;
@@ -97,6 +104,7 @@ class WorldCommitServiceTest {
         profileService = new ProfileService(PaperItemCodec.INSTANCE);
         profileRepo = new ProfileRepository(database);
         worldRepo = new PlayerWorldRepository(database);
+        nodeCommands = new NodeCommandRepository(database);
 
         StorageClientSettings s3Settings = TestObjectStore.settingsForNewBucket();
         objectStore = S3ObjectStore.open(s3Settings);
@@ -738,6 +746,28 @@ class WorldCommitServiceTest {
         flushExecutors();
     }
 
+    private List<Long> awaitEjectCommands() throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        List<Long> ids = onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10));
+        while (ids.isEmpty() && System.currentTimeMillis() < deadline) {
+            flushExecutors();
+            Thread.sleep(20);
+            ids = onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10));
+        }
+        return ids;
+    }
+
+    private Component awaitPlayerMessage(PlayerMock player) throws Exception {
+        long deadline = System.currentTimeMillis() + 5000;
+        Component msg = player.nextComponentMessage();
+        while (msg == null && System.currentTimeMillis() < deadline) {
+            flushExecutors();
+            Thread.sleep(20);
+            msg = player.nextComponentMessage();
+        }
+        return msg;
+    }
+
     @Test
     @DisplayName("R10: resolveSnapshot uses latestSnapshot only when manifest_key is null")
     void resolveSnapshotScopesLatestFallbackToNoStorage_R10() throws Exception {
@@ -749,8 +779,15 @@ class WorldCommitServiceTest {
             return null;
         });
 
-        ProfileListener listener =
-                new ProfileListener(folders, profileService, profileRepo, worldRepo, commitService, executors);
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
 
         // Gen-0 profiles exist (no-storage era).
         onDb(() -> {
@@ -851,8 +888,15 @@ class WorldCommitServiceTest {
             return null;
         });
 
-        ProfileListener listener =
-                new ProfileListener(folders, profileService, profileRepo, worldRepo, commitService, executors);
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
 
         joiningPlayer.teleport(defaultWorld.getSpawnLocation());
         joiningPlayer.getInventory().addItem(new ItemStack(Material.STONE, 1));
@@ -860,23 +904,17 @@ class WorldCommitServiceTest {
         joiningPlayer.teleport(targetWorld.getSpawnLocation());
         listener.onChangedWorld(new PlayerChangedWorldEvent(joiningPlayer, defaultWorld));
 
-        awaitFlush(() -> {
-            // Cleared by applyFresh; refuse must not restore the gen-0 diamond stack.
-            ItemStack[] contents = joiningPlayer.getInventory().getContents();
-            for (ItemStack item : contents) {
-                if (item != null && item.getType() == Material.DIAMOND) {
-                    return false;
-                }
-            }
-            return joiningPlayer.getLevel() == 0;
-        });
+        List<Long> ejectIds = awaitEjectCommands();
 
-        assertThat(joiningPlayer.getLevel())
-                .as("R10: must not restore gen-0 XP when manifest names another snapshot")
-                .isZero();
         assertThat(joiningPlayer.getInventory().getContents())
-                .as("R10: must not restore gen-0 items via latestSnapshot fallback")
+                .as("R10/R11: refuse must not restore gen-0 diamonds via latestSnapshot")
                 .noneMatch(item -> item != null && item.getType() == Material.DIAMOND);
+        assertThat(joiningPlayer.getInventory().getContents())
+                .as("R11: FR-16 refuse must not clear the inventory the player arrived with")
+                .anyMatch(item -> item != null && item.getType() == Material.STONE);
+        assertThat(ejectIds)
+                .as("R11: orphaned named snapshot refuses with EJECT_PLAYER")
+                .isNotEmpty();
     }
 
     @Test
@@ -908,8 +946,15 @@ class WorldCommitServiceTest {
                 new ProfileEnvelope.StoredLocation(
                         folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD), 0, 64, 0, 0, 0));
 
-        ProfileListener listener =
-                new ProfileListener(folders, profileService, profileRepo, worldRepo, commitService, executors);
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
 
         WorldMock defaultWorld = server.addSimpleWorld("world");
         WorldMock targetWorld = server.addSimpleWorld(folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD));
@@ -943,5 +988,81 @@ class WorldCommitServiceTest {
         assertThat(joiningPlayer.getLevel()).isEqualTo(42);
         assertThat(joiningPlayer.getInventory().getContents())
                 .anyMatch(item -> item != null && item.getType() == Material.NETHERITE_SWORD);
+    }
+
+    @Test
+    @DisplayName("R11: unreadable profile ejects rather than clearing inventory (FR-16)")
+    void unreadableProfileEjectsRatherThanClearing_FR16() throws Exception {
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "r11-corrupt", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        WorldMock defaultWorld = server.addSimpleWorld("world");
+        WorldMock targetWorld = server.addSimpleWorld(folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD));
+        PlayerMock player = server.addPlayer();
+        UUID playerId = player.getUniqueId();
+
+        // Corrupt BYTEA at a real snapshot — decode must throw ProfileFormatException.
+        ProfileRepository.Snapshot snap = new ProfileRepository.Snapshot(1L, 1);
+        onDb(() -> {
+            database.inTransaction(connection -> {
+                profileRepo.saveAll(
+                        connection, worldId, snap, ProfileCodec.FORMAT_VERSION, Map.of(playerId, new byte[] {
+                            1, 2, 3, 4, 5
+                        }));
+                return null;
+            });
+            database.inTransaction(connection -> {
+                try (var stmt = connection.prepareStatement("UPDATE player_world SET manifest_key = ? WHERE id = ?")) {
+                    stmt.setString(1, "worlds/" + worldId.value() + "/manifest/1-1.json");
+                    stmt.setObject(2, worldId.value());
+                    stmt.executeUpdate();
+                }
+                return null;
+            });
+            return null;
+        });
+
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
+
+        player.teleport(defaultWorld.getSpawnLocation());
+        player.getInventory().addItem(new ItemStack(Material.DIAMOND, 7));
+        player.setLevel(3);
+
+        player.teleport(targetWorld.getSpawnLocation());
+        listener.onChangedWorld(new PlayerChangedWorldEvent(player, defaultWorld));
+
+        Component msg = awaitPlayerMessage(player);
+        assertThat(msg).isNotNull();
+        String text = PlainTextComponentSerializer.plainText().serialize(msg);
+        assertThat(text).contains("could not be read");
+        assertThat(text).contains("Returning you to the lobby");
+        assertThat(text).doesNotContain("Nothing has been overwritten");
+
+        List<Long> ids = awaitEjectCommands();
+        assertThat(ids).hasSize(1);
+        NodeCommand command = onDb(() -> nodeCommands.findById(ids.getFirst())).orElseThrow();
+        assertEquals(CommandKind.EJECT_PLAYER.name(), command.command());
+        var eject = EjectPayload.parse(command.payloadJson()).orElseThrow();
+        assertEquals(playerId, eject.playerUuid());
+        assertThat(eject.reason()).contains("deserialised");
+
+        // R11 acceptance: undecodable profile → eject and no inventory mutation.
+        assertThat(player.getLevel()).isEqualTo(3);
+        assertThat(player.getInventory().getContents())
+                .as("FR-16 must not clear or replace inventory on refuse")
+                .anyMatch(item -> item != null && item.getType() == Material.DIAMOND && item.getAmount() == 7);
     }
 }
