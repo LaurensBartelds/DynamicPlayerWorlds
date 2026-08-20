@@ -3,6 +3,8 @@ package nl.gzmn.playerworlds.core.menu;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.List;
+import java.util.UUID;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.junit.jupiter.api.DisplayName;
@@ -301,22 +303,225 @@ class MenuCodecTest {
     }
 
     @Nested
+    @DisplayName("RenderMenuPayload codec")
+    class RenderMenuPayloadTests {
+
+        @Test
+        @DisplayName("round-trips RenderMenuPayload with items, lore, and skullOwner")
+        void roundTripsRenderMenuPayload() {
+            UUID skullId = UUID.randomUUID();
+            List<MenuItemDescriptor> items = List.of(
+                    new MenuItemDescriptor(
+                            0,
+                            "GRASS_BLOCK",
+                            1,
+                            "§aWorld 1",
+                            List.of("§7Lore line 1", "§7Lore line 2"),
+                            null,
+                            "ACTION:JOIN:test-id"),
+                    new MenuItemDescriptor(
+                            4, "PLAYER_HEAD", 1, "§eProfile", List.of("§7Player info"), skullId, "NAV:PROFILE"),
+                    new MenuItemDescriptor(8, "BARRIER", 64, "§cClose", List.of(), null, "ACTION:CLOSE"));
+            RenderMenuPayload payload = new RenderMenuPayload(1001L, "MAIN", "§8Main Menu", 54, items);
+
+            byte[] encoded = MenuCodec.encodeRenderMenu(payload);
+            RenderMenuPayload decoded = MenuCodec.decodeRenderMenu(encoded);
+
+            assertThat(decoded).isEqualTo(payload);
+            assertThat(decoded.correlationId()).isEqualTo(1001L);
+            assertThat(decoded.screenType()).isEqualTo("MAIN");
+            assertThat(decoded.title()).isEqualTo("§8Main Menu");
+            assertThat(decoded.size()).isEqualTo(54);
+            assertThat(decoded.items()).hasSize(3);
+
+            MenuItemDescriptor item0 = decoded.items().get(0);
+            assertThat(item0.slot()).isEqualTo(0);
+            assertThat(item0.materialName()).isEqualTo("GRASS_BLOCK");
+            assertThat(item0.amount()).isEqualTo(1);
+            assertThat(item0.displayName()).isEqualTo("§aWorld 1");
+            assertThat(item0.lore()).containsExactly("§7Lore line 1", "§7Lore line 2");
+            assertThat(item0.skullOwner()).isNull();
+            assertThat(item0.actionTag()).isEqualTo("ACTION:JOIN:test-id");
+
+            MenuItemDescriptor item1 = decoded.items().get(1);
+            assertThat(item1.slot()).isEqualTo(4);
+            assertThat(item1.materialName()).isEqualTo("PLAYER_HEAD");
+            assertThat(item1.amount()).isEqualTo(1);
+            assertThat(item1.displayName()).isEqualTo("§eProfile");
+            assertThat(item1.lore()).containsExactly("§7Player info");
+            assertThat(item1.skullOwner()).isEqualTo(skullId);
+            assertThat(item1.actionTag()).isEqualTo("NAV:PROFILE");
+
+            MenuItemDescriptor item2 = decoded.items().get(2);
+            assertThat(item2.slot()).isEqualTo(8);
+            assertThat(item2.materialName()).isEqualTo("BARRIER");
+            assertThat(item2.amount()).isEqualTo(64);
+            assertThat(item2.displayName()).isEqualTo("§cClose");
+            assertThat(item2.lore()).isEmpty();
+            assertThat(item2.skullOwner()).isNull();
+            assertThat(item2.actionTag()).isEqualTo("ACTION:CLOSE");
+        }
+
+        @Test
+        @DisplayName("round-trips RenderMenuPayload with empty items list")
+        void roundTripsEmptyItems() {
+            RenderMenuPayload payload = new RenderMenuPayload(1002L, "EMPTY", "Empty Menu", 9, List.of());
+            byte[] encoded = MenuCodec.encodeRenderMenu(payload);
+            RenderMenuPayload decoded = MenuCodec.decodeRenderMenu(encoded);
+
+            assertThat(decoded).isEqualTo(payload);
+            assertThat(decoded.items()).isEmpty();
+        }
+
+        @Test
+        @DisplayName("decodeRenderMenu rejects mismatched message type")
+        void rejectsMismatchedType() {
+            byte[] encodedOpen = MenuCodec.encodeOpenMenu(new OpenMenu(1L));
+            assertThatThrownBy(() -> MenuCodec.decodeRenderMenu(encodedOpen)).isInstanceOf(MenuCodecException.class);
+        }
+
+        @Test
+        @DisplayName("decodeRenderMenu rejects trailing bytes")
+        void rejectsTrailingBytes() {
+            RenderMenuPayload payload = new RenderMenuPayload(1003L, "MAIN", "Title", 27, List.of());
+            byte[] valid = MenuCodec.encodeRenderMenu(payload);
+            byte[] withTrailing = new byte[valid.length + 1];
+            System.arraycopy(valid, 0, withTrailing, 0, valid.length);
+            withTrailing[valid.length] = (byte) 0x01;
+
+            assertThatThrownBy(() -> MenuCodec.decodeRenderMenu(withTrailing)).isInstanceOf(MenuCodecException.class);
+        }
+    }
+
+    @Nested
+    @DisplayName("MenuClickIntent codec")
+    class MenuClickIntentTests {
+
+        @Test
+        @DisplayName("round-trips MenuClickIntent")
+        void roundTripsMenuClickIntent() {
+            MenuClickIntent intent = new MenuClickIntent(2002L, "ACTION:JOIN:test-id", 5);
+            byte[] encoded = MenuCodec.encodeClickIntent(intent);
+            MenuClickIntent decoded = MenuCodec.decodeClickIntent(encoded);
+
+            assertThat(decoded).isEqualTo(intent);
+            assertThat(decoded.correlationId()).isEqualTo(2002L);
+            assertThat(decoded.actionTag()).isEqualTo("ACTION:JOIN:test-id");
+            assertThat(decoded.screenSequence()).isEqualTo(5);
+        }
+
+        @Test
+        @DisplayName("decodeClickIntent rejects mismatched message type")
+        void rejectsMismatchedType() {
+            byte[] encodedOpen = MenuCodec.encodeOpenMenu(new OpenMenu(1L));
+            assertThatThrownBy(() -> MenuCodec.decodeClickIntent(encodedOpen)).isInstanceOf(MenuCodecException.class);
+        }
+
+        @Test
+        @DisplayName("decodeClickIntent rejects trailing bytes")
+        void rejectsTrailingBytes() {
+            MenuClickIntent intent = new MenuClickIntent(2002L, "NAV:MY_WORLDS", 1);
+            byte[] valid = MenuCodec.encodeClickIntent(intent);
+            byte[] withTrailing = new byte[valid.length + 1];
+            System.arraycopy(valid, 0, withTrailing, 0, valid.length);
+
+            assertThatThrownBy(() -> MenuCodec.decodeClickIntent(withTrailing)).isInstanceOf(MenuCodecException.class);
+        }
+    }
+
+    @Nested
+    @DisplayName("CloseMenuMessage codec")
+    class CloseMenuMessageTests {
+
+        @Test
+        @DisplayName("round-trips CloseMenuMessage")
+        void roundTripsCloseMenuMessage() {
+            CloseMenuMessage msg = new CloseMenuMessage(3003L);
+            byte[] encoded = MenuCodec.encodeCloseMenu(msg);
+            CloseMenuMessage decoded = MenuCodec.decodeCloseMenu(encoded);
+
+            assertThat(decoded).isEqualTo(msg);
+            assertThat(decoded.correlationId()).isEqualTo(3003L);
+        }
+
+        @Test
+        @DisplayName("decodeCloseMenu rejects mismatched message type")
+        void rejectsMismatchedType() {
+            byte[] encodedOpen = MenuCodec.encodeOpenMenu(new OpenMenu(1L));
+            assertThatThrownBy(() -> MenuCodec.decodeCloseMenu(encodedOpen)).isInstanceOf(MenuCodecException.class);
+        }
+
+        @Test
+        @DisplayName("decodeCloseMenu rejects trailing bytes")
+        void rejectsTrailingBytes() {
+            CloseMenuMessage msg = new CloseMenuMessage(3003L);
+            byte[] valid = MenuCodec.encodeCloseMenu(msg);
+            byte[] withTrailing = new byte[valid.length + 1];
+            System.arraycopy(valid, 0, withTrailing, 0, valid.length);
+
+            assertThatThrownBy(() -> MenuCodec.decodeCloseMenu(withTrailing)).isInstanceOf(MenuCodecException.class);
+        }
+    }
+
+    @Nested
+    @DisplayName("MenuClosedNotice codec")
+    class MenuClosedNoticeTests {
+
+        @Test
+        @DisplayName("round-trips MenuClosedNotice")
+        void roundTripsMenuClosedNotice() {
+            MenuClosedNotice notice = new MenuClosedNotice(4004L);
+            byte[] encoded = MenuCodec.encodeClosedNotice(notice);
+            MenuClosedNotice decoded = MenuCodec.decodeClosedNotice(encoded);
+
+            assertThat(decoded).isEqualTo(notice);
+            assertThat(decoded.correlationId()).isEqualTo(4004L);
+        }
+
+        @Test
+        @DisplayName("decodeClosedNotice rejects mismatched message type")
+        void rejectsMismatchedType() {
+            byte[] encodedOpen = MenuCodec.encodeOpenMenu(new OpenMenu(1L));
+            assertThatThrownBy(() -> MenuCodec.decodeClosedNotice(encodedOpen)).isInstanceOf(MenuCodecException.class);
+        }
+
+        @Test
+        @DisplayName("decodeClosedNotice rejects trailing bytes")
+        void rejectsTrailingBytes() {
+            MenuClosedNotice notice = new MenuClosedNotice(4004L);
+            byte[] valid = MenuCodec.encodeClosedNotice(notice);
+            byte[] withTrailing = new byte[valid.length + 1];
+            System.arraycopy(valid, 0, withTrailing, 0, valid.length);
+
+            assertThatThrownBy(() -> MenuCodec.decodeClosedNotice(withTrailing)).isInstanceOf(MenuCodecException.class);
+        }
+    }
+
+    @Nested
     @DisplayName("Generic decode method")
     class GenericDecodeTests {
 
         @Test
-        @DisplayName("decode dispatches OpenMenu, IntentEnvelope, and MenuResult")
+        @DisplayName("decode dispatches all supported message types")
         void dispatchesAllTypes() {
             OpenMenu openMenu = new OpenMenu(10L);
             IntentEnvelope envelope = new IntentEnvelope(20L, new MenuIntent.RestoreWorld("demo"));
             MenuResult ok = new MenuResult.Ok(30L, "done");
             MenuResult failed = new MenuResult.Failed(40L, FailureCode.PERMISSION_DENIED, "no");
+            RenderMenuPayload render = new RenderMenuPayload(50L, "MAIN", "Title", 27, List.of());
+            CloseMenuMessage closeMsg = new CloseMenuMessage(60L);
+            MenuClickIntent click = new MenuClickIntent(70L, "ACTION:JOIN:world-1", 2);
+            MenuClosedNotice closed = new MenuClosedNotice(80L);
 
             assertThat(MenuCodec.decode(MenuCodec.encodeOpenMenu(openMenu))).isEqualTo(openMenu);
             assertThat(MenuCodec.decode(MenuCodec.encodeIntent(envelope.correlationId(), envelope.intent())))
                     .isEqualTo(envelope);
             assertThat(MenuCodec.decode(MenuCodec.encodeResult(ok))).isEqualTo(ok);
             assertThat(MenuCodec.decode(MenuCodec.encodeResult(failed))).isEqualTo(failed);
+            assertThat(MenuCodec.decode(MenuCodec.encodeRenderMenu(render))).isEqualTo(render);
+            assertThat(MenuCodec.decode(MenuCodec.encodeCloseMenu(closeMsg))).isEqualTo(closeMsg);
+            assertThat(MenuCodec.decode(MenuCodec.encodeClickIntent(click))).isEqualTo(click);
+            assertThat(MenuCodec.decode(MenuCodec.encodeClosedNotice(closed))).isEqualTo(closed);
         }
     }
 
@@ -331,6 +536,10 @@ class MenuCodecTest {
             assertThatThrownBy(() -> MenuCodec.decodeOpenMenu(new byte[0])).isInstanceOf(MenuCodecException.class);
             assertThatThrownBy(() -> MenuCodec.decodeIntent(new byte[0])).isInstanceOf(MenuCodecException.class);
             assertThatThrownBy(() -> MenuCodec.decodeResult(new byte[0])).isInstanceOf(MenuCodecException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeRenderMenu(new byte[0])).isInstanceOf(MenuCodecException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeCloseMenu(new byte[0])).isInstanceOf(MenuCodecException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeClickIntent(new byte[0])).isInstanceOf(MenuCodecException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeClosedNotice(new byte[0])).isInstanceOf(MenuCodecException.class);
         }
 
         @Test
@@ -386,10 +595,18 @@ class MenuCodecTest {
             assertThatThrownBy(() -> MenuCodec.encodeOpenMenu(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.encodeIntent(1L, null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.encodeResult(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.encodeRenderMenu(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.encodeCloseMenu(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.encodeClickIntent(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.encodeClosedNotice(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.decode(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.decodeOpenMenu(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.decodeIntent(null)).isInstanceOf(NullPointerException.class);
             assertThatThrownBy(() -> MenuCodec.decodeResult(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeRenderMenu(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeCloseMenu(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeClickIntent(null)).isInstanceOf(NullPointerException.class);
+            assertThatThrownBy(() -> MenuCodec.decodeClosedNotice(null)).isInstanceOf(NullPointerException.class);
         }
     }
 }
