@@ -77,6 +77,11 @@ public final class LobbyMenuChannel implements PluginMessageListener {
             handleRenderPayload(player, payload);
         } else if (decoded instanceof CloseMenuMessage close) {
             handleCloseMessage(player, close);
+        } else if (decoded instanceof OpenMenu) {
+            // The proxy's /world Brigadier command sends OpenMenu downstream.
+            // Bounce it back upstream so the proxy's MenuChannelListener can
+            // build the menu and reply with a RenderMenuPayload.
+            player.sendPluginMessage(plugin, MenuChannels.CHANNEL_NAME, message);
         } else {
             log.log(
                     Level.FINE,
