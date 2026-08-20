@@ -7,6 +7,7 @@ import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
+import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
@@ -22,6 +23,10 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.profile.ProfileFormatException;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -47,6 +52,9 @@ import org.slf4j.LoggerFactory;
  * answers from carrying a previous world's inventory into this one.
  */
 public final class ProfileListener implements Listener {
+
+    /** Kept off the border itself, which is a wall a player can be pushed through. */
+    private static final double BORDER_INSET = 2.0;
 
     private static final Logger log = LoggerFactory.getLogger(ProfileListener.class);
 
@@ -231,9 +239,67 @@ public final class ProfileListener implements Listener {
             executors.main().execute(() -> {
                 if (player.isOnline()) {
                     profiles.restore(player, envelope);
+                    returnToStoredLocation(player, envelope);
                 }
             });
         });
+    }
+
+    /**
+     * FR-14: puts the player back where they were, not at spawn.
+     *
+     * <p>{@code lastLocation} has been captured, encoded and decoded since
+     * milestone 4 and read by nothing, so {@code capture}'s javadoc — "stored so
+     * a rejoin returns them where they were rather than to spawn" — described
+     * behaviour that did not exist. The two javadocs disagreed: {@code restore}'s
+     * says it deliberately does not teleport, which stays true, because where the
+     * player ends up is the caller's decision and this is the caller.
+     *
+     * <p>Main thread, after the restore, so the arrival teleport
+     * {@code TransferJoinListener} performs has already happened and this is the
+     * last word on where they stand.
+     */
+    private void returnToStoredLocation(Player player, ProfileEnvelope envelope) {
+        MainThread.assertOn();
+        ProfileEnvelope.StoredLocation stored = envelope.lastLocation();
+        if (stored == null) {
+            return;
+        }
+        // Every dimension present on disk is materialised by the load, so a
+        // stored nether or end is already here — unless the world was archived
+        // and restored without one, in which case spawn is the honest answer.
+        World world = Bukkit.getWorld(stored.dimension());
+        if (world == null) {
+            log.debug(
+                    "player {} was last in {}, which is not loaded; leaving them where they arrived",
+                    player.getUniqueId(),
+                    stored.dimension());
+            return;
+        }
+        Location destination = clampToBorder(world, stored);
+        var _ = player.teleport(destination);
+    }
+
+    /**
+     * Brings a stored position inside the world's border (FR-3, FR-9e).
+     *
+     * <p>The border is read from the live world rather than recomputed: FR-25c
+     * has the database value applied on every load, so this is that value, and a
+     * border that has been shrunk since the player left would otherwise strand
+     * them outside it — which is a player stuck in the void, not a cosmetic
+     * problem.
+     */
+    private static Location clampToBorder(World world, ProfileEnvelope.StoredLocation stored) {
+        WorldBorder border = world.getWorldBorder();
+        double half = Math.max(0.0, border.getSize() / 2.0 - BORDER_INSET);
+        Location centre = border.getCenter();
+        double x = clamp(stored.x(), centre.getX() - half, centre.getX() + half);
+        double z = clamp(stored.z(), centre.getZ() - half, centre.getZ() + half);
+        return new Location(world, x, stored.y(), z, stored.yaw(), stored.pitch());
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     /**

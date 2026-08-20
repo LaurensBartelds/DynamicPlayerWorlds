@@ -1081,4 +1081,145 @@ class WorldCommitServiceTest {
                 .as("FR-16 must not clear or replace inventory on refuse")
                 .anyMatch(item -> item != null && item.getType() == Material.DIAMOND && item.getAmount() == 7);
     }
+
+    @Test
+    @DisplayName("R28: a rejoin returns the player where they were, clamped inside the border (FR-14)")
+    void aRejoinReturnsThePlayerWhereTheyWere_FR14() throws Exception {
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "resume-world", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        ProfileRepository.Snapshot snapshot = new ProfileRepository.Snapshot(0L, 2);
+        // Where they logged out: well inside the world, and a long way from spawn.
+        ProfileEnvelope env = new ProfileEnvelope(
+                PaperItemCodec.INSTANCE.serializeItems(new ItemStack[41]),
+                PaperItemCodec.INSTANCE.serializeItems(new ItemStack[27]),
+                7,
+                0f,
+                0,
+                20.0,
+                20,
+                5.0f,
+                List.of(),
+                new ProfileEnvelope.StoredLocation(overworldName, 120.5, 72.0, -240.5, 90f, 10f));
+
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
+
+        WorldMock defaultWorld = server.addSimpleWorld("world");
+        WorldMock targetWorld = server.addSimpleWorld(overworldName);
+        targetWorld.getWorldBorder().setCenter(0, 0);
+        targetWorld.getWorldBorder().setSize(10_000);
+
+        PlayerMock joiningPlayer = server.addPlayer();
+        joiningPlayer.teleport(defaultWorld.getSpawnLocation());
+
+        assertThat(onDb(() -> worldRepo.commitSnapshot(
+                        worldId,
+                        0L,
+                        "node-test",
+                        "worlds/" + worldId.value() + "/manifest/0-2.json",
+                        1024L,
+                        4903,
+                        "26.2",
+                        snapshot,
+                        ProfileCodec.FORMAT_VERSION,
+                        Map.of(joiningPlayer.getUniqueId(), ProfileCodec.encode(env)),
+                        profileRepo)))
+                .isTrue();
+
+        // The arrival teleport TransferJoinListener performs, which is what
+        // raises the event the listener restores on.
+        joiningPlayer.teleport(targetWorld.getSpawnLocation());
+        listener.onChangedWorld(new PlayerChangedWorldEvent(joiningPlayer, defaultWorld));
+
+        awaitFlush(() -> joiningPlayer.getLocation().getX() == 120.5);
+
+        // lastLocation was captured, encoded and decoded since milestone 4 and
+        // read by nothing: every rejoin landed on spawn.
+        assertThat(joiningPlayer.getLocation().getX()).isEqualTo(120.5);
+        assertThat(joiningPlayer.getLocation().getZ()).isEqualTo(-240.5);
+        assertThat(joiningPlayer.getLocation().getWorld().getName()).isEqualTo(overworldName);
+    }
+
+    @Test
+    @DisplayName("R28: a stored position outside a shrunken border is clamped inside it (FR-3)")
+    void aStoredPositionOutsideTheBorderIsClamped_FR14() throws Exception {
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "shrunk-world", 1234L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        ProfileRepository.Snapshot snapshot = new ProfileRepository.Snapshot(0L, 2);
+        ProfileEnvelope env = new ProfileEnvelope(
+                PaperItemCodec.INSTANCE.serializeItems(new ItemStack[41]),
+                PaperItemCodec.INSTANCE.serializeItems(new ItemStack[27]),
+                3,
+                0f,
+                0,
+                20.0,
+                20,
+                5.0f,
+                List.of(),
+                new ProfileEnvelope.StoredLocation(overworldName, 4000, 70.0, 4000, 0f, 0f));
+
+        ProfileListener listener = new ProfileListener(
+                folders,
+                profileService,
+                profileRepo,
+                worldRepo,
+                commitService,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults);
+
+        WorldMock defaultWorld = server.addSimpleWorld("world");
+        WorldMock targetWorld = server.addSimpleWorld(overworldName);
+        // The owner shrank the border while they were away (FR-3, FR-25c).
+        targetWorld.getWorldBorder().setCenter(0, 0);
+        targetWorld.getWorldBorder().setSize(1000);
+
+        PlayerMock joiningPlayer = server.addPlayer();
+        joiningPlayer.teleport(defaultWorld.getSpawnLocation());
+
+        assertThat(onDb(() -> worldRepo.commitSnapshot(
+                        worldId,
+                        0L,
+                        "node-test",
+                        "worlds/" + worldId.value() + "/manifest/0-2.json",
+                        1024L,
+                        4903,
+                        "26.2",
+                        snapshot,
+                        ProfileCodec.FORMAT_VERSION,
+                        Map.of(joiningPlayer.getUniqueId(), ProfileCodec.encode(env)),
+                        profileRepo)))
+                .isTrue();
+
+        joiningPlayer.teleport(targetWorld.getSpawnLocation());
+        listener.onChangedWorld(new PlayerChangedWorldEvent(joiningPlayer, defaultWorld));
+
+        awaitFlush(() -> joiningPlayer.getLevel() == 3);
+
+        // Inside, not on: a player left exactly on the border is a player in the
+        // void the moment something nudges them.
+        assertThat(joiningPlayer.getLocation().getX()).isLessThan(500).isGreaterThan(400);
+        assertThat(joiningPlayer.getLocation().getZ()).isLessThan(500).isGreaterThan(400);
+    }
 }

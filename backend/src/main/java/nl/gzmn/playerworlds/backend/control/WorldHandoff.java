@@ -12,6 +12,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
+import nl.gzmn.playerworlds.backend.world.HoldingArea;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.UnloadOutcome;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
@@ -88,6 +89,7 @@ public final class WorldHandoff {
     private final WorldRegistry registry;
     private final WorldLifecycleService lifecycle;
     private final WorldFolders folders;
+    private final HoldingArea holdingArea;
     private final PluginExecutors executors;
     private final @Nullable WorldCommitService commits;
     private final NodeCommandRepository nodeCommands;
@@ -104,6 +106,7 @@ public final class WorldHandoff {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.lifecycle = Objects.requireNonNull(lifecycle, "lifecycle");
         this.folders = Objects.requireNonNull(folders, "folders");
+        this.holdingArea = new HoldingArea(this.folders);
         this.executors = Objects.requireNonNull(executors, "executors");
         this.commits = commits;
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
@@ -158,7 +161,7 @@ public final class WorldHandoff {
 
     /** Main thread. Moves everyone out of the world's three dimensions, then tells the proxy. */
     private CompletableFuture<Integer> ejectPlayers(WorldId worldId, String reason) {
-        World holding = holdingWorld(worldId);
+        World holding = holdingArea.destinationFor(worldId);
         List<Player> moved = new ArrayList<>();
 
         for (DimensionKind dimension : DimensionKind.values()) {
@@ -296,27 +299,5 @@ public final class WorldHandoff {
                 player.sendMessage(Component.text(message, NamedTextColor.YELLOW));
             }
         }
-    }
-
-    /**
-     * Somewhere on this node that is not the world being given up.
-     *
-     * <p>FR-11's holding area. Players sit here for the moment between leaving
-     * the world and the proxy's transfer arriving; the teleport also has to
-     * happen for the unload below to be able to succeed at all, since Bukkit
-     * refuses to unload a world that still holds a player.
-     */
-    private @Nullable World holdingWorld(WorldId worldId) {
-        for (World candidate : Bukkit.getWorlds()) {
-            if (!folders.isPlayerWorld(candidate.getName())) {
-                return candidate;
-            }
-        }
-        for (World candidate : Bukkit.getWorlds()) {
-            if (!candidate.getName().startsWith(worldId.folder())) {
-                return candidate;
-            }
-        }
-        return null;
     }
 }

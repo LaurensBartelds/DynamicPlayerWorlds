@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24–R26. Next is R27.
+Status: **complete** — every task R0–R28 has landed, each with a failing test proven by temporary revert, and `./gradlew check` green. What remains is the live-stack verification in §7, and the two questions still open in §5.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -163,7 +163,7 @@ to hold for an `Error` too.
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. **Complete.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
-| F | R24–R28 | Reporting, messaging, and de-duplication. **R24–R26 done.** |
+| F | R24–R28 | Reporting, messaging, and de-duplication. **Complete.** |
 
 ---
 
@@ -1279,38 +1279,54 @@ compiles against unchanged):**
 result and nothing in chat. Before the change the same test fails with the
 message present in both.
 
-#### R27 — Correct the messages that describe behaviour the code no longer has
+#### R27 — Correct the messages that describe behaviour the code no longer has — **DONE**
 
 **Requirement:** FR-8, FR-16, NFR-5.
-**Files:** `proxy/command/WorldActions.java`, `backend/profile/ProfileListener.java`.
+**Files:** `proxy/command/WorldActions.java`.
 
-- `/world kick` says *"if they are inside the world right now they will be
+- `/world kick` said *"if they are inside the world right now they will be
   removed on their next join"* immediately after dispatching a `KICK_MEMBER`
-  that ejects them now (FR-8: "removes them from the world immediately"). It
-  describes the pre-control-plane behaviour and teaches operators the wrong
-  model.
-- FR-16's refusal says *"Nothing has been overwritten"* after `applyFresh` has
-  cleared the inventory. R11 makes that true; this task makes the text match.
+  that ejects them where they stand. FR-8: *"removes them from the world
+  immediately and returns them to lobby."* It described the pre-control-plane
+  behaviour and taught operators a model the system had stopped having. Now one
+  line, and true.
+- FR-16's *"Nothing has been overwritten"* was already corrected by **R11**,
+  which made the refusal eject to lobby without touching the inventory and
+  changed the text to say so. Nothing left to do here.
 
-#### R28 — De-duplicate the two holding-area implementations, and settle `lastLocation`
+#### R28 — De-duplicate the two holding-area implementations, and settle `lastLocation` — **DONE**
 
 **Requirement:** FR-11, FR-14.
-**Files:** `backend/lease/SelfFencingHandler.java`, `backend/control/WorldHandoff.java`,
-`backend/profile/ProfileService.java`, `backend/node/TransferJoinListener.java`.
+**Files:** `backend/world/HoldingArea.java`, `backend/lease/SelfFencingHandler.java`,
+`backend/control/WorldHandoff.java`, `backend/profile/ProfileListener.java`,
+`backend/profile/ProfileService.java`.
 
-`holdingWorld(WorldId)` is duplicated verbatim in `SelfFencingHandler` and
-`WorldHandoff`, including the two-pass fallback and its comment. Both are FR-11's
-holding area. One implementation.
+`holdingWorld(WorldId)` was duplicated verbatim in `SelfFencingHandler` and
+`WorldHandoff`, two-pass fallback and comment included. One `HoldingArea` now,
+and the reason both need it is written on it: Bukkit refuses to unload a world
+that still holds a player, so every give-up path teleports out first.
 
-`ProfileEnvelope.lastLocation` is captured, encoded and decoded, and read by
-nothing: `capture`'s javadoc says it is stored *"so a rejoin returns them where
-they were rather than to spawn"*, `restore`'s says it deliberately does not
-teleport, and `TransferJoinListener.sendIn` always teleports to overworld spawn.
-Two adjacent javadocs describe opposite intentions and one of them describes
-behaviour that does not exist. Either implement it — materialise the stored
-dimension, clamp inside the border, teleport — or delete the field and correct
-both javadocs. The current state is the worst of the three options. FR-14 lists
-last location as in scope, so implementing is the default reading.
+**`lastLocation` is implemented, not deleted** — the confirmed decision, and
+FR-14 lists last location as in scope. It had been captured, encoded and decoded
+since milestone 4 and read by nothing, so `capture`'s javadoc ("stored so a
+rejoin returns them where they were rather than to spawn") described behaviour
+that did not exist while `restore`'s said it deliberately does not teleport. Both
+are true now: `restore` still does not teleport, and `ProfileListener` — the
+caller that owns where the player ends up — does, after the restore.
+
+The stored dimension needs no materialising: a load already brings up every
+dimension present on disk, so a stored nether is there. A dimension that is not
+falls back to where they arrived. The position is clamped against the world's
+**live** border rather than a recomputed one, because FR-25c applies the database
+value on every load and a border shrunk while the player was away would otherwise
+strand them outside it — a player in the void, not a cosmetic problem — and kept
+two blocks inside it rather than on it.
+
+**Failing test first (proven by temporary revert):**
+`WorldCommitServiceTest#aRejoinReturnsThePlayerWhereTheyWere_FR14` and
+`#aStoredPositionOutsideTheBorderIsClamped_FR14`. Without the teleport both land
+on spawn, which is what every rejoin did.
+
 
 ---
 
@@ -1446,8 +1462,8 @@ duplicated as a task here.
 
 ## 8. Sequencing
 
-Phases A, B and C (R0–R15) are complete. Remaining work is one branch per task
-from Phase D onwards, each with its failing test first, in the order given. R7 before R12,
+All phases are complete: R0–R28 have landed, in the order given, each with its
+failing test first. R7 before R12,
 R21 before R20's GC half, R16 after R21's marker. Nothing else has a hard
 ordering constraint.
 

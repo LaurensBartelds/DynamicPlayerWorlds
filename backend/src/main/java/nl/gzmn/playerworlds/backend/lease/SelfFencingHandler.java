@@ -12,6 +12,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
+import nl.gzmn.playerworlds.backend.world.HoldingArea;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
@@ -46,6 +47,7 @@ public final class SelfFencingHandler {
 
     private final WorldRegistry registry;
     private final WorldFolders folders;
+    private final HoldingArea holdingArea;
     private final Platform platform;
     private final PluginExecutors executors;
     private final @Nullable WorldCommitService commitService;
@@ -70,6 +72,7 @@ public final class SelfFencingHandler {
             Supplier<NetworkPolicy> policy) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.folders = Objects.requireNonNull(folders, "folders");
+        this.holdingArea = new HoldingArea(this.folders);
         this.platform = Objects.requireNonNull(platform, "platform");
         this.executors = Objects.requireNonNull(executors, "executors");
         this.commitService = commitService;
@@ -88,28 +91,6 @@ public final class SelfFencingHandler {
         DATABASE_UNREACHABLE_TIMEOUT,
         /** Snapshot commit was rejected due to lease/generation bump (MN-3a). */
         COMMIT_FENCED
-    }
-
-    /**
-     * A world on this node that is not part of the one being fenced.
-     *
-     * <p>The holding area of FR-11: somewhere to put a player for the moment
-     * between losing their world and the proxy transferring them to the lobby.
-     * Null only on a node whose every world belongs to the fenced one, which
-     * cannot happen while the server has a primary world.
-     */
-    private @Nullable World holdingWorld(WorldId worldId) {
-        for (World candidate : Bukkit.getWorlds()) {
-            if (!folders.isPlayerWorld(candidate.getName())) {
-                return candidate;
-            }
-        }
-        for (World candidate : Bukkit.getWorlds()) {
-            if (!candidate.getName().startsWith(worldId.folder())) {
-                return candidate;
-            }
-        }
-        return null;
     }
 
     /**
@@ -162,7 +143,7 @@ public final class SelfFencingHandler {
             // ticking — which is the single thing MN-10a exists to stop. The proxy
             // transfer that follows is asynchronous and may not arrive before the
             // unload, so the holding world is what makes the unload possible.
-            World holding = holdingWorld(worldId);
+            World holding = holdingArea.destinationFor(worldId);
             for (DimensionKind dim : DimensionKind.values()) {
                 String bukkitName = folders.bukkitWorldName(worldId, dim);
                 World bukkitWorld = Bukkit.getWorld(bukkitName);

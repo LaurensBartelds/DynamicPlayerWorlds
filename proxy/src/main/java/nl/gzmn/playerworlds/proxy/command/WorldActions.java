@@ -784,11 +784,14 @@ public final class WorldActions {
                                 CommandKind.KICK_MEMBER,
                                 EjectPayload.format(target.get(), "You were removed from this world"),
                                 current);
+                        // FR-8: "removes them from the world immediately and returns
+                        // them to lobby". The line that used to follow this said
+                        // they would go "on their next join", which described the
+                        // pre-control-plane behaviour -- a KICK_MEMBER now ejects
+                        // them where they stand -- and taught operators a model
+                        // the system stopped having (R27).
                         Component msg = success("removed " + targetName + " from '"
-                                + world.get().name() + "'");
-                        tell(
-                                caller,
-                                info("if they are inside the world right now they will be removed on their next join"));
+                                + world.get().name() + "'; if they are in it now, they are on their way to lobby");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world kick failed for {}", caller.getUsername(), e);
