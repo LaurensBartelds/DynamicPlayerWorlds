@@ -9,128 +9,81 @@ F0–F12 are done. `./gradlew build` is green on all modules against Paper 26.2 
 Velocity 4.0.0, each quality gate has been verified by deliberately breaking it,
 and both plugin jars have been loaded on real servers.
 
-## Plan 05 — audit remediation: phases A, B, C and E complete
+## Plan 05 — audit remediation: complete
 
 Full detail, acceptance criteria and the failing test each fix started from live
 in [`05-audit-remediation.md`](05-audit-remediation.md). This is the working
 summary.
 
-R0–R15 and R21–R23 have landed. `./gradlew check` is green on all four modules
-after each of them, and every fix started from a test that fails against the old
+**R0–R28 have all landed.** `./gradlew check` is green on all four modules after
+each of them, and every fix started from a test that fails against the old
 behaviour — proven by temporarily reverting the fix and watching the test go red,
-not by inspection.
+not by inspection. What is left is the live-stack verification below, which no
+amount of unit testing can stand in for.
 
-### Landed in the latest pass (R13–R15, R21–R23)
+### What each phase closed
 
-- **R13 — FR-11's holding timeout exists now.** `transfers.holding-timeout-seconds`
-  was used in seven places, all as a `node_command` TTL, and nothing bounded how
-  long a player actually sat in the holding area;
-  `WorldsMetrics.holdingTimeout()` was incremented nowhere outside its own test.
-  A claimed arrival is now armed with a deadline measured from the join event —
-  the `pending_transfer` lookup is part of the sequence FR-11 bounds, and a
-  saturated db executor can spend the budget before the load is even asked for.
-  The load completing, the deadline expiring and the player disconnecting race
-  for one latch, so a player is never both teleported and ejected and a late load
-  cannot teleport somebody already sent to lobby.
-- **R14 — shutdown releases after unloading.** `onDisable` committed, released
-  every lease, then unloaded; FR-25 orders it *commit, unload, release* and
-  `WorldHandoff.unload` carries the reason on it. Now driven through the same
-  handoff the control plane uses, so there is one implementation of the order,
-  and `afterUnload` runs on this path too — `last_played` is written (MN-15a
-  scores a warm copy from it) and the membership cache is invalidated, neither of
-  which happened before. A world that will not unload, or whose final commit
-  fails, keeps its lease.
-- **R15 — control-plane handlers have their own thread.** A handler that waits —
-  `MIGRATE_WORLD` waits out a countdown the *same* scheduler completes —
-  deadlocked the `sched` pool until its budget expired, taking the lease
-  heartbeat, fencing watchdog, periodic sync and maintenance sweep with it.
-  Claiming stays on the poll and LISTEN threads; handlers get a dedicated thread.
-  `DrainNodeHandler`'s budget is clamped at last (see below), and `ConfigValidator`
-  now enforces the relationship instead of a comment asserting it.
-- **R21 — manifests can express a deletion.** `SnapshotEngine` built the next
-  manifest from the previous one and only ever added to it, so an entry could
-  never leave: a deleted file was resurrected by the next cold load and MN-2b
-  could never collect its object. `DirtyScanner` now returns the observed file set
-  beside the dirty subset and the manifest is built from what is on disk.
-  `WorldDownloader.materialize` gained the mirror half — a file the manifest does
-  not list is removed — so a materialised world *matches* its manifest instead of
-  being the union of the manifest and whatever the folder held.
-- **R22 — a restore no longer wipes every inventory.** The restore snapshot was
-  written at a hardcoded `generation = 0, sequence = 1`, so FR-15b looked for
-  profiles at `(0,1)`, found none, and issued every member a fresh inventory — a
-  silent, total loss on every restore — and MN-3's write-once manifest key was
-  violated, because a second restore rewrote the same `0-1.json` with different
-  content. The restore now writes under the generation `transitionToRestoring`
-  granted and re-keys each member's newest surviving profile onto it in the same
-  transaction that moves `manifest_key`.
-- **R23 — hard deletion destroys the archives it promises to destroy.** The
-  confirmation says "and all backup archives"; the proxy has no object-store
-  client (§13), so deleting the row took the archive rows with it through the
-  cascade and orphaned every object they named, permanently — MN-2b's collection
-  walks per world, and the world was gone. Now routed to a node as
-  `DELETE_WORLD`: archive objects, then the world's snapshot prefix, then the
-  row. Objects first is CONTRIBUTING rule 8 — the rows are the only record of
-  which objects belong to this world.
+- **A (R0–R5)** — data loss and access control. The Paper 26 world layout was
+  wrong, so object storage held no world data at all; archival compared a length
+  and then deleted the only remaining copy; `CommandGuardListener` was never
+  registered, so FR-21 and FR-22 did not run on a live node; permission checks
+  lived in Brigadier clauses the GUI bypassed.
+- **B (R6–R10)** — the commit path. A failed commit lost departing profiles,
+  a fenced world kept re-uploading itself, and `generation` doubled as a "not
+  found" sentinel.
+- **C (R11–R15)** — lease and lifecycle. FR-16's refusal cleared an inventory and
+  then said it had not; a failed load left a world unjoinable for the lease
+  duration; nothing bounded the holding area; shutdown released leases before
+  unloading; a blocking control-plane handler deadlocked the scheduler its own
+  continuations needed.
+- **D (R16–R20)** — FR-40. The maintenance job implemented four of its nine
+  duties. It now keeps warm caches instead of quarantining them on every restart,
+  runs the three pruners that had no caller, sweeps `node_command`, invites and
+  `pending_transfer`, warns owners before auto-archival, and collects the object
+  storage MN-2b describes.
+- **E (R21–R23)** — the storage model. A manifest could not express a deletion;
+  a restore silently wiped every inventory and rewrote the same manifest key;
+  hard deletion orphaned every archive object permanently.
+- **F (R24–R28)** — reporting and messaging. `node_command.result` was written by
+  every handler and read by nothing; `/world delete` on a CREATING world reported
+  failure after succeeding; every GUI action delivered its message twice; two
+  messages described behaviour the code no longer had; `lastLocation` was stored
+  and never read.
 
-### The specification changed
+### The specification changed, once
 
 **FR-11's holding timeout is now the outer budget of the join path, default 90.**
 It was 30 while NFR-1 gave a cold load 60, and neither was enforced, so the
 conflict had never surfaced; implementing R13 literally would have ejected cold
 loads still well inside the budget NFR-1 grants them. Of the two numbers NFR-1's
-is the one derived from something real ("dominated by transfer time"), so the
-outer budget moved rather than the inner one. `storage.cold-load-budget-seconds`
-and `storage.commit-timeout-seconds` must now both be strictly smaller, and
-startup validation enforces it. `docs/spec/v0.4.md` §5.3, §7, §8 and §9 are
-edited; plan 05 §4 item 5a records it.
+is the one derived from something real, so the outer budget moved.
+`storage.cold-load-budget-seconds` and `storage.commit-timeout-seconds` must now
+both be strictly smaller, and startup validation enforces it. `docs/spec/v0.4.md`
+§5.3, §7, §8 and §9 are edited; plan 05 §4 item 5a records it.
 
-### Decisions confirmed, so the tasks that were blocked on them are not any more
+Three places the plan proposed something that turned out not to work, each
+changed deliberately and recorded in plan 05 with the reasoning:
 
-Recorded in plan 05 §5 with the reasoning:
+- **R20's warning channel.** A `node_command` on `gzmn_proxy` is claimed by the
+  control-plane poll within seconds (CP-2) and completed as "no handler" (CP-6),
+  and R18's sweep then deletes it. A notice meant to wait days is state, not an
+  instruction — CP-6 says as much — so V5 adds `player_notice`.
+- **R24's wait.** Waiting for `completed_at` bounded by the row's TTL would hold
+  a database thread for ninety seconds and make every *successful* archive sit
+  silent. CP-6's outcomes are decided at *claim*, so the wait ends there.
+- **R25's ordering.** Enqueueing inside the delete's transaction does not help:
+  `node_command.world_id` cascades, so an insert before the delete is removed by
+  it and one after violates the key. The world is named in the payload instead.
 
-- **D17** as written — a restore re-keys profiles forward (R22, landed).
-- **D18** as written — MN-4's completion marker, extended to name the
-  `manifest_key` it was written against, decides warm cache from crash debris
-  (R16, not yet written).
-- **FR-34's archival warnings** go out as a `node_command` on `gzmn_proxy`,
-  delivered on next login. No Discord path: it needs a token, a uuid→Discord-id
-  mapping and an outbound HTTP dependency in the plugin jar, none of which exist
-  (R20, not yet written).
-- **`ProfileEnvelope.lastLocation`** is to be implemented, not deleted — FR-14
-  lists last location as in scope (R28, not yet written).
+### Schema
 
-### Deferred rather than done quietly
-
-- **`QuarantineManager` still hardcodes `_nether`, `_the_end` and the Paper 26
-  nesting.** R21 removed the same hardcoding from `DirtyScanner` and gave the
-  archive's flat layout one definition in `WorldFolders`. `QuarantineManager` was
-  left because **R16** rewrites `sweepStartup` completely for MN-4's marker, and
-  doing it now would churn the same method twice.
-
-### Items reported earlier and not fixed at the time — where they stand now
-
-- **`DrainNodeHandler`'s budget is not clamped to the claim timeout, but says it
-  is** — fixed by R15. Both handlers now call `HandoffBudget.forCountdown`, which
-  is the one place the shape and the ceiling are written down, and both log once
-  when a countdown is large enough for the clamp to bite. That is reachable
-  rather than hypothetical: `MigratePayload.MAX_COUNTDOWN_SECONDS` is 120 against
-  a 60-second default claim timeout.
-- **`/world`'s member commands have no permission checks** — closed by R5 in
-  phase A. The checks moved into `WorldActions`, so the GUI path that bypassed
-  FR-9h entirely now returns `PERMISSION_DENIED`; Brigadier's `.requires(...)`
-  is demoted to a tab-completion hint (plan 05, D14).
-- **`commitSnapshot`'s fencing predicate is looser than MN-3a** is **still
-  open.** R8 landed in its neighbourhood and fixed the sentinel and the
-  misleading message, but the predicate itself is unchanged — it still permits a
-  commit when `assigned_node IS NULL`.
-- **MN-22 has no command in §6** is still open, and is still a spec question
-  rather than a code one (plan 05 §4 item 4).
+**V5** adds `player_notice` and `player_world.archive_warned_days` (FR-34).
+`Schema.MAX_SUPPORTED` is 5.
 
 ### What must happen on a live stack before any of this is believed
 
 Unit and Testcontainers tests cover the logic; none of the below is reachable
-from them. These are plan 05 §7's list, unchanged — no node and no e2e run were
-available in this session.
+from them. No node and no e2e run were available while this was written.
 
 - [ ] **R1.** Three accounts, two worlds, one node. `/list`, `/tell`, `/msg` and
       `@a` from inside a player world reveal nobody outside the group.
@@ -149,8 +102,19 @@ available in this session.
       ordinary give-up sequence at all.
 - [ ] **R15.** Drop the LISTEN connection, then `/world admin migrate`; the
       migrate completes and the heartbeat never misses a beat.
+- [ ] **R16.** Play, idle out, restart the node, rejoin: the load is warm. Then
+      `kill -9` mid-session, restart, rejoin: the directory is quarantined and
+      the load is cold and correct.
+- [ ] **R20.** A world 76 days idle warns its owner on next login, once, and
+      again at 3 days out. And a world that has churned its region files
+      reclaims storage after its old manifests age out.
 - [ ] **R23.** Hard-delete an archived world and confirm the bucket no longer
       holds its archive object or its `worlds/<id>/` prefix.
+- [ ] **R26.** Drive an action from the GUI and from chat. The GUI shows the
+      message once; chat shows it once; a routing refusal shows the real reason
+      on both.
+- [ ] **R28.** Log out in a player world away from spawn, rejoin, and land where
+      you left rather than at spawn.
 
 One question R14 raised is still unanswered on a live node — whether Paper kicks
 players before or after disabling plugins — but the change no longer depends on
@@ -158,28 +122,43 @@ it. The handoff ejects to the holding world first, so it works either way, and
 `unloadWorld` refusing is now a `Blocked` outcome that keeps the lease rather
 than a log line printed after the lease was already dropped.
 
-### Left to do
+### Items reported earlier and not fixed at the time — where they stand now
 
-- **Phase D (R16–R20)** — FR-40's maintenance job. `MaintenanceTask` implements
-  four of its nine duties. R16 is unblocked now that D18 is confirmed and R21 has
-  landed; R17 wires three pruners that exist and have no production caller; R18
-  sweeps `node_command`, which grows forever; R19 expires invites and
-  `pending_transfer`; R20 is FR-34's warnings and MN-2b's object-storage GC,
-  which only became worth writing once R21 made manifests shrink.
-- **Phase F (R24–R28)** — the producer reading `node_command.result` back (R24,
-  which is what makes R23's outcome visible to the owner), `/world delete` on a
-  CREATING world reporting failure after succeeding, the double-send in
-  `info`/`error`/`success`, messages describing behaviour the code no longer has,
-  and `lastLocation`.
+- **`DrainNodeHandler`'s budget is not clamped to the claim timeout, but says it
+  is** — closed by R15. Both handlers call `HandoffBudget.forCountdown`, and
+  `ConfigValidator` enforces the relationship rather than a comment asserting it.
+- **`/world`'s member commands have no permission checks** — closed by R5. The
+  checks moved into `WorldActions`, so the GUI path that bypassed FR-9h entirely
+  now returns `PERMISSION_DENIED`.
+- **`commitSnapshot`'s fencing predicate is looser than MN-3a** is **still
+  open.** R8 landed in its neighbourhood and fixed the sentinel and the
+  misleading message, but the predicate still permits a commit when
+  `assigned_node IS NULL`.
+- **MN-22 has no command in §6** is still open, and is still a spec question
+  rather than a code one (plan 05 §4 item 4).
 
 ### Still open, and still blocking nothing
 
 - OQ-14's retention period for `player_world_report` chat logs — 30 days, 90, or
-  until handled? R19's sweep is where it lands.
+  until handled? R19 swept every other expiring table and left this one alone
+  for want of the answer.
 - Is multi-proxy in scope? Both proxies would use `targetNode = "proxy"` on one
   shared channel, so an `EJECT_PLAYER` claimed by the proxy the player is *not*
   on is silently dropped (`ProxyEjectHandler` returns `ok()`). If yes, ejects
-  need per-proxy addressing and that becomes a phase C task.
+  need per-proxy addressing.
+
+### Worth doing next, in the order they would pay off
+
+1. **The e2e harness needs to drive `/world`.** Every unchecked box above needs
+   either a bot that sends chat commands or console access to Velocity. That one
+   piece of harness work is the prerequisite for believing any of milestone 8's
+   open checkboxes as well as plan 05's — it is the same prerequisite, and it has
+   been the same prerequisite for two milestones.
+2. **Plan 05 §6's four guards**, so each shape cannot come back: every `Listener`
+   registered, Bukkit mutation asserting the main thread, a config key nothing
+   reads failing the build, and no `pg_advisory_unlock` failure returning a
+   connection to the pool.
+
 
 ## Milestone 8 — the second node: built, tested and booted on two nodes
 
