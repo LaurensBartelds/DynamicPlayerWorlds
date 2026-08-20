@@ -68,6 +68,7 @@ public final class WorldCommand {
 
     /** Implemented here, for the enable log line and for tests. */
     public static final List<String> SUBCOMMANDS = List.of(
+            "menu",
             "create",
             "join",
             "delete",
@@ -195,6 +196,10 @@ public final class WorldCommand {
                     openMenuOrUsage(context.getSource());
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 })
+                .then(BrigadierCommand.literalArgumentBuilder("menu").executes(context -> {
+                    openMenuOrUsage(context.getSource());
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
                 .then(BrigadierCommand.literalArgumentBuilder("invite")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)

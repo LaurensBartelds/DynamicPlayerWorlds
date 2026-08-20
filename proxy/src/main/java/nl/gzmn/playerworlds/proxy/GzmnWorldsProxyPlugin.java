@@ -48,6 +48,7 @@ import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
 import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
+import nl.gzmn.playerworlds.proxy.menu.MenuViewService;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import org.jspecify.annotations.Nullable;
@@ -198,14 +199,16 @@ public final class GzmnWorldsProxyPlugin {
         // what makes it the one that can deliver a message to an owner who was
         // offline when there was something to say.
         this.notices = new NoticeRepository(openedDatabase);
+        MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
+        WorldBanRepository banRepository = new WorldBanRepository(openedDatabase);
 
         WorldActions worldActions = new WorldActions(
                 proxy,
                 pools,
                 worldRepository,
-                new MembershipRepository(openedDatabase),
+                membershipRepository,
                 transferRequests,
-                new WorldBanRepository(openedDatabase),
+                banRepository,
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
@@ -213,6 +216,15 @@ public final class GzmnWorldsProxyPlugin {
                 nodeCommands,
                 openedDatabase,
                 this::policy);
+
+        MenuViewService viewService = new MenuViewService(
+                worldRepository,
+                membershipRepository,
+                transferRequests,
+                banRepository,
+                this.playerNames,
+                this::policy,
+                pools);
 
         WorldCommand command = new WorldCommand(
                 worldActions, proxy, pools, worldRepository, placementService, nodeCommands, this::policy);
@@ -239,7 +251,7 @@ public final class GzmnWorldsProxyPlugin {
 
         // Register menu channel and channel listener for GUI menu interaction
         proxy.getChannelRegistrar().register(MenuChannelListener.CHANNEL_IDENTIFIER);
-        proxy.getEventManager().register(this, new MenuChannelListener(worldActions));
+        proxy.getEventManager().register(this, new MenuChannelListener(worldActions, viewService));
 
         logger.info(
                 "enabled: lobby '{}', /world and /worlds registered ({} subcommands), db threads {}",
