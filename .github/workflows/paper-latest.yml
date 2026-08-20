@@ -30,11 +30,17 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Set up JDK 25
+      - name: Set up JDK 25 (toolchain)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "25"
+
+      - name: Set up JDK 21 (Gradle daemon)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -69,7 +75,8 @@ jobs:
           chmod +x .github/scripts/boot-paper.sh
           PLUGIN_JAR="$(ls -1 backend/build/libs/gzmn-worlds-*.jar | head -n 1)"
           echo "Using plugin jar: ${PLUGIN_JAR}"
-          PLUGIN_JAR="${PLUGIN_JAR}" \
+          JAVA_BIN="${JAVA_HOME_25_X64}/bin/java" \
+            PLUGIN_JAR="${PLUGIN_JAR}" \
             PAPER_SERVER_URL="${PAPER_SERVER_URL}" \
             PAPER_SERVER_SHA256="${PAPER_SERVER_SHA256}" \
             BOOT_DIR="${GITHUB_WORKSPACE}/paper-boot" \
