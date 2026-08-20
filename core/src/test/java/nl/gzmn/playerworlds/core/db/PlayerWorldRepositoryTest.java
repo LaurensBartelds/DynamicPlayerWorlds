@@ -1030,6 +1030,48 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("abandonArchive returns a failed archival to READY and drops its lease (FR-35)")
+    void abandonArchiveReturnsWorldToReady() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "abandon-me", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        assertThat(worlds.acquireLease(id, "node-1", 3953, Duration.ofMinutes(5)))
+                .isPresent();
+        assertThat(worlds.transitionState(id, WorldState.READY, WorldState.ARCHIVING))
+                .isTrue();
+
+        assertThat(worlds.abandonArchive(id, "node-1")).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.READY);
+        assertThat(world.assignedNode()).isNull();
+        assertThat(world.leaseExpires()).isNull();
+
+        // Idempotent: a second call has nothing in ARCHIVING to roll back.
+        assertThat(worlds.abandonArchive(id, "node-1")).isFalse();
+    }
+
+    @Test
+    @DisplayName("abandonArchive will not rewrite a world whose lease another node now holds")
+    void abandonArchiveIsFencedOnTheAssignedNode() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "fenced-abandon", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        assertThat(worlds.acquireLease(id, "node-2", 3953, Duration.ofMinutes(5)))
+                .isPresent();
+        assertThat(worlds.transitionState(id, WorldState.READY, WorldState.ARCHIVING))
+                .isTrue();
+
+        assertThat(worlds.abandonArchive(id, "node-1")).isFalse();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.ARCHIVING);
+        assertThat(world.assignedNode()).isEqualTo("node-2");
+    }
+
+    @Test
     @DisplayName("transitionToRestoring acquires lease and advances state to RESTORING")
     void transitionToRestoringAcquiresLease() throws Exception {
         WorldId id = WorldId.random();

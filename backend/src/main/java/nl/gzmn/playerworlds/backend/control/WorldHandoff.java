@@ -135,6 +135,44 @@ public final class WorldHandoff {
     }
 
     /**
+     * Gives a world up <em>without</em> a final commit (MN-11a, FR-37).
+     *
+     * <p>{@link #release} is the right call almost everywhere: it commits first and abandons the
+     * handoff if the commit fails, because unloading a world whose last minutes exist only in a
+     * scratch directory loses them. Two callers want the opposite, and for the same reason —
+     * the commit is the thing that has failed:
+     *
+     * <ul>
+     *   <li>MN-11a's forced unload, where object storage has been unreachable for
+     *       {@code storage.max-sync-failure-minutes} and waiting for a commit that works means
+     *       waiting for ever.</li>
+     *   <li>FR-37's hard deletion of a READY world, where the folders are about to be deleted
+     *       and committing them to object storage first would be work done to be undone.</li>
+     * </ul>
+     *
+     * <p>The unload is therefore recorded as unclean: {@code afterUnload} clears MN-4's marker
+     * instead of writing one, so the next load of these folders re-verifies them by hash against
+     * whatever manifest is current rather than trusting them.
+     *
+     * @param countdownSeconds MN-21's visible warning; zero moves at once
+     * @param reason shown to players and carried on the proxy eject
+     */
+    public CompletableFuture<Outcome> discard(WorldId worldId, int countdownSeconds, String reason) {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(reason, "reason");
+
+        Optional<LoadedWorld> found = registry.find(worldId);
+        if (found.isEmpty()) {
+            return CompletableFuture.completedFuture(new Outcome.NotHeld());
+        }
+        LoadedWorld loaded = found.get();
+
+        return countdown(worldId, countdownSeconds, reason)
+                .thenComposeAsync(ignored -> ejectPlayers(worldId, reason), executors.main())
+                .thenCompose(moved -> unload(loaded, moved, false));
+    }
+
+    /**
      * MN-21's countdown, shown to anybody inside.
      *
      * <p>One message a second is deliberately noisy: MN-19 calls this "several
@@ -210,8 +248,9 @@ public final class WorldHandoff {
         WorldCommitService commitService = commits;
         if (commitService == null) {
             // No object storage configured. There is nothing durable to commit to,
-            // so the unload is the whole of the handoff.
-            return unload(loaded, playersMoved);
+            // so the unload is the whole of the handoff — and nothing it could have
+            // diverged from, so it still counts as clean.
+            return unload(loaded, playersMoved, true);
         }
         CompletableFuture<Outcome> done = new CompletableFuture<>();
         var _ = commitService.requestCommit(loaded.id()).whenComplete((ignored, failure) -> {
@@ -224,7 +263,7 @@ public final class WorldHandoff {
                 done.complete(new Outcome.CommitFailed(describe(failure)));
                 return;
             }
-            var _ = unload(loaded, playersMoved).whenComplete((outcome, error) -> {
+            var _ = unload(loaded, playersMoved, true).whenComplete((outcome, error) -> {
                 if (error != null) {
                     done.completeExceptionally(error);
                 } else {
@@ -243,7 +282,7 @@ public final class WorldHandoff {
         return message == null || message.isBlank() ? cause.getClass().getSimpleName() : message;
     }
 
-    private CompletableFuture<Outcome> unload(LoadedWorld loaded, int playersMoved) {
+    private CompletableFuture<Outcome> unload(LoadedWorld loaded, int playersMoved, boolean clean) {
         CompletableFuture<Outcome> done = new CompletableFuture<>();
         executors.main().execute(() -> {
             try {
@@ -265,7 +304,7 @@ public final class WorldHandoff {
                         // (FR-35's archival re-acquires it), so completing this
                         // future before the release lands would make the outcome's
                         // own name untrue.
-                        var _ = lifecycle.afterUnload(loaded).whenComplete((released, failure) -> {
+                        var _ = lifecycle.afterUnload(loaded, clean).whenComplete((released, failure) -> {
                             if (failure != null) {
                                 // The world is down either way; the lease will
                                 // expire on its own (MN-12). Report it rather

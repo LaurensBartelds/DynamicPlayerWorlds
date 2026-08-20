@@ -10,7 +10,11 @@ import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 import nl.gzmn.playerworlds.backend.platform.Platform;
+import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
+import nl.gzmn.playerworlds.backend.world.WorldFolders;
+import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.db.ArchiveRepository;
 import nl.gzmn.playerworlds.core.db.Database;
@@ -24,6 +28,7 @@ import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
 import nl.gzmn.playerworlds.core.storage.StorageException;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import nl.gzmn.playerworlds.testing.TestObjectStore;
+import nl.gzmn.playerworlds.testing.WorldFixture;
 import org.jspecify.annotations.Nullable;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -108,8 +113,8 @@ class WorldEraserTest {
     }
 
     @Test
-    @DisplayName("a world that is not archived is refused, and nothing is deleted (FR-37)")
-    void aWorldThatIsNotArchivedIsRefused_FR37() throws Exception {
+    @DisplayName("a world that left the state the owner confirmed against is refused (FR-37)")
+    void aWorldThatMovedStateIsRefused_FR37() throws Exception {
         StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
         try (S3ObjectStore store = S3ObjectStore.open(settings)) {
             ArchiveStorage storage = ArchiveStorage.s3(store);
@@ -118,15 +123,84 @@ class WorldEraserTest {
 
             // Restored between the owner confirming and the node claiming the
             // command. CP-4's generation check does not see this: a restore that
-            // completes leaves the generation where it put it.
+            // completes leaves the generation where it put it. FR-37 accepts READY
+            // worlds now, so it is the confirmed state, not the state alone, that
+            // has to refuse this: what the owner agreed to destroy was an archive.
             onDb(() -> worlds.transitionState(worldId, WorldState.ARCHIVED, WorldState.READY));
 
             WorldEraser eraser = new WorldEraser(worlds, archives, storage, store);
-            WorldEraser.Outcome outcome = onDb(() -> eraser.erase(worldId));
+            WorldEraser.Outcome outcome = onDb(() -> eraser.erase(worldId, WorldState.ARCHIVED));
 
             assertThat(outcome).isInstanceOf(WorldEraser.Outcome.WrongState.class);
             assertThat(storage.exists(archiveKey)).isTrue();
             assertThat(onDb(() -> worlds.findById(worldId))).isPresent();
+        }
+    }
+
+    @Test
+    @DisplayName("a mid-transition world is refused whatever was confirmed (FR-37, FR-40)")
+    void aTransientWorldIsRefused_FR37() throws Exception {
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(settings)) {
+            ArchiveStorage storage = ArchiveStorage.s3(store);
+            WorldId worldId = WorldId.random();
+            onDb(() -> {
+                worlds.create(worldId, UUID.randomUUID(), "mid-flight", 1L, 5000, Visibility.PRIVATE);
+                worlds.markReadyAndPlayed(worldId);
+                return worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVING);
+            });
+
+            WorldEraser eraser = new WorldEraser(worlds, archives, storage, store);
+
+            assertThat(onDb(() -> eraser.erase(worldId, null))).isInstanceOf(WorldEraser.Outcome.WrongState.class);
+            assertThat(onDb(() -> worlds.findById(worldId))).isPresent();
+        }
+    }
+
+    @Test
+    @DisplayName("a READY world that was never archived can be deleted, folders and all (FR-37)")
+    void aReadyWorldThatWasNeverArchivedIsDeleted_FR37() throws Exception {
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(settings)) {
+            // The world object storage never saw: created and played while the bucket was
+            // unreachable, so there is no manifest, no archive and no way to reach ARCHIVED.
+            Path scratchRoot = tempDir.resolve("scratch");
+            Files.createDirectories(scratchRoot);
+            WorldId worldId = WorldFixture.materialize(scratchRoot);
+            Path overworld = WorldFixture.dimensionFolder(scratchRoot, worldId.folder());
+            assertThat(Files.isDirectory(overworld)).isTrue();
+
+            onDb(() -> {
+                worlds.create(worldId, UUID.randomUUID(), "unsaveable", 1L, 5000, Visibility.PRIVATE);
+                worlds.markReadyAndPlayed(worldId);
+                return null;
+            });
+
+            Platform platform = Platform.create(new ServerIdentity("26.2", Platform.BUILD_DATA_VERSION));
+            WorldEraser eraser = new WorldEraser(
+                    worlds,
+                    archives,
+                    ArchiveStorage.s3(store),
+                    store,
+                    new WorldRegistry(),
+                    null,
+                    new WorldFolders(platform.worldLayout()),
+                    scratchRoot,
+                    WorldFixture.PRIMARY_LEVEL_NAME,
+                    NetworkPolicy::defaults);
+
+            WorldEraser.Outcome outcome = onDb(() -> eraser.erase(worldId, WorldState.READY));
+
+            assertThat(outcome).isInstanceOf(WorldEraser.Outcome.Deleted.class);
+            assertThat(((WorldEraser.Outcome.Deleted) outcome).archiveObjects())
+                    .as("there was never an archive to delete")
+                    .isZero();
+            assertThat(onDb(() -> worlds.findById(worldId)))
+                    .as("the owner gets their FR-30 slot back")
+                    .isEmpty();
+            assertThat(Files.exists(overworld))
+                    .as("the live folders are what this world was; they must not survive it")
+                    .isFalse();
         }
     }
 

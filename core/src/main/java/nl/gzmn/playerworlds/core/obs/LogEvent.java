@@ -23,6 +23,12 @@ public enum LogEvent {
     LEASE_SELF_FENCE("lease.self_fence"),
     SYNC_START("sync.start"),
     SYNC_FINISH("sync.finish"),
+
+    /** A snapshot commit did not reach object storage (12.7, MN-11a). */
+    SYNC_FAILED("sync.failed"),
+
+    /** MN-11a's forced unload: commits have failed for storage.max-sync-failure-minutes. */
+    SYNC_ABANDONED("sync.abandoned"),
     /** A commit rejected because the lease moved; expected, not an error (MN-3a). */
     COMMIT_FENCED("commit.fenced"),
     /** A region file that failed structural validation (MN-5c). */

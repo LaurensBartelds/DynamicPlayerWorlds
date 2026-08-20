@@ -10,6 +10,7 @@ import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.ControlPlane;
+import nl.gzmn.playerworlds.core.control.DeletePayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.jspecify.annotations.Nullable;
@@ -117,7 +118,9 @@ public final class BackendControlHandlers {
      *
      * <p>The owner's typed confirmation happened on the proxy; by the time this
      * runs the decision is made. What is re-checked here is the world's state,
-     * because the command may have queued behind a restore.
+     * because the command may have queued behind a restore — the payload carries the state the
+     * confirmation was given against so that a world which moved is refused rather than deleted
+     * under a promise that no longer describes it.
      */
     public static final class DeleteWorldHandler implements CommandHandler {
 
@@ -133,7 +136,11 @@ public final class BackendControlHandlers {
             if (worldId == null) {
                 return CommandResult.error("missing world_id");
             }
-            return switch (eraser.erase(worldId)) {
+            Optional<DeletePayload> payload = DeletePayload.parse(command.payloadJson());
+            if (payload.isEmpty()) {
+                return CommandResult.error("malformed payload");
+            }
+            return switch (eraser.erase(worldId, payload.get().expectedState())) {
                 case WorldEraser.Outcome.Deleted deleted -> CommandResult.ok();
                 // CP-5: a retry of a deletion that already ran has nothing to do.
                 case WorldEraser.Outcome.NotFound ignored -> CommandResult.ok();

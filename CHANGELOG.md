@@ -201,6 +201,44 @@ the jar filename (`+mc<version>`), not part of the project version.
 
 ### Fixed
 
+- **A world that could not be archived could never be removed.** `/world delete`
+  performs FR-27's archival, and hard deletion took ARCHIVED worlds only, so a
+  world created while object storage was unreachable had no exit at all: FR-35
+  had nothing to pack, no retry changed that, and the world sat in one of its
+  owner's FR-30 slots for good. FR-37 now also accepts a READY world — the node
+  ejects anyone inside, unloads it without a final commit, and deletes the live
+  folders along with the objects and the row. The confirmation for that case
+  says there is no backup rather than promising archives that do not exist, and
+  the deletion carries the state it was confirmed against so a restore
+  completing in between is refused instead of silently destroying a live world.
+  A world that never committed and never archived is deletable even while the
+  bucket is unreachable, since it has nothing there to strand — requiring the
+  sweep to succeed would have made the escape hatch depend on the outage it
+  exists for. Still a typed admin command; the GUI offers permanent deletion for
+  ARCHIVED worlds only.
+- **`storage.max-sync-failure-minutes` did nothing.** §12.7 bounds how long a
+  world may keep being played while its snapshots fail, and the setting was
+  parsed, validated and then never read, so a node whose object storage was
+  unreachable let players carry on indefinitely on a world nothing was saving —
+  one `log.warn` per failed sync and no other trace. New MN-11a implements the
+  bound: commit outcomes are counted per loaded world, `commit_succeeded` and
+  `commit_failed` are metered (both meters existed and neither was ever called),
+  every failure logs `sync.failed` with its consecutive count, and at the bound
+  the node warns the players, ejects them and unloads the world. Measured from
+  the last commit that *succeeded*, so a sync that recovers resets it. The
+  unload skips the final commit, because the commit is what is broken, and is
+  recorded as unclean so MN-4's marker cannot later vouch for folders that have
+  diverged from the manifest. Nothing is quarantined and nothing is deleted: the
+  node still holds the lease and its copy is the newest one in existence.
+- **A failed archival stranded the world it was archiving.** FR-35 moves the row
+  to ARCHIVING before it packs anything, and every failure after that point —
+  object storage unreachable, no dimensions found, a checksum that did not
+  verify — returned an error and left it there holding a live lease. FR-25c
+  loads only READY or CREATING worlds and FR-37 deletes only ARCHIVED ones, so
+  for the rest of the lease the owner could neither play the world nor get rid
+  of it, and FR-40's recovery sweep skipped it because it looks for a *dead*
+  lease. A diagnosed failure now rolls the world back to READY and drops the
+  lease at once, the way `abandonRestore` has always done for FR-36.
 - **MN-16 was not enforced.** `/world join` selected a node and only then checked
   whether the world held a live lease on that node, so the second member of a
   loaded world was routed to whichever node was emptier, where the lease

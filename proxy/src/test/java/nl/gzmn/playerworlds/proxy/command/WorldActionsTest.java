@@ -25,6 +25,7 @@ import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
+import nl.gzmn.playerworlds.core.control.DeletePayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.control.WorldPayload;
 import nl.gzmn.playerworlds.core.db.Database;
@@ -203,20 +204,69 @@ class WorldActionsTest {
     }
 
     @Test
-    void deleteHardActiveWorldFailsWithConflict() throws Exception {
+    void deleteHardMidTransitionWorldFailsWithConflict() throws Exception {
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");
         playersByUuid.put(owner, player);
 
         WorldId worldId = WorldId.random();
-        worlds.create(worldId, owner, "readyworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.create(worldId, owner, "archivingworld", 12345L, 5000, Visibility.PRIVATE);
         worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        worlds.transitionState(worldId, WorldState.READY, WorldState.ARCHIVING);
 
-        ActionResult result = actions.deleteHard(player, "readyworld", true).get();
+        ActionResult result = actions.deleteHard(player, "archivingworld", true).get();
         assertThat(result).isInstanceOf(ActionResult.Failed.class);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
-                .contains("must be archived before it can be permanently deleted");
+                .contains("ARCHIVING and cannot be permanently deleted right now");
         assertThat(worlds.findById(worldId)).isPresent();
+    }
+
+    @Test
+    void deleteHardReadyWorldWarnsThereIsNoBackup() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "unsaveable", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        ActionResult result = actions.deleteHard(player, "unsaveable", false).get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(messagesByPlayer.get(owner))
+                .anySatisfy(comp -> assertThat(
+                                PlainTextComponentSerializer.plainText().serialize(comp))
+                        .contains("has never been archived")
+                        .contains("no backup")
+                        // FR-27's archival copy promises the world comes back; this must not.
+                        .doesNotContain("all backup archives"));
+        assertThat(worlds.findById(worldId)).isPresent();
+    }
+
+    @Test
+    void deleteHardReadyWorldRoutesToANodeWithTheConfirmedState() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "unsaveable", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        ActionResult result = actions.deleteHard(player, "unsaveable", true).get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        // No archives to mention: FR-35 never ran, which is why this path exists.
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("permanently deleting 'unsaveable' on")
+                .doesNotContain("archives");
+        assertThat(enqueuedKinds("paper-a")).containsExactly(CommandKind.DELETE_WORLD.name());
+        // The node refuses if a restore or an archival moved the world in the meantime. Parsed
+        // rather than string-compared: the column is jsonb, so it comes back re-serialised.
+        assertThat(enqueuedPayloads("paper-a"))
+                .singleElement()
+                .satisfies(payload ->
+                        assertThat(DeletePayload.parse(payload)).contains(new DeletePayload(WorldState.READY)));
     }
 
     @Test
@@ -691,6 +741,16 @@ class WorldActionsTest {
                     }
                     return null;
                 });
+    }
+
+    /** The command payloads queued for a node, oldest first. */
+    private List<String> enqueuedPayloads(String nodeId) throws Exception {
+        NodeCommandRepository commands = new NodeCommandRepository(database);
+        List<String> payloads = new ArrayList<>();
+        for (Long id : commands.findClaimableIds(nodeId, Duration.ofMinutes(1), 10)) {
+            commands.findById(id).ifPresent(command -> payloads.add(command.payloadJson()));
+        }
+        return payloads;
     }
 
     /** The command kinds queued for a node, oldest first. */

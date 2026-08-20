@@ -1153,6 +1153,51 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Returns a failed archival to {@link WorldState#READY} and releases the lease (FR-35).
+     *
+     * <p>The twin of {@link #abandonRestore(Connection, WorldId, String)}, and for the same
+     * reason. FR-35 leaves a <em>crashed</em> archival at ARCHIVING with an expired lease, which
+     * the FR-40 sweep retries; an archival that fails cleanly — object storage unreachable, no
+     * dimensions to pack, a checksum that did not verify — is a failure this node has already
+     * diagnosed, so the world goes back to READY and the lease is dropped at once. Left at
+     * ARCHIVING it is neither loadable (FR-25c refuses any state but READY or CREATING) nor
+     * deletable (FR-37 refuses any state but ARCHIVED) until the lease runs out.
+     *
+     * <p>Safe at any point in the flow, because FR-35 deletes nothing before the checksum of the
+     * written archive verifies.
+     *
+     * <p>Fenced on {@code assigned_node}: a node whose lease has already been taken over must not
+     * rewrite the state underneath whoever holds it now.
+     *
+     * @return true when this node held the world and the rollback was applied
+     */
+    public boolean abandonArchive(Connection connection, WorldId worldId, String node) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        return execute(connection, """
+                UPDATE player_world
+                   SET state = 'READY',
+                       assigned_node = NULL,
+                       lease_expires = NULL
+                 WHERE id = ?
+                   AND state = 'ARCHIVING'
+                   AND assigned_node = ?
+                """, statement -> {
+                    statement.setObject(1, worldId.value());
+                    statement.setString(2, node);
+                })
+                == 1;
+    }
+
+    /** {@link #abandonArchive(Connection, WorldId, String)} in its own transaction. */
+    public boolean abandonArchive(WorldId worldId, String node) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        return database.inTransaction(connection -> abandonArchive(connection, worldId, node));
+    }
+
+    /**
      * Acquires a lease on an archived world and moves its state to {@link WorldState#RESTORING} (FR-36).
      *
      * @return true if the world was transitioned and the lease granted to {@code node}

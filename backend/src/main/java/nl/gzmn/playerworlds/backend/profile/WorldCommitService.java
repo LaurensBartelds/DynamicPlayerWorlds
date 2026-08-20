@@ -30,6 +30,8 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.obs.LogEvent;
+import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.profile.CommitQueue;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
@@ -69,6 +71,7 @@ public final class WorldCommitService {
     private final CommitQueue queue;
     private @Nullable WorldRegistry registry;
     private @Nullable SelfFencingHandler fencingHandler;
+    private @Nullable WorldsMetrics metrics;
 
     private final Map<WorldId, Manifest> cachedManifests = new ConcurrentHashMap<>();
     private final Map<WorldId, Map<UUID, byte[]>> pendingDepartures = new ConcurrentHashMap<>();
@@ -120,6 +123,17 @@ public final class WorldCommitService {
 
     public void setFencingHandler(SelfFencingHandler fencingHandler) {
         this.fencingHandler = fencingHandler;
+    }
+
+    /**
+     * Where commit outcomes are metered (12.7's "alert").
+     *
+     * <p>Optional and set after construction, like {@link #setRegistry}: the commit service is
+     * built before the meters in several tests, and an unmetered commit is a missing graph rather
+     * than a broken one.
+     */
+    public void setMetrics(WorldsMetrics metrics) {
+        this.metrics = metrics;
     }
 
     public WorldCommitService(
@@ -246,6 +260,48 @@ public final class WorldCommitService {
      * and DB executor.
      */
     private CompletableFuture<Void> runCommit(WorldId worldId) {
+        long startNanos = System.nanoTime();
+        return runCommitStages(worldId)
+                .whenComplete((ignored, failure) -> recordCommitOutcome(worldId, startNanos, failure));
+    }
+
+    /**
+     * Records what a commit did, for MN-11a's failure window and 12.7's alert.
+     *
+     * <p>On the {@link LoadedWorld} rather than in a map here, because the window has to die with
+     * the world: a reload starts a fresh one, and MN-11a is explicitly measured from the last
+     * commit that <em>succeeded</em>.
+     */
+    private void recordCommitOutcome(WorldId worldId, long startNanos, @Nullable Throwable failure) {
+        WorldsMetrics meters = metrics;
+        if (failure == null) {
+            if (meters != null) {
+                meters.commitSucceeded(Duration.ofNanos(System.nanoTime() - startNanos));
+            }
+        } else if (meters != null) {
+            meters.commitFailed(failure.getClass().getSimpleName());
+        }
+        WorldRegistry current = registry;
+        if (current == null) {
+            return;
+        }
+        current.find(worldId).ifPresent(loaded -> {
+            if (failure == null) {
+                loaded.recordCommitSuccess();
+                return;
+            }
+            int consecutive = loaded.recordCommitFailure();
+            log.warn(
+                    "event={} world_id={} consecutive_failures={} detail={}",
+                    LogEvent.SYNC_FAILED.key(),
+                    worldId,
+                    consecutive,
+                    failure.getMessage());
+        });
+    }
+
+    /** The commit itself; {@link #runCommit} wraps it to record the outcome. */
+    private CompletableFuture<Void> runCommitStages(WorldId worldId) {
         if (snapshotEngine == null || playerWorlds == null) {
             CompletableFuture<Phase1Result> captured = new CompletableFuture<>();
             executors.main().execute(() -> {

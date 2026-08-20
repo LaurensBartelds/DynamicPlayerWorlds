@@ -825,6 +825,19 @@ public final class WorldLifecycleService implements WorldLoader {
      *     prevent.
      */
     public CompletableFuture<Void> afterUnload(LoadedWorld loaded) {
+        return afterUnload(loaded, true);
+    }
+
+    /**
+     * {@link #afterUnload(LoadedWorld)}, told whether the unload was clean.
+     *
+     * @param clean false for MN-11a's forced unload, which skips the final commit because the
+     *     commit is the thing that is broken. The world on disk is then ahead of the manifest
+     *     {@code manifest_key} names, so MN-4's marker is cleared rather than written: a marker
+     *     claiming this folder matches that manifest would let the next load verify it on size
+     *     and mtime alone and accept a diverged region file as current.
+     */
+    public CompletableFuture<Void> afterUnload(LoadedWorld loaded, boolean clean) {
         Objects.requireNonNull(loaded, "loaded");
         registry.unregister(loaded.id());
         membershipCache.invalidate(loaded.id());
@@ -839,10 +852,14 @@ public final class WorldLifecycleService implements WorldLoader {
                         // the final commit has just moved it and the row is what
                         // knows. Written before the release, so a node that takes
                         // the lease next finds a marker that is already true.
-                        String manifestKey = worlds.findById(loaded.id())
-                                .map(PlayerWorld::manifestKey)
-                                .orElse(null);
-                        CleanUnloadMarker.write(worldContainer, loaded.id(), manifestKey);
+                        if (clean) {
+                            String manifestKey = worlds.findById(loaded.id())
+                                    .map(PlayerWorld::manifestKey)
+                                    .orElse(null);
+                            CleanUnloadMarker.write(worldContainer, loaded.id(), manifestKey);
+                        } else {
+                            CleanUnloadMarker.clear(worldContainer, loaded.id());
+                        }
                         if (nodeId != null) {
                             boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
                             if (released) {

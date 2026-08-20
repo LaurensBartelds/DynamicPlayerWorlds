@@ -22,6 +22,7 @@ import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandOutcomes;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.DeletePayload;
 import nl.gzmn.playerworlds.core.control.EjectPayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.control.WorldPayload;
@@ -377,16 +378,32 @@ public final class WorldActions {
             return ActionResult.failure(
                     FailureCode.PERMISSION_DENIED, error("you do not have permission to permanently delete worlds"));
         }
-        if (world.state() != WorldState.ARCHIVED) {
+        // FR-37 takes ARCHIVED or READY. READY is the way out of a world that can never reach
+        // ARCHIVED: with object storage unreachable, FR-35 has nothing to pack and no retry
+        // changes that, so /world delete would refuse for ever and the world would hold one of
+        // the owner's FR-30 slots with no way to play it or get rid of it. CREATING is FR-27's
+        // removal, and the two transient states resolve themselves under FR-40.
+        boolean neverArchived = world.state() == WorldState.READY;
+        if (world.state() != WorldState.ARCHIVED && !neverArchived) {
             return ActionResult.failure(
                     FailureCode.STATE_CONFLICT,
-                    error("'" + world.name() + "' must be archived before it can be permanently deleted"));
+                    error("'" + world.name() + "' is " + world.state()
+                            + " and cannot be permanently deleted right now"));
         }
         if (!confirmed) {
-            tell(
-                    caller,
-                    info("this permanently destroys '" + world.name()
-                            + "' and all backup archives. This cannot be undone."));
+            if (neverArchived) {
+                // Deliberately not the ARCHIVED wording. There is no archive behind this one, so
+                // "and all backup archives" would imply a copy survives when none does.
+                tell(
+                        caller,
+                        error("'" + world.name() + "' has never been archived, so there is no backup."
+                                + " This destroys the world itself. This cannot be undone."));
+            } else {
+                tell(
+                        caller,
+                        info("this permanently destroys '" + world.name()
+                                + "' and all backup archives. This cannot be undone."));
+            }
             return ActionResult.failure(
                     FailureCode.STATE_CONFLICT,
                     info("type /world delete " + world.name() + " hard confirm to permanently delete"));
@@ -403,7 +420,7 @@ public final class WorldActions {
             return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
         }
         String node = ((Routing.To) routing).nodeId();
-        long commandId = enqueueTo(node, world, CommandKind.DELETE_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+        long commandId = enqueueTo(node, world, CommandKind.DELETE_WORLD, DeletePayload.format(world.state()), current);
         ActionResult refused = outcomeOrRunning(caller, commandId, "permanently deleting '" + world.name() + "'");
         if (refused != null) {
             return refused;
@@ -414,7 +431,8 @@ public final class WorldActions {
                 world.name(),
                 node,
                 caller.getUsername());
-        return ActionResult.success(info("permanently deleting '" + world.name() + "' and its archives on " + node));
+        return ActionResult.success(info(
+                "permanently deleting '" + world.name() + (neverArchived ? "' on " : "' and its archives on ") + node));
     }
 
     /**

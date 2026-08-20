@@ -6,6 +6,7 @@ import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.core.db.DbClock;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -52,6 +53,18 @@ public final class LoadedWorld {
 
     /** Set when a lease heartbeat fails, indicating joins must be refused (MN-10b). */
     private volatile boolean leaseDegraded;
+
+    /**
+     * Local monotonic nanoTime of the last snapshot commit that succeeded (MN-11a).
+     *
+     * <p>Seeded at construction rather than left at zero: a world that has just loaded has
+     * nothing to be behind on, and MN-11a's window is measured from the last success, so an
+     * unseeded value would read as "failing since the epoch" and unload the world at once.
+     */
+    private volatile long lastCommitOkNanoTime;
+
+    /** Consecutive failed snapshot commits since the last success (MN-11a, 12.7's alert). */
+    private final AtomicInteger consecutiveCommitFailures = new AtomicInteger();
 
     /**
      * Which of the three dimensions exist on disk and are loaded.
@@ -109,6 +122,7 @@ public final class LoadedWorld {
         this.generation = generation;
         this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
         this.lastHeartbeatNanoTime = System.nanoTime();
+        this.lastCommitOkNanoTime = this.lastHeartbeatNanoTime;
     }
 
     /** From a database row, keeping only what the tick thread cannot re-read. */
@@ -187,6 +201,44 @@ public final class LoadedWorld {
     /** Records that a lease heartbeat failed due to database unreachability (MN-10b). */
     public void recordHeartbeatFailure() {
         this.leaseDegraded = true;
+    }
+
+    /** Records a snapshot commit that reached object storage (MN-11a). */
+    public void recordCommitSuccess() {
+        this.lastCommitOkNanoTime = System.nanoTime();
+        this.consecutiveCommitFailures.set(0);
+    }
+
+    /**
+     * Records a snapshot commit that did not (MN-11a).
+     *
+     * @return how many have failed in a row, for 12.7's alert
+     */
+    public int recordCommitFailure() {
+        return this.consecutiveCommitFailures.incrementAndGet();
+    }
+
+    /** How many snapshot commits have failed in a row; zero when the last one worked. */
+    public int consecutiveCommitFailures() {
+        return consecutiveCommitFailures.get();
+    }
+
+    /**
+     * Whether MN-11a's forced unload is due: no commit has succeeded for {@code maxSyncFailure}.
+     *
+     * <p>Monotonic, like {@link #isFencedByDeadlineToDb}: this is a local decision about local
+     * work, so it must not move when the wall clock does (CONTRIBUTING.md rule 5).
+     *
+     * <p>A world whose commits have never failed is never due, however long it has been loaded —
+     * an idle world commits rarely, and "no commit for 30 minutes" is not "no commit worked for
+     * 30 minutes".
+     */
+    public boolean isSyncFailingFor(Duration maxSyncFailure) {
+        Objects.requireNonNull(maxSyncFailure, "maxSyncFailure");
+        if (consecutiveCommitFailures.get() == 0) {
+            return false;
+        }
+        return DbClock.elapsedSince(lastCommitOkNanoTime).compareTo(maxSyncFailure) >= 0;
     }
 
     /**

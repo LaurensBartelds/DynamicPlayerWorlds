@@ -401,8 +401,9 @@ class WorldArchiverTest {
 
         PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());
         assertThat(after.state())
-                .as("a world whose archive did not verify stays archivable, not ARCHIVED")
-                .isNotEqualTo(WorldState.ARCHIVED);
+                .as("a world whose archive did not verify goes back to READY, not ARCHIVED and not"
+                        + " left at ARCHIVING")
+                .isEqualTo(WorldState.READY);
         assertThat(onDb(() -> archiveRepo.findLatestByWorld(worldId)))
                 .as("no archive row may be recorded for an archive that did not verify")
                 .isEmpty();
@@ -450,6 +451,61 @@ class WorldArchiverTest {
                 .isTrue();
         PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());
         assertThat(after.state()).isNotEqualTo(WorldState.ARCHIVED);
+    }
+
+    @Test
+    @DisplayName("unreachable object storage returns the world to READY rather than stranding it (FR-35)")
+    void archiveWithBrokenObjectStorageReturnsTheWorldToReady() throws Exception {
+        WorldId worldId = WorldFixture.materialize(scratchRoot);
+        UUID owner = UUID.randomUUID();
+
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "stranded", 12345L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        BrokenObjectStore store = new BrokenObjectStore();
+        WorldArchiver archiver = new WorldArchiver(
+                worldRepo,
+                database,
+                ArchiveStorage.s3(store),
+                scratchRoot,
+                platform.worldLayout(),
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                store,
+                registry,
+                null,
+                NetworkPolicy::defaults,
+                "node-1",
+                Platform.BUILD_DATA_VERSION);
+
+        WorldArchiver.ArchiveResult result = onDb(() -> archiver.archiveWorld(worldId, owner));
+        assertThat(result.success()).isFalse();
+
+        PlayerWorld after = onDb(() -> worldRepo.findById(worldId).orElseThrow());
+
+        // Left at ARCHIVING the world is neither loadable (FR-25c takes only READY and CREATING)
+        // nor deletable (FR-37 takes only ARCHIVED), so the owner could neither play it nor get rid
+        // of it until the lease ran out and FR-40's dead-lease sweep noticed.
+        assertThat(after.state())
+                .as("a diagnosed archival failure must not leave the world mid-transition")
+                .isEqualTo(WorldState.READY);
+        assertThat(after.assignedNode())
+                .as("a failed archival must not keep the world pinned to this node")
+                .isNull();
+        assertThat(after.leaseExpires())
+                .as("a live lease would make FR-40's dead-lease sweep skip the world")
+                .isNull();
+
+        assertThat(Files.exists(WorldFixture.dimensionFolder(scratchRoot, worldId.folder())))
+                .as("nothing may be deleted when the archive never landed (FR-35)")
+                .isTrue();
+
+        // READY is also the state FR-37's escape hatch works from, so the owner of a world that
+        // can never be archived is no longer stuck with it.
+        WorldEraser eraser = new WorldEraser(worldRepo, archiveRepo, ArchiveStorage.s3(store), store);
+        assertThat(onDb(() -> eraser.erase(worldId, WorldState.READY))).isInstanceOf(WorldEraser.Outcome.Deleted.class);
     }
 
     /**
@@ -542,5 +598,61 @@ class WorldArchiverTest {
         public void close() {
             objects.clear();
         }
+    }
+
+    /** A wholly unreachable object store: the "broken S3 setup" failure mode. */
+    private static final class BrokenObjectStore implements nl.gzmn.playerworlds.core.storage.ObjectStore {
+
+        private static nl.gzmn.playerworlds.core.storage.StorageException down(String key) {
+            return new nl.gzmn.playerworlds.core.storage.StorageException("object storage unreachable: " + key);
+        }
+
+        @Override
+        public void putObject(String key, Path sourceFile) {
+            throw down(key);
+        }
+
+        @Override
+        public void putBytes(String key, byte[] bytes, String contentType) {
+            throw down(key);
+        }
+
+        @Override
+        public void getObject(String key, Path destinationFile) {
+            throw down(key);
+        }
+
+        @Override
+        public byte[] getBytes(String key) {
+            throw down(key);
+        }
+
+        @Override
+        public boolean exists(String key) {
+            throw down(key);
+        }
+
+        @Override
+        public void deleteObject(String key) {
+            throw down(key);
+        }
+
+        @Override
+        public List<String> listKeys(String prefix) {
+            throw down(prefix);
+        }
+
+        @Override
+        public void deletePrefix(String prefix) {
+            throw down(prefix);
+        }
+
+        @Override
+        public long getObjectSize(String key) {
+            throw down(key);
+        }
+
+        @Override
+        public void close() {}
     }
 }

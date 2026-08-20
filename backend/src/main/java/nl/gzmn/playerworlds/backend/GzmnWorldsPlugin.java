@@ -557,6 +557,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         this.fencingHandler = fencing;
         worldCommitService.setRegistry(worldRegistry);
         worldCommitService.setFencingHandler(fencing);
+        worldCommitService.setMetrics(worldsMetrics);
 
         LeaseCoordinator leases = new LeaseCoordinator(
                 node.nodeId(), worldRegistry, worldRepository, fencing, pools, this::policy, node.heartbeatInterval());
@@ -717,7 +718,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
 
         // MN-6: schedule periodic incremental snapshot commits
-        PeriodicSyncTask syncTask = new PeriodicSyncTask(worldRegistry, worldCommitService, this::policy);
+        PeriodicSyncTask syncTask =
+                new PeriodicSyncTask(worldRegistry, worldCommitService, this::policy, () -> this.worldHandoff);
         long syncIntervalSeconds = Math.max(1, this.policy.syncInterval().toSeconds());
         var _ = pools.sched()
                 .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
@@ -889,7 +891,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new PlayerWorldRepository(openedDatabase),
                 new ArchiveRepository(openedDatabase),
                 archiveStorage,
-                store);
+                store,
+                worldRegistry,
+                handoff,
+                worldFolders,
+                node.scratchPath(),
+                primaryLevelName,
+                this::policy);
         this.archiver = worldArchiver;
         this.restorer = worldRestorer;
         BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer, worldEraser);
