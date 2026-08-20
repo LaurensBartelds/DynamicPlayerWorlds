@@ -7,6 +7,7 @@ import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
+import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
 import java.sql.SQLException;
@@ -34,6 +35,7 @@ import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -90,6 +92,7 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable PluginExecutors executors;
     private @Nullable PlayerNameRepository playerNames;
     private @Nullable TransferRequestRepository transferRequests;
+    private @Nullable NoticeRepository notices;
     private @Nullable NodeRegistry nodeRegistry;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
@@ -191,6 +194,10 @@ public final class GzmnWorldsProxyPlugin {
 
         TransferRequestRepository transferRequests = new TransferRequestRepository(openedDatabase);
         this.transferRequests = transferRequests;
+        // FR-34: the proxy is the only component that sees every login, which is
+        // what makes it the one that can deliver a message to an owner who was
+        // offline when there was something to say.
+        this.notices = new NoticeRepository(openedDatabase);
 
         WorldActions worldActions = new WorldActions(
                 proxy,
@@ -329,17 +336,21 @@ public final class GzmnWorldsProxyPlugin {
     }
 
     /**
-     * Fills the {@code player_name} cache (V2) and sends transfer request reminders.
+     * Fills the {@code player_name} cache (V2), sends transfer request reminders,
+     * and hands over anything that was waiting for this player (FR-34).
      *
      * <p>The proxy is the only component that sees every login on the network,
      * which is what makes it the right place to learn the name-to-UUID mapping
-     * every section 6 command needs for its first argument, and to notify players
-     * of pending ownership transfers when they connect.
+     * every section 6 command needs for its first argument, to notify players of
+     * pending ownership transfers, and to deliver an archival warning to an owner
+     * who was — by definition, since inactivity is what earned the warning —
+     * offline when it was written.
      */
     @Subscribe
     public void onPostLogin(PostLoginEvent event) {
         PlayerNameRepository repository = this.playerNames;
         TransferRequestRepository transferRequests = this.transferRequests;
+        NoticeRepository pendingNotices = this.notices;
         PluginExecutors pools = this.executors;
         if (repository == null || pools == null) {
             return;
@@ -359,6 +370,9 @@ public final class GzmnWorldsProxyPlugin {
                                         NamedTextColor.GOLD));
                     }
                 }
+                if (pendingNotices != null) {
+                    deliverNotices(pendingNotices, event.getPlayer());
+                }
             } catch (SQLException e) {
                 // A cache miss degrades a display name to a UUID or skips a reminder;
                 // it never fails an operation, so this is a warning and not a disconnect.
@@ -366,6 +380,19 @@ public final class GzmnWorldsProxyPlugin {
                         "could not process login for {}: {}", event.getPlayer().getUsername(), e.getMessage());
             }
         });
+    }
+
+    /**
+     * Hands a player the messages queued for them while they were away (FR-34).
+     *
+     * <p>Marked delivered by the same statement that reads them, so a player who
+     * connects to two proxies at once — or reconnects while the first send is in
+     * flight — is not told twice.
+     */
+    private void deliverNotices(NoticeRepository pendingNotices, Player player) throws SQLException {
+        for (NoticeRepository.Notice notice : pendingNotices.takeUndelivered(player.getUniqueId())) {
+            player.sendMessage(Component.text(notice.message(), NamedTextColor.GOLD));
+        }
     }
 
     /** Network policy as last read from {@code network_setting}. */
@@ -401,6 +428,7 @@ public final class GzmnWorldsProxyPlugin {
         proxy.getChannelRegistrar().unregister(MenuChannelListener.CHANNEL_IDENTIFIER);
         this.playerNames = null;
         this.transferRequests = null;
+        this.notices = null;
         PluginExecutors pools = this.executors;
         this.executors = null;
         if (pools != null) {

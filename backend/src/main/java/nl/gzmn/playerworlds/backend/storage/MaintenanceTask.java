@@ -5,6 +5,8 @@ import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -17,6 +19,7 @@ import nl.gzmn.playerworlds.core.db.AdvisoryLock;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
@@ -70,11 +73,21 @@ public final class MaintenanceTask implements Runnable {
      */
     private static final Duration COMMAND_RETENTION = Duration.ofHours(1);
 
+    /**
+     * How long a delivered notice is kept (FR-34, FR-40).
+     *
+     * <p>Long enough that "was the owner ever warned?" has an answer after the
+     * fact, which is the question that gets asked when a world is archived and
+     * somebody disputes it.
+     */
+    private static final Duration NOTICE_RETENTION = Duration.ofDays(30);
+
     private final Database database;
     private final PlayerWorldRepository worlds;
     private final ProfileRepository profiles;
     private final MembershipRepository membership;
     private final PendingTransferRepository pendingTransfers;
+    private final NoticeRepository notices;
     private final TransferRequestRepository transferRequests;
     private final NodeCommandRepository nodeCommands;
     private final LocalObjectCache localCache;
@@ -94,6 +107,7 @@ public final class MaintenanceTask implements Runnable {
      * @param commandsSwept finished {@code node_command} rows removed (CP-7)
      * @param invitesExpired expired invite rows removed (FR-40)
      * @param pendingTransfersExpired expired {@code pending_transfer} rows removed (FR-40)
+     * @param archivalWarningsSent FR-34 warnings queued for offline owners
      */
     public record SweepResult(
             boolean ranWithLock,
@@ -106,11 +120,12 @@ public final class MaintenanceTask implements Runnable {
             int profileSnapshotsPruned,
             int commandsSwept,
             int invitesExpired,
-            int pendingTransfersExpired) {
+            int pendingTransfersExpired,
+            int archivalWarningsSent) {
 
         /** No lock, so only the node-local half ran. */
         static SweepResult localOnly(long cacheBytesEvicted, int quarantineEntriesPruned) {
-            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0, 0, 0, 0);
+            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0, 0, 0, 0, 0);
         }
     }
 
@@ -120,6 +135,7 @@ public final class MaintenanceTask implements Runnable {
             ProfileRepository profiles,
             MembershipRepository membership,
             PendingTransferRepository pendingTransfers,
+            NoticeRepository notices,
             TransferRequestRepository transferRequests,
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
@@ -132,6 +148,7 @@ public final class MaintenanceTask implements Runnable {
                 profiles,
                 membership,
                 pendingTransfers,
+                notices,
                 transferRequests,
                 nodeCommands,
                 localCache,
@@ -148,6 +165,7 @@ public final class MaintenanceTask implements Runnable {
             ProfileRepository profiles,
             MembershipRepository membership,
             PendingTransferRepository pendingTransfers,
+            NoticeRepository notices,
             TransferRequestRepository transferRequests,
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
@@ -160,6 +178,7 @@ public final class MaintenanceTask implements Runnable {
         this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.membership = Objects.requireNonNull(membership, "membership");
         this.pendingTransfers = Objects.requireNonNull(pendingTransfers, "pendingTransfers");
+        this.notices = Objects.requireNonNull(notices, "notices");
         this.transferRequests = Objects.requireNonNull(transferRequests, "transferRequests");
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.localCache = Objects.requireNonNull(localCache, "localCache");
@@ -188,11 +207,12 @@ public final class MaintenanceTask implements Runnable {
                             || result.profileSnapshotsPruned() > 0
                             || result.commandsSwept() > 0
                             || result.invitesExpired() > 0
-                            || result.pendingTransfersExpired() > 0)) {
+                            || result.pendingTransfersExpired() > 0
+                            || result.archivalWarningsSent() > 0)) {
                 log.info(
                         "maintenance sweep: {} archivals queued, {} ARCHIVING reset, {} RESTORING reset,"
                                 + " {} transfer requests expired, {} profile rows pruned, {} commands swept,"
-                                + " {} invites expired, {} pending transfers expired",
+                                + " {} invites expired, {} pending transfers expired, {} archival warnings sent",
                         result.archivalsQueued(),
                         result.archivingReset(),
                         result.restoringReset(),
@@ -200,7 +220,8 @@ public final class MaintenanceTask implements Runnable {
                         result.profileSnapshotsPruned(),
                         result.commandsSwept(),
                         result.invitesExpired(),
-                        result.pendingTransfersExpired());
+                        result.pendingTransfersExpired(),
+                        result.archivalWarningsSent());
             }
         } catch (SQLException e) {
             log.error("maintenance sweep failed", e);
@@ -244,6 +265,10 @@ public final class MaintenanceTask implements Runnable {
             int commandsSwept = nodeCommands.deleteFinishedBefore(COMMAND_RETENTION, BATCH_LIMIT);
             int invitesExpired = membership.sweepExpiredInvites(BATCH_LIMIT);
             int transfersExpired = pendingTransfers.sweepExpired(current.transferExpiry());
+            var _ = notices.deleteDeliveredBefore(NOTICE_RETENTION, BATCH_LIMIT);
+            // After the archival pass, so a world archived in this same sweep is
+            // not also warned that it is about to be.
+            int warningsSent = queueArchivalWarnings(current);
             return new SweepResult(
                     true,
                     queued,
@@ -255,7 +280,8 @@ public final class MaintenanceTask implements Runnable {
                     profilesPruned,
                     commandsSwept,
                     invitesExpired,
-                    transfersExpired);
+                    transfersExpired,
+                    warningsSent);
         }
     }
 
@@ -295,6 +321,64 @@ public final class MaintenanceTask implements Runnable {
             pruned += profiles.pruneToLatest(worldId, keep);
         }
         return pruned;
+    }
+
+    /**
+     * FR-34: the owner is warned before their world is archived.
+     *
+     * <p>Thresholds are taken tightest-first, so a world that has gone past both
+     * of them — a node that was down for a fortnight, say — is told the nearer
+     * one rather than the one it has already sailed past.
+     *
+     * <p>The message is queued rather than sent: the owner is offline by
+     * definition, since inactivity is what triggers the archival. The proxy hands
+     * it over on their next login.
+     */
+    private int queueArchivalWarnings(NetworkPolicy current) throws SQLException {
+        List<Integer> thresholds = new ArrayList<>(current.archiveWarnDays());
+        thresholds.sort(Comparator.naturalOrder());
+        int sent = 0;
+        for (int warnDays : thresholds) {
+            if (warnDays < 1 || warnDays >= current.archiveAfterDays()) {
+                log.warn(
+                        "ignoring archive.warn-days entry {}: it must be between 1 and archive.after-days ({})",
+                        warnDays,
+                        current.archiveAfterDays());
+                continue;
+            }
+            for (PlayerWorld world :
+                    worlds.findDueForArchiveWarning(current.archiveAfterDays(), warnDays, BATCH_LIMIT)) {
+                if (queueOneWarning(world, warnDays)) {
+                    sent++;
+                }
+            }
+        }
+        return sent;
+    }
+
+    /**
+     * Queues one warning and records it, in one transaction.
+     *
+     * <p>Together, so a crash between them cannot leave a world marked warned
+     * with nothing waiting for its owner — which would be a world archived in
+     * silence, and FR-34 exists to prevent exactly that.
+     */
+    private boolean queueOneWarning(PlayerWorld world, int warnDays) throws SQLException {
+        return database.inTransaction(connection -> {
+            if (!worlds.recordArchiveWarning(connection, world.id(), warnDays)) {
+                // Another node's sweep got there first.
+                return false;
+            }
+            var _ = notices.queue(
+                    connection,
+                    world.ownerUuid(),
+                    world.id(),
+                    "Your world '" + world.name() + "' has not been visited recently and will be archived in "
+                            + warnDays + " day" + (warnDays == 1 ? "" : "s")
+                            + ". Visit it to keep it, or use /world archive to archive it now.");
+            log.info("warned the owner of world {} that it is {} days from archival (FR-34)", world.id(), warnDays);
+            return true;
+        });
     }
 
     /**

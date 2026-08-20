@@ -75,6 +75,7 @@ import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -722,6 +723,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new ProfileRepository(openedDatabase),
                 new MembershipRepository(openedDatabase),
                 new PendingTransferRepository(openedDatabase),
+                new NoticeRepository(openedDatabase),
                 new TransferRequestRepository(openedDatabase),
                 new NodeCommandRepository(openedDatabase),
                 objectCache,

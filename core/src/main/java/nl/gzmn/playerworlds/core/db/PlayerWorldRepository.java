@@ -673,7 +673,11 @@ public final class PlayerWorldRepository extends Repository {
         Objects.requireNonNull(id, "id");
         return execute(
                         connection,
-                        "UPDATE player_world SET last_played = now() WHERE id = ?",
+                        // archive_warned_days goes with it (FR-34): a world that is
+                        // played again and then goes quiet again earns its warnings
+                        // a second time, rather than being archived in silence
+                        // because it was warned about a year ago.
+                        "UPDATE player_world SET last_played = now(), archive_warned_days = NULL WHERE id = ?",
                         statement -> statement.setObject(1, id.value()))
                 == 1;
     }
@@ -727,6 +731,68 @@ public final class PlayerWorldRepository extends Repository {
     public boolean deleteHard(WorldId id) throws SQLException {
         Objects.requireNonNull(id, "id");
         return database.inTransaction(connection -> deleteHard(connection, id));
+    }
+
+    /**
+     * Worlds close enough to auto-archival to warn their owner about (FR-34).
+     *
+     * <p>"Close enough" is {@code afterDays - warnDays} of silence: at the
+     * defaults, a world untouched for 76 days is 14 days from being archived.
+     * A world already warned at this threshold or a tighter one is skipped, which
+     * is what stops the sweep re-sending every five minutes for a fortnight.
+     *
+     * @param afterDays {@code archive.after-days}
+     * @param warnDays the threshold being checked, from {@code archive.warn-days}
+     * @param limit most worlds to return in one sweep
+     */
+    public List<PlayerWorld> findDueForArchiveWarning(int afterDays, int warnDays, int limit) throws SQLException {
+        if (afterDays < 1) {
+            throw new IllegalArgumentException("afterDays must be at least 1, was: " + afterDays);
+        }
+        if (warnDays < 1 || warnDays >= afterDays) {
+            throw new IllegalArgumentException("warnDays must be in 1.." + (afterDays - 1) + ", was: " + warnDays);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE state = 'READY'
+                   AND COALESCE(last_played, created_at) < now() - (? * interval '1 day')
+                   AND (archive_warned_days IS NULL OR archive_warned_days > ?)
+                 ORDER BY COALESCE(last_played, created_at)
+                 LIMIT ?
+                """,
+                statement -> {
+                    statement.setInt(1, afterDays - warnDays);
+                    statement.setInt(2, warnDays);
+                    statement.setInt(3, limit);
+                },
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Records that this world's owner has been warned at {@code warnDays} (FR-34).
+     *
+     * <p>Conditional on the stored value, so two nodes racing the sweep cannot
+     * walk the threshold backwards and re-warn.
+     */
+    public boolean recordArchiveWarning(Connection connection, WorldId id, int warnDays) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        return execute(connection, """
+                        UPDATE player_world
+                           SET archive_warned_days = ?
+                         WHERE id = ?
+                           AND (archive_warned_days IS NULL OR archive_warned_days > ?)
+                        """, statement -> {
+                    statement.setInt(1, warnDays);
+                    statement.setObject(2, id.value());
+                    statement.setInt(3, warnDays);
+                })
+                == 1;
     }
 
     /**

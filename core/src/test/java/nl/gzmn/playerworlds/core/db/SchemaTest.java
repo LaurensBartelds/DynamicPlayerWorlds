@@ -75,6 +75,10 @@ class SchemaTest {
                         "node_command",
                         "pending_transfer",
                         "player_last_world",
+                        // V5: FR-34 warns an owner before their world is archived, and
+                        // that owner is offline by definition — inactivity is what
+                        // earned the warning — so the message has to wait for a login.
+                        "player_notice",
                         // V2: the username cache section 4 never defined, which every
                         // section 6 command needs to turn its first argument into a UUID.
                         "player_name",

@@ -26,6 +26,7 @@ import nl.gzmn.playerworlds.core.db.AdvisoryLock;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
@@ -55,6 +56,7 @@ class MaintenanceTaskTest {
     private ProfileRepository profiles;
     private MembershipRepository membership;
     private PendingTransferRepository pendingTransfers;
+    private NoticeRepository notices;
     private TransferRequestRepository transferRequests;
     private NodeCommandRepository nodeCommands;
     private LocalObjectCache localCache;
@@ -70,6 +72,7 @@ class MaintenanceTaskTest {
         profiles = new ProfileRepository(database);
         membership = new MembershipRepository(database);
         pendingTransfers = new PendingTransferRepository(database);
+        notices = new NoticeRepository(database);
         transferRequests = new TransferRequestRepository(database);
         nodeCommands = new NodeCommandRepository(database);
         localCache = new LocalObjectCache(tempDir.resolve("cache"), PlainFileCloner.INSTANCE);
@@ -86,6 +89,7 @@ class MaintenanceTaskTest {
                 profiles,
                 membership,
                 pendingTransfers,
+                notices,
                 transferRequests,
                 nodeCommands,
                 localCache,
@@ -471,5 +475,86 @@ class MaintenanceTaskTest {
                 return statement.executeUpdate();
             }
         }));
+    }
+
+    @Test
+    @DisplayName("an owner is warned before their world is auto-archived, once per threshold (FR-34)")
+    void ownersAreWarnedBeforeAutoArchival_FR34() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            worlds.create(worldId, owner, "quiet-world", 1L, 5000, Visibility.PRIVATE);
+            worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+            return null;
+        });
+        // 80 days of silence: 10 days from the 90-day default, so inside the
+        // 14-day warning and outside the 3-day one.
+        setLastPlayedDaysAgo(worldId, 80);
+
+        MaintenanceTask.SweepResult first = onDb(task::sweep);
+        assertThat(first.archivalWarningsSent()).isEqualTo(1);
+
+        // The whole point of recording it: the sweep runs every five minutes by
+        // default, and FR-34 gives it a fortnight to run in.
+        MaintenanceTask.SweepResult second = onDb(task::sweep);
+        assertThat(second.archivalWarningsSent()).isZero();
+
+        List<NoticeRepository.Notice> waiting = onDb(() -> notices.takeUndelivered(owner));
+        assertThat(waiting).hasSize(1);
+        assertThat(waiting.getFirst().message()).contains("quiet-world").contains("14 days");
+        assertThat(waiting.getFirst().worldId()).isEqualTo(worldId);
+        // Taken means delivered; a reconnect does not repeat it.
+        assertThat(onDb(() -> notices.takeUndelivered(owner))).isEmpty();
+    }
+
+    @Test
+    @DisplayName("the tighter threshold warns again as archival approaches (FR-34)")
+    void theTighterThresholdWarnsAgain() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            worlds.create(worldId, owner, "fading-world", 1L, 5000, Visibility.PRIVATE);
+            worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+            return null;
+        });
+        setLastPlayedDaysAgo(worldId, 80);
+        var _ = onDb(task::sweep);
+        assertThat(onDb(() -> notices.takeUndelivered(owner))).hasSize(1);
+
+        // Another week of silence: now 3 days out.
+        setLastPlayedDaysAgo(worldId, 88);
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.archivalWarningsSent()).isEqualTo(1);
+        assertThat(onDb(() -> notices.takeUndelivered(owner)))
+                .singleElement()
+                .extracting(NoticeRepository.Notice::message)
+                .asString()
+                .contains("3 days");
+    }
+
+    @Test
+    @DisplayName("playing a world again earns it its warnings a second time (FR-34)")
+    void playingAWorldAgainResetsItsWarnings() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            worlds.create(worldId, owner, "revisited-world", 1L, 5000, Visibility.PRIVATE);
+            worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+            return null;
+        });
+        setLastPlayedDaysAgo(worldId, 80);
+        var _ = onDb(task::sweep);
+        assertThat(onDb(() -> notices.takeUndelivered(owner))).hasSize(1);
+
+        // The owner comes back, plays, and drifts away again. Without clearing
+        // archive_warned_days the world would be archived in silence next time.
+        onDb(() -> worlds.touchLastPlayed(worldId));
+        setLastPlayedDaysAgo(worldId, 80);
+
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.archivalWarningsSent()).isEqualTo(1);
+        assertThat(onDb(() -> notices.takeUndelivered(owner))).hasSize(1);
     }
 }
