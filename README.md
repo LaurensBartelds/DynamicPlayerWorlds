@@ -16,16 +16,23 @@ foundation is being built. No gameplay behaviour is implemented yet.
 
 ## Components
 
-| Module | Artifact | Runs on |
-| --- | --- | --- |
-| `:backend` | `gzmn-worlds` | Every `worlds` node (Paper) |
-| `:proxy` | `gzmn-worlds-proxy` | The Velocity proxy |
-| `:core` | shaded into both | — |
+| Module | Artifact | Runs on | Java |
+| --- | --- | --- | --- |
+| `:lobby` | `gzmn-worlds-lobby` | Lobby servers (Paper 1.21+) | 21 |
+| `:backend` | `gzmn-worlds` | Every `worlds` node (Paper) | 25 |
+| `:proxy` | `gzmn-worlds-proxy` | The Velocity proxy | 25 |
+| `:core` | shaded into modules | — | 21 |
 
 `:core` holds everything that is not platform-specific: the data model,
-database access, the object-storage engine, configuration and the control
-plane. It has no dependency on Paper or Velocity, which is what makes it
-testable without booting a Minecraft server.
+database access, the object-storage engine, configuration, menu wire codecs
+and the control plane. It has no dependency on Paper or Velocity, which is what
+makes it testable without booting a Minecraft server.
+
+`:lobby` is a lightweight, zero-database plugin that acts as a pure inventory
+renderer for the network menu GUI (`/world`). It holds no database credentials,
+runs no SQL queries, and communicates strictly with Velocity over the `gzmn:menu`
+plugin messaging channel. Because it targets Java 21 and Paper 1.21+, it can be
+deployed on existing lobby servers without requiring Java 25.
 
 ## Documentation
 
@@ -51,10 +58,13 @@ boot against Paper's newest build (`paper-latest`) and run the compose e2e
 harness (`e2e/`, lobby join through Velocity). See `.github/workflows/` and
 `e2e/README.md`.
 
-Plugin jars are written to `backend/build/libs/` and `proxy/build/libs/`, named
-`gzmn-worlds-<version>+mc<paper-api-version>.jar`. The Minecraft version an
-artifact was built against is in its filename deliberately: an operator should
-never have to open a jar to find out.
+Plugin jars are written to:
+- `lobby/build/libs/`: `gzmn-worlds-lobby-<version>+mc<paper-api-version>.jar` (Java 21, ~380 KB)
+- `backend/build/libs/`: `gzmn-worlds-<version>+mc<paper-api-version>.jar` (Java 25)
+- `proxy/build/libs/`: `gzmn-worlds-proxy-<version>+mc<velocity-api-version>.jar` (Java 25)
+
+The Minecraft version an artifact was built against is in its filename
+deliberately: an operator should never have to open a jar to find out.
 
 Paper and Velocity APIs come from `https://repo.papermc.io/repository/maven-public/`,
 which must be reachable to build `:backend` or `:proxy`. `:core` and `:testing`
