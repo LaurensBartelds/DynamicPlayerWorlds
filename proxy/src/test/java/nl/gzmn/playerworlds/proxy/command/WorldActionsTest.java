@@ -20,6 +20,7 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
@@ -554,5 +555,73 @@ class WorldActionsTest {
             commands.findById(id).ifPresent(command -> kinds.add(command.command()));
         }
         return kinds;
+    }
+
+    @Test
+    @DisplayName("an archive discarded as stale reports the discard to the owner (CP-5, CP-6)")
+    void anArchiveDiscardedAsStaleIsReportedToTheOwner_CP6() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "staleworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        // Stand in for the node: claim whatever the proxy enqueues and complete it
+        // the way CP-4 does when the world has moved on since the command was
+        // issued. This is the outcome that used to be invisible -- the world stays
+        // READY, the owner's slot stays consumed, and the owner was told it was
+        // archiving.
+        NodeCommandRepository commands = new NodeCommandRepository(database);
+        Thread node = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                try {
+                    for (Long id : commands.findClaimableIds("paper-a", Duration.ofMinutes(1), 10)) {
+                        if (commands.claim(id, Duration.ofMinutes(1)).isPresent()) {
+                            var _ = commands.complete(id, CommandResult.staleGeneration());
+                            return;
+                        }
+                    }
+                    Thread.sleep(20);
+                } catch (Exception e) {
+                    return;
+                }
+            }
+        });
+        node.setDaemon(true);
+        node.start();
+
+        ActionResult result = actions.delete(player, "staleworld", true).get();
+        node.join(Duration.ofSeconds(10).toMillis());
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo("COMMAND_REFUSED");
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("archiving 'staleworld' did not happen")
+                .contains("the world moved on");
+    }
+
+    @Test
+    @DisplayName("a command nobody has claimed yet still reports as running, not as failed")
+    void anUnclaimedCommandReportsAsRunning() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "slowworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        // No node claims it. An archive of a large world takes minutes, so silence
+        // is not a refusal and must not be reported as one.
+        ActionResult result = actions.delete(player, "slowworld", true).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("archiving 'slowworld'");
     }
 }

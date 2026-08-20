@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C, D and E complete (R0–R23). Next is Phase F (R24–R28).
+Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24. Next is R25.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -163,7 +163,7 @@ to hold for an `Error` too.
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. **Complete.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
-| F | R24–R28 | Reporting, messaging, and de-duplication. |
+| F | R24–R28 | Reporting, messaging, and de-duplication. **R24 done.** |
 
 ---
 
@@ -1162,28 +1162,47 @@ and `WorldActionsTest` that the proxy no longer deletes the row itself.
 
 ### Phase F — reporting, messaging, and de-duplication
 
-#### R24 — The producer reads the control-plane result back
+#### R24 — The producer reads the control-plane result back — **DONE**
 
 **Requirement:** CP-5, CP-6, §6.
-**Files:** `proxy/command/WorldActions.java`, `core/control/ControlPlane.java`.
+**Files:** `core/control/CommandOutcomes.java`, `proxy/command/WorldActions.java`.
 
-Every command except `MIGRATE_WORLD` enqueues a row and immediately reports
-success. `node_command.result` is written by every handler and read by nothing,
-so CP-6's three deliberately-visible failure outcomes are invisible: a
-`/world delete` discarded as `STALE_GENERATION` leaves the world READY, the
-owner's slot consumed, and the owner told it is archiving.
+Every command except `MIGRATE_WORLD` enqueued a row and immediately reported
+success. `node_command.result` was written by every handler and read by nothing,
+so CP-6's three deliberately-visible failure outcomes were invisible: a
+`/world delete` discarded as `STALE_GENERATION` left the world READY, the
+owner's slot consumed, and the owner told it was archiving.
 
-Add a bounded await helper — poll `findById` until `completed_at`, bounded by
-the row's TTL, on the db executor — and use it for the commands whose outcome a
-player is waiting on: archive, restore, unload, hard delete. `MigrateWorldHandler`
-already demonstrates the pattern.
+**Landed.** `CommandOutcomes.await` polls the row and reports `Completed`,
+`Running` or `Gone`. `WorldActions.outcomeOrRunning` turns a refusal into a
+message, and archive, restore and hard delete use it. `enqueueTo` returns the row
+id it used to discard.
 
-`enqueueToWorldOrAliveNodes` needs a rule of its own here: when a world is
-unleased it broadcasts to every alive node, so "the result" is several results.
-For an idempotent notification (`INVALIDATE_CACHE`, `KICK_MEMBER`) that is fine
-and no await is needed. For anything a player waits on, the world must be placed
-first and the command addressed to one node.
+**It waits for the claim, not for the work** — a correction to the plan's "poll
+until `completed_at`, bounded by the row's TTL". CP-6's outcomes are all decided
+*at* claim: a stale generation, an unknown kind and a missing handler are settled
+before a handler runs. The work itself takes minutes for an archive, so waiting
+for completion would hold a database-executor thread for the row's whole TTL and
+make every *successful* archive sit silent for it — then say what it could have
+said at once. So the wait ends on the claim, with a 500 ms grace for the
+completion a refusal writes a round trip later; 1.5 s to see a claim at all.
+A node whose LISTEN connection is down claims on its next poll instead, possibly
+after that; the command still runs and still records its result for the operator,
+which is the behaviour these commands had before.
 
+`enqueueToWorldOrAliveNodes` is left alone, and the reason is written on
+`outcomeOrRunning`: it broadcasts when a world is unleased, so "the result" would
+be several. Every command it carries is an idempotent notification
+(`INVALIDATE_CACHE`, `KICK_MEMBER`, `APPLY_SETTINGS`) and none is something a
+player waits on. Everything a player waits on is placed first and addressed to
+one node.
+
+**Failing test first (proven by temporary revert):**
+`WorldActionsTest#anArchiveDiscardedAsStaleIsReportedToTheOwner_CP6` stands a
+thread in for the node, claims the row and completes it `STALE_GENERATION`, and
+asserts the owner is told. `#anUnclaimedCommandReportsAsRunning` asserts the
+other half: silence is not a refusal, because an archive of a large world is
+silent for minutes.
 **Acceptance:** an archive discarded as stale reports the discard to the owner.
 
 #### R25 — `/world delete` on a CREATING world stops reporting failure after succeeding

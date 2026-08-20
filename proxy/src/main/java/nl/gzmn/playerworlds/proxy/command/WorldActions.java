@@ -20,6 +20,7 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.CommandOutcomes;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
 import nl.gzmn.playerworlds.core.control.EjectPayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
@@ -272,12 +273,16 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     "ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
                         }
-                        enqueueTo(
+                        long commandId = enqueueTo(
                                 node,
                                 world,
                                 CommandKind.ARCHIVE_WORLD,
                                 ArchivePayload.format(caller.getUniqueId()),
                                 current);
+                        ActionResult refused = outcomeOrRunning(caller, commandId, "archiving '" + name + "'");
+                        if (refused != null) {
+                            return refused;
+                        }
                         Component msg = info(
                                 caller,
                                 "archiving '" + name + "' on " + node
@@ -385,7 +390,11 @@ public final class WorldActions {
         if (node == null) {
             return ActionResult.failure("ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
         }
-        enqueueTo(node, world, CommandKind.DELETE_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+        long commandId = enqueueTo(node, world, CommandKind.DELETE_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
+        ActionResult refused = outcomeOrRunning(caller, commandId, "permanently deleting '" + world.name() + "'");
+        if (refused != null) {
+            return refused;
+        }
         log.info(
                 "world {} ('{}') queued for permanent deletion on {} by owner {} (FR-37)",
                 world.id(),
@@ -439,7 +448,12 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     "ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
                         }
-                        enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(null), current);
+                        long commandId =
+                                enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(null), current);
+                        ActionResult refused = outcomeOrRunning(caller, commandId, "restoring '" + name + "'");
+                        if (refused != null) {
+                            return refused;
+                        }
                         Component msg =
                                 info(caller, "restoring '" + name + "' on " + node + "; this may take a few minutes");
                         log.info("world {} queued for restore on {} by its owner (FR-36)", world.id(), node);
@@ -1748,9 +1762,15 @@ public final class WorldActions {
         return routableNodeOrExplain(caller, decision, world.id());
     }
 
-    public void enqueueTo(String nodeId, PlayerWorld world, CommandKind kind, String payloadJson, NetworkPolicy current)
+    /**
+     * Addresses one command to one node.
+     *
+     * @return the {@code node_command} row id, so the caller can read the outcome
+     *     back (CP-5); see {@link #outcomeOrRunning}
+     */
+    public long enqueueTo(String nodeId, PlayerWorld world, CommandKind kind, String payloadJson, NetworkPolicy current)
             throws SQLException {
-        nodeCommands.enqueue(
+        return nodeCommands.enqueue(
                 nodeId,
                 world.id(),
                 world.generation(),
@@ -1758,6 +1778,41 @@ public final class WorldActions {
                 payloadJson,
                 current.holdingTimeout(),
                 ControlChannels.forNode(nodeId));
+    }
+
+    /**
+     * Waits briefly for a command's outcome and turns a refusal into a message
+     * the player can act on (CP-5, CP-6).
+     *
+     * <p>Only for commands addressed to a single node. {@link
+     * #enqueueToWorldOrAliveNodes} broadcasts when a world is unleased, so "the
+     * result" would be several results — that is fine for the idempotent
+     * notifications it carries ({@code INVALIDATE_CACHE}, {@code KICK_MEMBER},
+     * {@code APPLY_SETTINGS}), and none of them is something a player is waiting
+     * on. Anything a player waits on is placed first and addressed to one node.
+     *
+     * @return {@code null} when the command succeeded or is still running, or the
+     *     failure to report when it did not
+     */
+    public @Nullable ActionResult outcomeOrRunning(CommandSource caller, long commandId, String what) {
+        CommandOutcomes.Outcome outcome = CommandOutcomes.await(nodeCommands, commandId);
+        return switch (outcome) {
+            case CommandOutcomes.Outcome.Running ignored -> null;
+            case CommandOutcomes.Outcome.Completed completed -> {
+                if (completed.isOk()) {
+                    yield null;
+                }
+                log.warn("{} (command {}) was refused: {}", what, commandId, completed.result());
+                yield ActionResult.failure(
+                        "COMMAND_REFUSED", error(caller, what + " did not happen: " + completed.detail()));
+            }
+            case CommandOutcomes.Outcome.Gone ignored -> {
+                // Swept, or the world went with it. Either way nobody ran it.
+                log.warn("{} (command {}) vanished before it was completed", what, commandId);
+                yield ActionResult.failure(
+                        "COMMAND_REFUSED", error(caller, what + " did not happen; the instruction was lost"));
+            }
+        };
     }
 
     public void enqueueToWorldOrAliveNodes(
