@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.proxy.command;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
@@ -16,6 +17,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -203,16 +205,8 @@ public final class WorldCommand {
                 .then(BrigadierCommand.literalArgumentBuilder("invite")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        deliver(
-                                                caller,
-                                                actions.invite(
-                                                        caller, StringArgumentType.getString(context, "player")));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> invite(context, null))
+                                .then(worldArgument().executes(context -> invite(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("accept")
                         .requires(source -> maySee(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
@@ -227,27 +221,12 @@ public final class WorldCommand {
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("kick")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        deliver(
-                                                caller,
-                                                actions.kick(caller, StringArgumentType.getString(context, "player")));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> kick(context, null))
+                                .then(worldArgument().executes(context -> kick(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("promote")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        deliver(
-                                                caller,
-                                                actions.promote(
-                                                        caller, StringArgumentType.getString(context, "player")));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> promote(context, null))
+                                .then(worldArgument().executes(context -> promote(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("transfer")
                         .then(BrigadierCommand.literalArgumentBuilder("accept")
                                 .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
@@ -277,31 +256,13 @@ public final class WorldCommand {
                                         })))
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        deliver(
-                                                caller,
-                                                actions.transfer(
-                                                        caller,
-                                                        StringArgumentType.getString(context, "player"),
-                                                        false));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })
+                                .executes(context -> transfer(context, null, false))
                                 .then(BrigadierCommand.literalArgumentBuilder("confirm")
-                                        .executes(context -> {
-                                            Player caller = playerOrNull(context);
-                                            if (caller != null) {
-                                                deliver(
-                                                        caller,
-                                                        actions.transfer(
-                                                                caller,
-                                                                StringArgumentType.getString(context, "player"),
-                                                                true));
-                                            }
-                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
+                                        .executes(context -> transfer(context, null, true)))
+                                .then(worldArgument()
+                                        .executes(context -> transfer(context, worldName(context), false))
+                                        .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                                .executes(context -> transfer(context, worldName(context), true))))))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
                         .requires(source -> maySee(source, CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
@@ -416,13 +377,9 @@ public final class WorldCommand {
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
-                .then(BrigadierCommand.literalArgumentBuilder("members").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        deliver(caller, actions.members(caller));
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                .then(BrigadierCommand.literalArgumentBuilder("members")
+                        .executes(context -> members(context, null))
+                        .then(worldArgument().executes(context -> members(context, worldName(context)))))
                 .then(BrigadierCommand.literalArgumentBuilder("list").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
@@ -470,25 +427,12 @@ public final class WorldCommand {
                 .then(BrigadierCommand.literalArgumentBuilder("set")
                         .then(BrigadierCommand.requiredArgumentBuilder("setting", StringArgumentType.word())
                                 .then(BrigadierCommand.requiredArgumentBuilder("value", StringArgumentType.word())
-                                        .executes(context -> {
-                                            Player caller = playerOrNull(context);
-                                            if (caller != null) {
-                                                deliver(
-                                                        caller,
-                                                        actions.setSetting(
-                                                                caller,
-                                                                StringArgumentType.getString(context, "setting"),
-                                                                StringArgumentType.getString(context, "value")));
-                                            }
-                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
-                .then(BrigadierCommand.literalArgumentBuilder("settings").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        deliver(caller, actions.showSettings(caller));
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                                        .executes(context -> setSetting(context, null))
+                                        .then(worldArgument()
+                                                .executes(context -> setSetting(context, worldName(context)))))))
+                .then(BrigadierCommand.literalArgumentBuilder("settings")
+                        .executes(context -> showSettings(context, null))
+                        .then(worldArgument().executes(context -> showSettings(context, worldName(context)))))
                 .then(BrigadierCommand.literalArgumentBuilder("ban")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
@@ -518,15 +462,8 @@ public final class WorldCommand {
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("unban")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        deliver(
-                                                caller,
-                                                actions.unban(caller, StringArgumentType.getString(context, "player")));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> unban(context, null))
+                                .then(worldArgument().executes(context -> unban(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("storage").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
@@ -534,13 +471,9 @@ public final class WorldCommand {
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
-                .then(BrigadierCommand.literalArgumentBuilder("bans").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        deliver(caller, actions.listBans(caller));
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                .then(BrigadierCommand.literalArgumentBuilder("bans")
+                        .executes(context -> listBans(context, null))
+                        .then(worldArgument().executes(context -> listBans(context, worldName(context)))))
                 .then(adminTree());
         return new BrigadierCommand(root);
     }
@@ -1154,6 +1087,159 @@ public final class WorldCommand {
                 error(source, "that did not work; the failure is in the proxy log");
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Owner subcommands (section 6)
+    //
+    // Two bindings and one method each: with a trailing world name and without.
+    // Without one, WorldActions decides which world is meant -- the one the
+    // caller is standing in, or their only one.
+    //
+    // /world ban and /world public are the two that take no world name. Both
+    // end in free text, and a trailing name after free text cannot be told from
+    // more of it: "/world ban Bob griefing" would have to guess whether
+    // "griefing" is a reason or a world. Those two say so in their refusal and
+    // point at the menu.
+    // -----------------------------------------------------------------------
+
+    /** The optional trailing world name shared by every owner subcommand. */
+    private RequiredArgumentBuilder<CommandSource, String> worldArgument() {
+        return BrigadierCommand.requiredArgumentBuilder("world", StringArgumentType.word())
+                .suggests(this::suggestOwnedWorlds);
+    }
+
+    private static String worldName(CommandContext<CommandSource> context) {
+        return StringArgumentType.getString(context, "world");
+    }
+
+    private int invite(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.invite(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int kick(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.kick(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int promote(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.promote(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int transfer(CommandContext<CommandSource> context, @Nullable String world, boolean confirmed) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.transfer(caller, targetName, confirmed, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int unban(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.unban(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int setSetting(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String setting = StringArgumentType.getString(context, "setting");
+            String value = StringArgumentType.getString(context, "value");
+            deliverForWorld(caller, world, worldId -> actions.setSetting(caller, setting, value, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int showSettings(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.showSettings(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int members(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.members(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int listBans(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.listBans(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * Runs an owner action against the world the caller named, or lets
+     * {@link WorldActions} work out which world is meant when they named none.
+     *
+     * <p>The name is turned into an id here because this is the surface that has
+     * a name: the menu holds ids already and passes them straight through. A
+     * name that is not one of the caller's own worlds never reaches the action.
+     */
+    private void deliverForWorld(
+            Player caller,
+            @Nullable String world,
+            Function<@Nullable WorldId, CompletableFuture<ActionResult>> action) {
+        if (world == null) {
+            deliver(caller, action.apply(null));
+            return;
+        }
+        deliver(caller, actions.ownedWorld(caller, world).thenCompose(target -> switch (target) {
+            case WorldActions.Target.None none -> CompletableFuture.completedFuture(none.refusal());
+            case WorldActions.Target.Found found -> action.apply(found.world().id());
+        }));
+    }
+
+    /**
+     * The caller's own world names, for the trailing argument.
+     *
+     * <p>On the database pool: a suggestion provider runs on every keystroke,
+     * and every run of this one is a query.
+     */
+    private CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestOwnedWorlds(
+            CommandContext<CommandSource> context, com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
+        if (!(context.getSource() instanceof Player player)) {
+            return builder.buildFuture();
+        }
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    String prefix = builder.getRemaining().toLowerCase(Locale.ROOT);
+                    try {
+                        for (PlayerWorld owned : worlds.listOwnedBy(player.getUniqueId())) {
+                            if (owned.name().toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                                builder.suggest(owned.name());
+                            }
+                        }
+                    } catch (SQLException e) {
+                        log.debug("could not suggest world names: {}", e.getMessage());
+                    }
+                    return builder.build();
+                },
+                executors.db());
     }
 
     /**

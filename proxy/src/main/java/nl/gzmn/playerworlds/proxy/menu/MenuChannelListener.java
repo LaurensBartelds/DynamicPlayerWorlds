@@ -25,6 +25,7 @@ import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.menu.OpenMenu;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
+import nl.gzmn.playerworlds.core.menu.WorldPresenceNotice;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.proxy.command.ActionResult;
@@ -37,7 +38,7 @@ import org.slf4j.LoggerFactory;
  * Velocity channel listener for the {@code gzmn:menu} plugin messaging channel.
  *
  * <p>Enforces strict source security checks (Security Rule 1 and 2), decodes incoming
- * {@link OpenMenu}, {@link MenuClickIntent}, {@link MenuClosedNotice}, and legacy {@link IntentEnvelope}
+ * {@link OpenMenu}, {@link MenuClickIntent}, {@link MenuClosedNotice}, {@link WorldPresenceNotice}, and legacy {@link IntentEnvelope}
  * messages, dispatches them to {@link WorldActions} and {@link MenuViewService}, and sends serialized
  * {@link RenderMenuPayload}, {@link CloseMenuMessage}, or {@link MenuResult} messages back to the backend node.
  */
@@ -96,6 +97,11 @@ public final class MenuChannelListener {
             handleMenuClickIntent(connection, player, clickIntent);
         } else if (decoded instanceof MenuClosedNotice closedNotice) {
             handleMenuClosedNotice(player, closedNotice);
+        } else if (decoded instanceof WorldPresenceNotice presenceNotice) {
+            // Identity and node both come from the connection, never the payload
+            // (Security Rule 2). A node can only speak for players on it.
+            actions.presence()
+                    .entered(player.getUniqueId(), connection.getServerInfo().getName(), presenceNotice.worldId());
         } else {
             log.warn(
                     "Unhandled menu message type {} from server {} for player {}",

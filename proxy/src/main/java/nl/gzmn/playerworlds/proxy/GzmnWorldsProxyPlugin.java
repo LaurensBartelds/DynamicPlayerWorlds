@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.proxy;
 
 import com.google.inject.Inject;
 import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
@@ -95,6 +96,7 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable TransferRequestRepository transferRequests;
     private @Nullable NoticeRepository notices;
     private @Nullable NodeRegistry nodeRegistry;
+    private @Nullable WorldActions worldActions;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
 
@@ -216,6 +218,8 @@ public final class GzmnWorldsProxyPlugin {
                 nodeCommands,
                 openedDatabase,
                 this::policy);
+
+        this.worldActions = worldActions;
 
         MenuViewService viewService = new MenuViewService(
                 worldRepository,
@@ -419,6 +423,21 @@ public final class GzmnWorldsProxyPlugin {
 
     public @Nullable TransferRequestRepository transferRequests() {
         return transferRequests;
+    }
+
+    /**
+     * Forgets where a player was (FR-6).
+     *
+     * <p>{@link nl.gzmn.playerworlds.proxy.world.WorldPresence} ignores a report
+     * from a node the player has since left, so a stale entry is already
+     * harmless; this keeps it from also being unbounded.
+     */
+    @Subscribe
+    public void onDisconnect(DisconnectEvent event) {
+        WorldActions actions = this.worldActions;
+        if (actions != null) {
+            actions.presence().forget(event.getPlayer().getUniqueId());
+        }
     }
 
     @Subscribe

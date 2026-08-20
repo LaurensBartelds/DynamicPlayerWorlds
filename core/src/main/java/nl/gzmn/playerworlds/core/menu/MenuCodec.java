@@ -29,6 +29,7 @@ public final class MenuCodec {
     public static final byte MSG_CLOSE_MENU = 6;
     public static final byte MSG_CLICK_INTENT = 7;
     public static final byte MSG_CLOSED_NOTICE = 8;
+    public static final byte MSG_PRESENCE = 9;
 
     public static final byte INTENT_JOIN_WORLD = 1;
     public static final byte INTENT_CREATE_WORLD = 2;
@@ -220,7 +221,7 @@ public final class MenuCodec {
      * Dispatches decoding according to the top-level message type discriminator.
      *
      * @param data raw message bytes
-     * @return decoded object ({@link OpenMenu}, {@link IntentEnvelope}, {@link MenuResult}, {@link RenderMenuPayload}, {@link CloseMenuMessage}, {@link MenuClickIntent}, or {@link MenuClosedNotice})
+     * @return decoded object ({@link OpenMenu}, {@link IntentEnvelope}, {@link MenuResult}, {@link RenderMenuPayload}, {@link CloseMenuMessage}, {@link MenuClickIntent}, {@link MenuClosedNotice}, or {@link WorldPresenceNotice})
      * @throws MenuCodecException if payload is invalid or unknown
      */
     public static Object decode(byte[] data) {
@@ -237,6 +238,7 @@ public final class MenuCodec {
             case MSG_CLOSE_MENU -> decodeCloseMenu(data);
             case MSG_CLICK_INTENT -> decodeClickIntent(data);
             case MSG_CLOSED_NOTICE -> decodeClosedNotice(data);
+            case MSG_PRESENCE -> decodePresence(data);
             default -> throw new MenuCodecException("Unknown message type: " + type);
         };
     }
@@ -631,6 +633,51 @@ public final class MenuCodec {
             case INTENT_HARD_DELETE_WORLD -> new MenuIntent.HardDeleteWorld(readWorldId(in));
             default -> throw new MenuCodecException("Unknown intent type: " + intentType);
         };
+    }
+
+    /**
+     * Encodes a {@link WorldPresenceNotice} to bytes.
+     *
+     * @param notice the presence notice
+     * @return encoded byte array
+     */
+    public static byte[] encodePresence(WorldPresenceNotice notice) {
+        Objects.requireNonNull(notice, "notice");
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (DataOutputStream out = new DataOutputStream(baos)) {
+            out.writeByte(MSG_PRESENCE);
+            writeNullableWorldId(out, notice.worldId());
+        } catch (IOException e) {
+            throw new AssertionError("ByteArrayOutputStream should not throw IOException", e);
+        }
+        return baos.toByteArray();
+    }
+
+    /**
+     * Decodes a {@link WorldPresenceNotice} from bytes.
+     *
+     * @param data the byte array
+     * @return decoded WorldPresenceNotice
+     * @throws MenuCodecException if payload is invalid or truncated
+     */
+    public static WorldPresenceNotice decodePresence(byte[] data) {
+        Objects.requireNonNull(data, "data");
+        if (data.length == 0) {
+            throw new MenuCodecException("Empty payload for WorldPresenceNotice");
+        }
+        try (DataInputStream in = new DataInputStream(new ByteArrayInputStream(data))) {
+            byte type = in.readByte();
+            if (type != MSG_PRESENCE) {
+                throw new MenuCodecException("Expected message type PRESENCE (" + MSG_PRESENCE + ") but got: " + type);
+            }
+            WorldId worldId = readNullableWorldId(in);
+            if (in.available() > 0) {
+                throw new MenuCodecException("Unexpected trailing bytes in WorldPresenceNotice payload");
+            }
+            return new WorldPresenceNotice(worldId);
+        } catch (IOException e) {
+            throw new MenuCodecException("Failed to decode WorldPresenceNotice payload", e);
+        }
     }
 
     private static void writeWorldId(DataOutputStream out, WorldId worldId) throws IOException {

@@ -5,8 +5,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.velocitypowered.api.permission.Tristate;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
+import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
+import com.velocitypowered.api.proxy.server.ServerInfo;
 import java.lang.reflect.Proxy;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -508,14 +512,152 @@ class WorldActionsTest {
                 .contains("No players are currently banned");
     }
 
+    // -----------------------------------------------------------------------
+    // Which world an owner command acts on (section 6, FR-1)
+    // -----------------------------------------------------------------------
+
+    @Test
+    @DisplayName("two owned worlds and nothing to go on: the refusal says how to say which")
+    void inviteWithTwoWorldsSaysHowToNameOne() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        playersByName.put("Bob", mockPlayer(UUID.randomUUID(), "Bob"));
+
+        worlds.create(WorldId.random(), owner, "first", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(WorldId.random(), owner, "second", 2L, 5000, Visibility.PRIVATE);
+
+        ActionResult result = actions.invite(player, "Bob").get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        String text = PlainTextComponentSerializer.plainText().serialize(result.message());
+        assertThat(text).contains("you own 2 worlds");
+        assertThat(text).contains("first").contains("second");
+        assertThat(text).contains("/world invite <player> <world>");
+    }
+
+    @Test
+    @DisplayName("a command that ends in free text cannot take a world name, and says so")
+    void banWithTwoWorldsPointsAtTheMenu() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        playersByName.put("Bob", mockPlayer(UUID.randomUUID(), "Bob"));
+
+        worlds.create(WorldId.random(), owner, "first", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(WorldId.random(), owner, "second", 2L, 5000, Visibility.PRIVATE);
+
+        ActionResult result = actions.ban(player, "Bob", "griefing").get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("/world menu");
+    }
+
+    @Test
+    @DisplayName("the world the caller named is the one acted on")
+    void inviteUsesTheWorldNamedByTheCaller() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        playersByName.put("Bob", mockPlayer(UUID.randomUUID(), "Bob"));
+
+        worlds.create(WorldId.random(), owner, "first", 1L, 5000, Visibility.PRIVATE);
+        WorldId second = WorldId.random();
+        worlds.create(second, owner, "second", 2L, 5000, Visibility.PRIVATE);
+
+        WorldActions.Target target = actions.ownedWorld(player, "second").get();
+        assertThat(target).isInstanceOf(WorldActions.Target.Found.class);
+        assertThat(((WorldActions.Target.Found) target).world().id()).isEqualTo(second);
+
+        ActionResult result = actions.invite(player, "Bob", second).get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("invited Bob to 'second'");
+    }
+
+    @Test
+    @DisplayName("a name that is not one of the caller's own worlds resolves to nothing")
+    void ownedWorldRefusesANameTheCallerDoesNotOwn() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        worlds.create(WorldId.random(), owner, "mine", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(WorldId.random(), UUID.randomUUID(), "theirs", 2L, 5000, Visibility.PRIVATE);
+
+        WorldActions.Target target = actions.ownedWorld(player, "theirs").get();
+
+        assertThat(target).isInstanceOf(WorldActions.Target.None.class);
+        assertThat(PlainTextComponentSerializer.plainText()
+                        .serialize(((WorldActions.Target.None) target).refusal().message()))
+                .contains("you own no world called 'theirs'");
+    }
+
+    @Test
+    @DisplayName("standing in one of your own worlds is saying which one (FR-6)")
+    void inviteUsesTheWorldTheCallerIsStandingIn() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerOn(owner, "Alice", "node-1");
+        playersByUuid.put(owner, player);
+        playersByName.put("Bob", mockPlayer(UUID.randomUUID(), "Bob"));
+
+        worlds.create(WorldId.random(), owner, "first", 1L, 5000, Visibility.PRIVATE);
+        WorldId second = WorldId.random();
+        worlds.create(second, owner, "second", 2L, 5000, Visibility.PRIVATE);
+        actions.presence().entered(owner, "node-1", second);
+
+        ActionResult result = actions.invite(player, "Bob").get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("invited Bob to 'second'");
+    }
+
+    @Test
+    @DisplayName("standing in someone else's world does not choose it")
+    void presenceInAWorldTheCallerDoesNotOwnIsNotAnAnswer() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerOn(owner, "Alice", "node-1");
+        playersByUuid.put(owner, player);
+        playersByName.put("Bob", mockPlayer(UUID.randomUUID(), "Bob"));
+
+        worlds.create(WorldId.random(), owner, "first", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(WorldId.random(), owner, "second", 2L, 5000, Visibility.PRIVATE);
+        WorldId visiting = WorldId.random();
+        worlds.create(visiting, UUID.randomUUID(), "carols", 3L, 5000, Visibility.PUBLIC);
+        actions.presence().entered(owner, "node-1", visiting);
+
+        ActionResult result = actions.invite(player, "Bob").get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("you own 2 worlds");
+    }
+
     private Player mockPlayer(UUID uuid, String name) {
         return mockPlayer(uuid, name, permission -> true);
     }
 
+    /** A player the proxy sees on a node, for the world-they-are-standing-in rule. */
+    private Player mockPlayerOn(UUID uuid, String name, String serverName) {
+        ServerInfo info = new ServerInfo(serverName, new InetSocketAddress(InetAddress.getLoopbackAddress(), 25566));
+        ServerConnection connection = (ServerConnection) Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] {ServerConnection.class},
+                (proxyObj, method, args) -> method.getName().equals("getServerInfo") ? info : null);
+        return mockPlayer(uuid, name, permission -> true, Optional.of(connection));
+    }
+
     private Player mockPlayer(UUID uuid, String name, Predicate<String> permissions) {
+        return mockPlayer(uuid, name, permissions, Optional.empty());
+    }
+
+    private Player mockPlayer(
+            UUID uuid, String name, Predicate<String> permissions, Optional<ServerConnection> currentServer) {
         return (Player) Proxy.newProxyInstance(
                 getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
                     if (method.getName().equals("getUniqueId")) return uuid;
+                    if (method.getName().equals("getCurrentServer")) return currentServer;
                     if (method.getName().equals("getUsername")) return name;
                     if (method.getName().equals("getPermissionValue")) {
                         return permissions.test((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;

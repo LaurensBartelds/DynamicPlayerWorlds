@@ -512,6 +512,7 @@ class MenuCodecTest {
             CloseMenuMessage closeMsg = new CloseMenuMessage(60L);
             MenuClickIntent click = new MenuClickIntent(70L, "ACTION:JOIN:world-1", 2);
             MenuClosedNotice closed = new MenuClosedNotice(80L);
+            WorldPresenceNotice presence = new WorldPresenceNotice(WorldId.random());
 
             assertThat(MenuCodec.decode(MenuCodec.encodeOpenMenu(openMenu))).isEqualTo(openMenu);
             assertThat(MenuCodec.decode(MenuCodec.encodeIntent(envelope.correlationId(), envelope.intent())))
@@ -522,6 +523,38 @@ class MenuCodecTest {
             assertThat(MenuCodec.decode(MenuCodec.encodeCloseMenu(closeMsg))).isEqualTo(closeMsg);
             assertThat(MenuCodec.decode(MenuCodec.encodeClickIntent(click))).isEqualTo(click);
             assertThat(MenuCodec.decode(MenuCodec.encodeClosedNotice(closed))).isEqualTo(closed);
+            assertThat(MenuCodec.decode(MenuCodec.encodePresence(presence))).isEqualTo(presence);
+        }
+    }
+
+    @Nested
+    @DisplayName("WorldPresenceNotice")
+    class WorldPresenceNoticeTests {
+
+        @Test
+        @DisplayName("round trips a world")
+        void roundTripsAWorld() {
+            WorldPresenceNotice notice = new WorldPresenceNotice(WorldId.random());
+            assertThat(MenuCodec.decodePresence(MenuCodec.encodePresence(notice)))
+                    .isEqualTo(notice);
+        }
+
+        @Test
+        @DisplayName("round trips no world, which is how a node says the lobby or its own level")
+        void roundTripsNoWorld() {
+            WorldPresenceNotice notice = new WorldPresenceNotice(null);
+            assertThat(MenuCodec.decodePresence(MenuCodec.encodePresence(notice))
+                            .worldId())
+                    .isNull();
+        }
+
+        @Test
+        @DisplayName("rejects trailing bytes")
+        void rejectsTrailingBytes() {
+            byte[] encoded = MenuCodec.encodePresence(new WorldPresenceNotice(WorldId.random()));
+            byte[] withTrailing = new byte[encoded.length + 1];
+            System.arraycopy(encoded, 0, withTrailing, 0, encoded.length);
+            assertThatThrownBy(() -> MenuCodec.decodePresence(withTrailing)).isInstanceOf(MenuCodecException.class);
         }
     }
 

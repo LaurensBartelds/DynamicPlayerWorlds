@@ -481,9 +481,14 @@ Two servers are needed here, or two accounts on one:
 - **FR-8's immediate ejection is not wired.** Kicking removes the membership and
   the invite; ejecting a player who is *inside* the world at the time is the
   control plane's `KICK_MEMBER`, whose handler arrives with the transfer path.
-- **The membership commands take no world name.** Section 6 gives them none
+- ~~**The membership commands take no world name.** Section 6 gives them none
   either, so with a cap of two worlds they refuse rather than guess which world
-  is meant. A world argument arrives with milestone 5.
+  is meant. A world argument arrives with milestone 5.~~ Done, and the spec gap
+  behind it closed as §6.1: the owner commands take an optional trailing
+  `[world]`, and with none given they use the world the caller is standing in,
+  which the node now reports to the proxy over the menu channel. `/world ban`
+  and `/world public` are the two exceptions, because a world name cannot be
+  told from the free text they already end in.
 
 ### Found while building
 

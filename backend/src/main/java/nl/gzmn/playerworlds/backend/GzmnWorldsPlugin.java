@@ -50,6 +50,7 @@ import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
+import nl.gzmn.playerworlds.backend.world.PresenceReporter;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
 import nl.gzmn.playerworlds.backend.world.VisibilityGroups;
 import nl.gzmn.playerworlds.backend.world.VisibilityListener;
@@ -607,6 +608,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .registerEvents(new RoleEnforcementListener(worldFolders, membershipCache, settingsCache), this);
         // FR-18/19/20: Visibility and group chat buffer
         getServer().getPluginManager().registerEvents(new VisibilityListener(this, visibilityGroups, chatBuffer), this);
+        // FR-6 and the rest of section 6: the proxy sees the node a player is on
+        // but not the world, and one node holds many. Without this the owner
+        // commands can only guess, which with FR-1's cap of two is a refusal.
+        MenuChannel presenceChannel = this.menuChannel;
+        if (presenceChannel != null) {
+            getServer().getPluginManager().registerEvents(new PresenceReporter(worldFolders, presenceChannel), this);
+        }
         // FR-21/FR-22: the command allow-list inside a player world. Without this
         // registration the class is dead code and vanilla /list and /tell leak
         // presence between two worlds on one node, which is the whole of §5.5.

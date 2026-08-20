@@ -49,6 +49,7 @@ import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
 import nl.gzmn.playerworlds.proxy.permission.WorldPermissions;
+import nl.gzmn.playerworlds.proxy.world.WorldPresence;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +82,14 @@ public final class WorldActions {
 
     private final Supplier<NetworkPolicy> policy;
     private final StorageTiers storageTiers;
+
+    /**
+     * Where each player is, filled by the nodes over the menu channel.
+     *
+     * <p>Owned here rather than injected because there must be exactly one of
+     * it, and every surface that needs it already holds a {@code WorldActions}.
+     */
+    private final WorldPresence presence = new WorldPresence();
 
     public WorldActions(
             ProxyServer proxy,
@@ -639,12 +648,11 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world invite <player> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
@@ -655,24 +663,21 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     FailureCode.INVALID_NAME, error("you are already the owner of that world"));
                         }
-                        if (membership
-                                .findMember(world.get().id(), target.get())
-                                .isPresent()) {
+                        if (membership.findMember(world.id(), target.get()).isPresent()) {
                             return ActionResult.failure(
                                     FailureCode.ALREADY_EXISTS,
-                                    error(targetName + " is already a member of '"
-                                            + world.get().name() + "'"));
+                                    error(targetName + " is already a member of '" + world.name() + "'"));
                         }
 
-                        membership.invite(world.get().id(), target.get(), caller.getUniqueId(), current.inviteExpiry());
-                        Component msg = success(
-                                "invited " + targetName + " to '" + world.get().name() + "'; the invite expires in "
+                        membership.invite(world.id(), target.get(), caller.getUniqueId(), current.inviteExpiry());
+                        Component msg =
+                                success("invited " + targetName + " to '" + world.name() + "'; the invite expires in "
                                         + current.inviteExpiry().toMinutes() + " minutes");
 
                         proxy.getPlayer(target.get())
                                 .ifPresent(online -> online.sendMessage(Component.text(
-                                        caller.getUsername() + " invited you to their world '"
-                                                + world.get().name() + "'. Use /world accept " + caller.getUsername(),
+                                        caller.getUsername() + " invited you to their world '" + world.name()
+                                                + "'. Use /world accept " + caller.getUsername(),
                                         NamedTextColor.GREEN)));
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
@@ -752,35 +757,33 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world kick <player> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
                                     FailureCode.PLAYER_NOT_FOUND,
                                     error("no player called '" + targetName + "' has been seen on this network"));
                         }
-                        if (target.get().equals(world.get().ownerUuid())) {
+                        if (target.get().equals(world.ownerUuid())) {
                             return ActionResult.failure(
                                     FailureCode.PERMISSION_DENIED,
                                     error(
                                             "you cannot kick yourself from your own world; use /world transfer or /world delete"));
                         }
-                        membership.revokeInvite(world.get().id(), target.get());
-                        if (!membership.removeMember(world.get().id(), target.get())) {
+                        membership.revokeInvite(world.id(), target.get());
+                        if (!membership.removeMember(world.id(), target.get())) {
                             return ActionResult.failure(
                                     FailureCode.STATE_CONFLICT,
-                                    error(targetName + " is not a member of '"
-                                            + world.get().name() + "'"));
+                                    error(targetName + " is not a member of '" + world.name() + "'"));
                         }
                         enqueueToWorldOrAliveNodes(
-                                world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                                world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
                         enqueueToWorldOrAliveNodes(
-                                world.get(),
+                                world,
                                 CommandKind.KICK_MEMBER,
                                 EjectPayload.format(target.get(), "You were removed from this world"),
                                 current);
@@ -790,8 +793,8 @@ public final class WorldActions {
                         // pre-control-plane behaviour -- a KICK_MEMBER now ejects
                         // them where they stand -- and taught operators a model
                         // the system stopped having (R27).
-                        Component msg = success("removed " + targetName + " from '"
-                                + world.get().name() + "'; if they are in it now, they are on their way to lobby");
+                        Component msg = success("removed " + targetName + " from '" + world.name()
+                                + "'; if they are in it now, they are on their way to lobby");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world kick failed for {}", caller.getUsername(), e);
@@ -816,29 +819,26 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world promote <player> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
                                     FailureCode.PLAYER_NOT_FOUND,
                                     error("no player called '" + targetName + "' has been seen on this network"));
                         }
-                        if (membership.setRole(world.get().id(), target.get(), Role.BUILDER)) {
+                        if (membership.setRole(world.id(), target.get(), Role.BUILDER)) {
                             enqueueToWorldOrAliveNodes(
-                                    world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
-                            Component msg = success(targetName + " is now a BUILDER of '"
-                                    + world.get().name() + "'");
+                                    world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                            Component msg = success(targetName + " is now a BUILDER of '" + world.name() + "'");
                             return ActionResult.success(msg);
                         } else {
                             return ActionResult.failure(
                                     FailureCode.STATE_CONFLICT,
-                                    error(targetName + " is not a member of '"
-                                            + world.get().name() + "', or is its owner"));
+                                    error(targetName + " is not a member of '" + world.name() + "', or is its owner"));
                         }
                     } catch (SQLException e) {
                         log.error("/world promote failed for {}", caller.getUsername(), e);
@@ -864,12 +864,11 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world transfer <player> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
@@ -879,13 +878,10 @@ public final class WorldActions {
                         if (target.get().equals(caller.getUniqueId())) {
                             return ActionResult.failure(FailureCode.INVALID_NAME, error("you already own this world"));
                         }
-                        if (membership
-                                .findMember(world.get().id(), target.get())
-                                .isEmpty()) {
+                        if (membership.findMember(world.id(), target.get()).isEmpty()) {
                             return ActionResult.failure(
                                     FailureCode.STATE_CONFLICT,
-                                    error(targetName + " is not a member of '"
-                                            + world.get().name() + "'"));
+                                    error(targetName + " is not a member of '" + world.name() + "'"));
                         }
                         int ownedCount = worlds.countOwnedBy(target.get());
                         if (ownedCount >= current.maxWorldsPerPlayer()) {
@@ -897,7 +893,7 @@ public final class WorldActions {
 
                         if (!confirmed) {
                             Component msg = info("Are you sure you want to transfer ownership of '"
-                                    + world.get().name()
+                                    + world.name()
                                     + "' to " + targetName
                                     + "? You will become a BUILDER. Type /world transfer "
                                     + targetName + " confirm to proceed.");
@@ -907,30 +903,23 @@ public final class WorldActions {
                         Optional<Player> online = proxy.getPlayer(target.get());
                         if (online.isPresent()) {
                             // Online -> immediate transfer (FR-31)
-                            if (!worlds.transferOwnership(
-                                    world.get().id(), caller.getUniqueId(), target.get(), "MANUAL")) {
+                            if (!worlds.transferOwnership(world.id(), caller.getUniqueId(), target.get(), "MANUAL")) {
                                 return ActionResult.failure(
                                         FailureCode.GENERIC_ERROR,
-                                        error("could not transfer ownership of '"
-                                                + world.get().name() + "'"));
+                                        error("could not transfer ownership of '" + world.name() + "'"));
                             }
                             enqueueToWorldOrAliveNodes(
-                                    world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
-                            Component msg = success("transferred ownership of '"
-                                    + world.get().name() + "' to " + targetName + "; you are now a BUILDER");
+                                    world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                            Component msg = success("transferred ownership of '" + world.name() + "' to " + targetName
+                                    + "; you are now a BUILDER");
                             online.get()
                                     .sendMessage(Component.text(
-                                            "You are now the owner of '"
-                                                    + world.get().name() + "'!",
-                                            NamedTextColor.GREEN));
+                                            "You are now the owner of '" + world.name() + "'!", NamedTextColor.GREEN));
                             return ActionResult.success(msg);
                         } else {
                             // Offline -> create pending transfer request (FR-32)
                             transferRequests.requestTransfer(
-                                    world.get().id(),
-                                    target.get(),
-                                    caller.getUniqueId(),
-                                    current.transferPendingExpiry());
+                                    world.id(), target.get(), caller.getUniqueId(), current.transferPendingExpiry());
                             Component msg = success("created transfer request for " + targetName
                                     + "; they can accept it next time they log in");
                             return ActionResult.success(msg);
@@ -1085,34 +1074,29 @@ public final class WorldActions {
                             return denied.get();
                         }
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, null);
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Visibility visibility = isPublic ? Visibility.PUBLIC : Visibility.PRIVATE;
-                        String desc = isPublic
-                                ? (description != null
-                                        ? description
-                                        : world.get().description())
-                                : null;
+                        String desc = isPublic ? (description != null ? description : world.description()) : null;
 
-                        if (!worlds.updateVisibility(world.get().id(), visibility, desc)) {
+                        if (!worlds.updateVisibility(world.id(), visibility, desc)) {
                             return ActionResult.failure(
                                     FailureCode.GENERIC_ERROR, error("could not update world visibility; try again"));
                         }
                         enqueueToWorldOrAliveNodes(
-                                world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                                world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
 
                         if (isPublic) {
-                            Component msg = success("'" + world.get().name() + "' is now PUBLIC"
+                            Component msg = success("'" + world.name() + "' is now PUBLIC"
                                     + (desc != null ? " (\"" + desc + "\")" : "")
                                     + "; strangers can now browse and join as visitors");
                             return ActionResult.success(msg);
                         } else {
                             Component msg = success(
-                                    "'" + world.get().name() + "' is now PRIVATE; existing members are still members");
+                                    "'" + world.name() + "' is now PRIVATE; existing members are still members");
                             return ActionResult.success(msg);
                         }
                     } catch (SQLException e) {
@@ -1140,14 +1124,12 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world set <setting> <value> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
-                        WorldSettings settings =
-                                WorldSettings.fromJson(world.get().settingsJson());
+                        PlayerWorld world = ((Target.Found) scope).world();
+                        WorldSettings settings = WorldSettings.fromJson(world.settingsJson());
                         WorldSettings updated;
                         String normKey = settingName.toLowerCase(Locale.ROOT);
                         String normVal = valueStr.toLowerCase(Locale.ROOT);
@@ -1170,7 +1152,7 @@ public final class WorldActions {
                             }
                         }
 
-                        if (!worlds.updateSettings(world.get().id(), updated.toJson())) {
+                        if (!worlds.updateSettings(world.id(), updated.toJson())) {
                             return ActionResult.failure(
                                     FailureCode.GENERIC_ERROR, error("could not update world settings; try again"));
                         }
@@ -1178,9 +1160,8 @@ public final class WorldActions {
                         // re-asserts PVP / mob-griefing gamerules on loaded dimensions.
                         // INVALIDATE_CACHE alone left those gamerules stuck at load time.
                         enqueueToWorldOrAliveNodes(
-                                world.get(), CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
-                        Component msg = success("set " + normKey + " = " + boolVal + " for '"
-                                + world.get().name() + "'");
+                                world, CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
+                        Component msg = success("set " + normKey + " = " + boolVal + " for '" + world.name() + "'");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world set failed for {}", caller.getUsername(), e);
@@ -1203,15 +1184,13 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world settings <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
-                        WorldSettings settings =
-                                WorldSettings.fromJson(world.get().settingsJson());
-                        tell(caller, info("Settings for '" + world.get().name() + "':"));
+                        PlayerWorld world = ((Target.Found) scope).world();
+                        WorldSettings settings = WorldSettings.fromJson(world.settingsJson());
+                        tell(caller, info("Settings for '" + world.name() + "':"));
                         tell(caller, info("  PVP: " + (settings.pvp() ? "on" : "off")));
                         tell(
                                 caller,
@@ -1247,39 +1226,37 @@ public final class WorldActions {
                 () -> {
                     try {
                         NetworkPolicy current = policy.get();
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, null);
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
                                     FailureCode.PLAYER_NOT_FOUND,
                                     error("no player called '" + targetName + "' has been seen on this network"));
                         }
-                        if (target.get().equals(world.get().ownerUuid())) {
+                        if (target.get().equals(world.ownerUuid())) {
                             return ActionResult.failure(
                                     FailureCode.PERMISSION_DENIED,
                                     error("you cannot ban yourself from your own world"));
                         }
 
-                        bans.ban(world.get().id(), target.get(), caller.getUniqueId(), reason);
-                        membership.revokeInvite(world.get().id(), target.get());
-                        membership.removeMember(world.get().id(), target.get());
+                        bans.ban(world.id(), target.get(), caller.getUniqueId(), reason);
+                        membership.revokeInvite(world.id(), target.get());
+                        membership.removeMember(world.id(), target.get());
 
                         enqueueToWorldOrAliveNodes(
-                                world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
+                                world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
                         String ejectReason = "Banned from world" + (reason != null ? ": " + reason : "");
                         enqueueToWorldOrAliveNodes(
-                                world.get(),
+                                world,
                                 CommandKind.KICK_MEMBER,
                                 EjectPayload.format(target.get(), ejectReason),
                                 current);
 
-                        Component msg = success(
-                                "banned " + targetName + " from '" + world.get().name() + "'");
+                        Component msg = success("banned " + targetName + " from '" + world.name() + "'");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world ban failed for {}", caller.getUsername(), e);
@@ -1303,27 +1280,24 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world unban <player> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
+                        PlayerWorld world = ((Target.Found) scope).world();
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
                                     FailureCode.PLAYER_NOT_FOUND,
                                     error("no player called '" + targetName + "' has been seen on this network"));
                         }
-                        if (bans.unban(world.get().id(), target.get())) {
-                            Component msg = success("unbanned " + targetName + " from '"
-                                    + world.get().name() + "'");
+                        if (bans.unban(world.id(), target.get())) {
+                            Component msg = success("unbanned " + targetName + " from '" + world.name() + "'");
                             return ActionResult.success(msg);
                         } else {
                             return ActionResult.failure(
                                     FailureCode.STATE_CONFLICT,
-                                    error(targetName + " was not banned from '"
-                                            + world.get().name() + "'"));
+                                    error(targetName + " was not banned from '" + world.name() + "'"));
                         }
                     } catch (SQLException e) {
                         log.error("/world unban failed for {}", caller.getUsername(), e);
@@ -1346,22 +1320,20 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world bans <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
-                        List<WorldBan> list = bans.listBans(world.get().id());
+                        PlayerWorld world = ((Target.Found) scope).world();
+                        List<WorldBan> list = bans.listBans(world.id());
                         if (list.isEmpty()) {
-                            Component msg = info("No players are currently banned from '"
-                                    + world.get().name() + "'.");
+                            Component msg = info("No players are currently banned from '" + world.name() + "'.");
                             return ActionResult.success(msg);
                         }
                         List<UUID> targets = list.stream().map(WorldBan::uuid).toList();
                         Map<UUID, String> resolved = names.namesOf(targets);
 
-                        tell(caller, info("Bans for '" + world.get().name() + "':"));
+                        tell(caller, info("Bans for '" + world.name() + "':"));
                         Component last = null;
                         for (WorldBan b : list) {
                             String name =
@@ -1391,17 +1363,15 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
-                        Optional<PlayerWorld> world = targetWorld(caller, worldId);
-                        if (world.isEmpty()) {
-                            return ActionResult.failure(
-                                    FailureCode.WORLD_NOT_FOUND,
-                                    Component.text("target world not found", NamedTextColor.RED));
+                        Target scope = targetWorld(caller, worldId, "/world members <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
                         }
-                        List<WorldMember> list =
-                                membership.listMembers(world.get().id());
+                        PlayerWorld world = ((Target.Found) scope).world();
+                        List<WorldMember> list = membership.listMembers(world.id());
                         Map<UUID, String> resolved = names.namesOf(
                                 list.stream().map(WorldMember::uuid).toList());
-                        tell(caller, info("members of '" + world.get().name() + "':"));
+                        tell(caller, info("members of '" + world.name() + "':"));
                         Component last = null;
                         for (WorldMember member : list) {
                             String display = resolved.getOrDefault(
@@ -1590,38 +1560,98 @@ public final class WorldActions {
                 FailureCode.PERMISSION_DENIED, error("you do not have permission to do that (" + permission + ")")));
     }
 
-    private Optional<PlayerWorld> targetWorld(Player caller, @Nullable WorldId worldId) throws SQLException {
+    /**
+     * The world an owner-scoped action applies to (section 6).
+     *
+     * <p>Three answers, tried in order: the world the caller named -- by id from
+     * the menu, by name from chat; the world they are standing in, when they own
+     * it; their only world. That last one was for a while the only one, and
+     * FR-1's cap of two owned worlds is what made it unusable on its own: an
+     * owner of two was refused rather than asked.
+     *
+     * @param usage how to name a world on this particular command, or {@code
+     *     null} when the command ends in free text and so cannot take one
+     */
+    private Target targetWorld(Player caller, @Nullable WorldId worldId, @Nullable String usage) throws SQLException {
         if (worldId != null) {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                tell(caller, error("that world no longer exists"));
-                return Optional.empty();
+                return new Target.None(
+                        ActionResult.failure(FailureCode.WORLD_NOT_FOUND, error("that world no longer exists")));
             }
-            PlayerWorld world = found.get();
-            if (!world.ownerUuid().equals(caller.getUniqueId())) {
-                tell(caller, error("you do not own that world"));
-                return Optional.empty();
+            PlayerWorld named = found.get();
+            if (!named.ownerUuid().equals(caller.getUniqueId())) {
+                return new Target.None(ActionResult.failure(
+                        FailureCode.PERMISSION_DENIED, error("you do not own '" + named.name() + "'")));
             }
-            return Optional.of(world);
+            return new Target.Found(named);
         }
-        return soleOwnedWorld(caller);
+        // The world they are standing in, which is what a player means when they
+        // are standing in one and say nothing. Their own only: a visitor in
+        // someone else's world falls through to the world they own.
+        Optional<WorldId> standingIn = presence.worldOf(caller);
+        if (standingIn.isPresent()) {
+            Optional<PlayerWorld> here = worlds.findById(standingIn.get());
+            if (here.isPresent() && here.get().ownerUuid().equals(caller.getUniqueId())) {
+                return new Target.Found(here.get());
+            }
+        }
+        return soleOwnedWorld(caller, usage);
     }
 
-    private Optional<PlayerWorld> soleOwnedWorld(Player caller) throws SQLException {
+    private Target soleOwnedWorld(Player caller, @Nullable String usage) throws SQLException {
         List<PlayerWorld> owned = worlds.listOwnedBy(caller.getUniqueId());
         if (owned.isEmpty()) {
-            tell(caller, error("you do not own a world yet"));
-            return Optional.empty();
+            return new Target.None(
+                    ActionResult.failure(FailureCode.WORLD_NOT_FOUND, error("you do not own a world yet")));
         }
         if (owned.size() > 1) {
-            tell(
-                    caller,
-                    error("you own " + owned.size()
-                            + " worlds and these commands do not take a world name yet; that arrives with the "
-                            + "transfer path in milestone 5"));
-            return Optional.empty();
+            String yours =
+                    String.join(", ", owned.stream().map(PlayerWorld::name).toList());
+            Component refusal = usage != null
+                    ? error("you own " + owned.size() + " worlds (" + yours
+                            + ") and are not standing in one; say which: " + usage)
+                    : error("you own " + owned.size() + " worlds (" + yours
+                            + ") and are not standing in one; this command ends in free text so it cannot also "
+                            + "take a world name -- run it inside the world, or use /world menu");
+            return new Target.None(ActionResult.failure(FailureCode.STATE_CONFLICT, refusal));
         }
-        return Optional.of(owned.getFirst());
+        return new Target.Found(owned.getFirst());
+    }
+
+    /**
+     * The caller's world of that name, or the refusal to show for it (section 6).
+     *
+     * <p>Chat names a world because a player types names; the menu names one by
+     * id because it is already holding one. This is the only place that turns
+     * the one into the other, and it looks only among the caller's own worlds,
+     * so a name cannot reach a world they do not own.
+     */
+    public CompletableFuture<Target> ownedWorld(Player caller, String worldName) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(worldName, "worldName");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), worldName);
+                        if (found.isEmpty()) {
+                            return (Target) new Target.None(ActionResult.failure(
+                                    FailureCode.WORLD_NOT_FOUND, error("you own no world called '" + worldName + "'")));
+                        }
+                        return new Target.Found(found.get());
+                    } catch (SQLException e) {
+                        log.error("resolving world '{}' for {} failed", worldName, caller.getUsername(), e);
+                        return new Target.None(ActionResult.failure(
+                                FailureCode.GENERIC_ERROR,
+                                error("that did not work; the failure is in the proxy log")));
+                    }
+                },
+                executors.db());
+    }
+
+    /** Where each player is, for the surfaces whose caller may say nothing. */
+    public WorldPresence presence() {
+        return presence;
     }
 
     public StorageQuota quotaFor(Player caller, NetworkPolicy current) throws SQLException {
@@ -1677,6 +1707,26 @@ public final class WorldActions {
             return Optional.of(online.get().getUniqueId());
         }
         return names.uuidOf(name);
+    }
+
+    /**
+     * Either the world an owner-scoped action applies to, or the refusal that
+     * explains why there is none.
+     *
+     * <p>The refusal is <em>returned</em> rather than sent, for the reason in
+     * {@link Routing.Refused}. Sent, it reached a chat user and nobody else, and
+     * all eleven call sites then returned an {@link ActionResult} carrying the
+     * words "target world not found" -- so a menu user got a placeholder while
+     * the real reason went to a surface they were not looking at, and a chat
+     * user was told both (NFR-5).
+     */
+    public sealed interface Target {
+
+        /** Act on this one. */
+        record Found(PlayerWorld world) implements Target {}
+
+        /** There is no world to act on, and this says why in words the player can act on. */
+        record None(ActionResult refusal) implements Target {}
     }
 
     /** Either the node a world goes to, or why there isn't one. */
