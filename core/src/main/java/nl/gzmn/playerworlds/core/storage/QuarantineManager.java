@@ -253,13 +253,22 @@ public final class QuarantineManager {
 
     /**
      * Enforces quarantine retention days and maximum byte bounds (MN-13a, FR-40).
+     *
+     * <p>Node-local, so it must run on every node rather than only on whichever
+     * one holds FR-40's advisory lock: each node fills its own disk. MN-13a is
+     * explicit that without this a crash-looping node fills its scratch volume
+     * with quarantined copies and then fails NFR-3's free-space check, turning a
+     * recoverable fault into an unrecoverable one.
+     *
+     * @return quarantine directories removed
      */
-    public static void prune(Path quarantineRoot, long maxBytes, int retainDays, Instant now) throws IOException {
+    public static int prune(Path quarantineRoot, long maxBytes, int retainDays, Instant now) throws IOException {
         Objects.requireNonNull(quarantineRoot, "quarantineRoot");
         Objects.requireNonNull(now, "now");
         if (!Files.isDirectory(quarantineRoot)) {
-            return;
+            return 0;
         }
+        int removed = 0;
 
         Instant cutoff = now.minus(Duration.ofDays(retainDays));
         List<QuarantineEntry> entries = new ArrayList<>();
@@ -274,6 +283,7 @@ public final class QuarantineManager {
                     Instant modified = attrs.lastModifiedTime().toInstant();
                     if (modified.isBefore(cutoff)) {
                         deleteRecursively(entry);
+                        removed++;
                         log.info("Pruned expired quarantine entry (older than {} days): {}", retainDays, entry);
                         continue;
                     }
@@ -295,9 +305,11 @@ public final class QuarantineManager {
                 }
                 deleteRecursively(entry.path());
                 totalBytes -= entry.size();
+                removed++;
                 log.info("Pruned quarantine entry to stay within max-gb budget: {}", entry.path());
             }
         }
+        return removed;
     }
 
     public static void deleteRecursively(Path root) throws IOException {

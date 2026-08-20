@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16. Next is R17.
+Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16 and R17. Next is R18.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -161,7 +161,7 @@ to hold for an `Error` too.
 | A | R1–R5 | Data loss and access control. No open decisions. **Complete.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
-| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16 done.** |
+| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16, R17 done.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
@@ -905,29 +905,43 @@ rehash does not.
 **Acceptance:** a planned restart preserves warm copies; a `kill -9` restart
 quarantines them.
 
-#### R17 — Wire the three pruners
+#### R17 — Wire the three pruners — **DONE**
 
 **Requirement:** FR-15c, MN-2b, MN-13a, MN-5.
-**Files:** `backend/storage/MaintenanceTask.java`, plus the existing
-`LocalObjectCache.evictLru`, `QuarantineManager.prune`,
-`ProfileRepository.pruneToLatest`.
+**Files:** `backend/storage/MaintenanceTask.java`, `core/storage/QuarantineManager.java`,
+`core/db/ProfileRepository.java`, `backend/GzmnWorldsPlugin.java`.
 
 `storage.local-cache-max-gb`, `storage.quarantine-max-gb`,
-`storage.quarantine-retain-days` and `storage.manifest-retention-count` are
-read into `NetworkPolicy`, validated at startup, and consulted by nothing.
+`storage.quarantine-retain-days` and `storage.manifest-retention-count` were read
+into `NetworkPolicy`, validated at startup, and consulted by nothing.
 
-Two of the three are node-local and must **not** run under the FR-40 advisory
-lock — every node prunes its own disk. Only profile and manifest pruning is
-network-wide and belongs inside the lock. Splitting them is the point: today
-there is one sweep and it is election-gated, which would leave the disks of
-every node but one unpruned even after the pruners are called.
+**Landed, split as the task required.** `LocalObjectCache.evictLru` and
+`QuarantineManager.prune` run **outside** FR-40's advisory lock, on every node,
+every sweep: each node fills its own disk, and gating them on an election would
+leave every node but one unpruned — which is exactly the failure MN-13a
+describes, a scratch volume that fills until NFR-3's free-space check fails at
+the next enable. `ProfileRepository.pruneToLatest` is network-wide and stays
+inside the lock, driven by a new bounded `worldsWithSnapshotsOver(keep, limit)`
+so a network coming back from a long outage cannot hold the lock for thousands of
+worlds at once. `QuarantineManager.prune` now returns a count so the sweep can
+report what it did.
 
-Order matters within the locked half: FR-15c and §7 both warn that pruning
-manifests faster than profiles makes a load find a `manifest_key` whose profiles
-are gone. Prune to the same retained set in one transaction, or prune profiles
-last.
+**Manifest objects are not pruned here**, and that is deliberate rather than
+missed. Pruning them needs to enumerate the bucket, which `ObjectStore` cannot do
+yet, and that primitive arrives with MN-2b's collection in **R20**. The ordering
+ADR 0007 warns about only bites in one direction: manifests pruned faster than
+profiles make a load find a `manifest_key` whose profiles are gone and issue
+every player a fresh inventory. Profiles pruned first leaves unreferenced
+manifests behind, which is precisely what MN-2b collects — and `manifest_key`
+always names the newest snapshot, whose profiles are always retained.
 
-**Failing test first:** one per pruner, asserting the bound is honoured.
+**Failing test first (proven by temporary revert):** four in
+`MaintenanceTaskTest` — `#theWarmCacheIsEvictedToItsBound`,
+`#quarantineIsPrunedPastItsRetentionWindow`,
+`#nodeLocalPruningRunsWithoutTheLock` (which is the split itself: it holds the
+advisory lock from the test and asserts the node-local half still ran) and
+`#profileSnapshotsArePrunedToTheRetentionCount`. With the pruners unwired all
+four report zero.
 **Acceptance:** a node under sustained quarantine pressure stays below
 `storage.quarantine-max-gb` rather than failing `PathChecks.requireFreeSpace` at
 the next enable.

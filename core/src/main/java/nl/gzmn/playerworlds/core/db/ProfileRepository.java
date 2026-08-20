@@ -331,6 +331,42 @@ public final class ProfileRepository extends Repository {
     }
 
     /**
+     * Worlds holding more than {@code keep} profile snapshots, for FR-40's prune.
+     *
+     * <p>Bounded, because a network coming back from a long outage may have
+     * thousands due at once and the sweep holds FR-40's lock while it works.
+     *
+     * @param keep how many snapshots FR-15c retains
+     * @param limit most worlds to return in one sweep
+     */
+    public List<WorldId> worldsWithSnapshotsOver(int keep, int limit) throws SQLException {
+        if (keep < 1) {
+            throw new IllegalArgumentException("keep must be at least 1, was: " + keep);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                """
+                SELECT world_id
+                  FROM (
+                    SELECT DISTINCT world_id, generation, sequence
+                      FROM player_world_profile
+                  ) snapshots
+                 GROUP BY world_id
+                HAVING count(*) > ?
+                 ORDER BY world_id
+                 LIMIT ?
+                """,
+                statement -> {
+                    statement.setInt(1, keep);
+                    statement.setInt(2, limit);
+                },
+                row -> new WorldId(Objects.requireNonNull(row.getObject("world_id", UUID.class), "world_id"))));
+    }
+
+    /**
      * Drops all but the newest {@code keep} snapshots of a world (FR-15c).
      *
      * <p>Manifests are pruned to the same count by the same job, because they are

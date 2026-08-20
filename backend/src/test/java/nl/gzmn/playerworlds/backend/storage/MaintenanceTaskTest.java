@@ -2,39 +2,57 @@ package nl.gzmn.playerworlds.backend.storage;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.db.AdvisoryLock;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
+import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
+import nl.gzmn.playerworlds.core.storage.PlainFileCloner;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class MaintenanceTaskTest {
+
+    @TempDir
+    Path tempDir;
 
     private Database database;
     private PluginExecutors executors;
     private PlayerWorldRepository worlds;
+    private ProfileRepository profiles;
     private TransferRequestRepository transferRequests;
     private NodeCommandRepository nodeCommands;
+    private LocalObjectCache localCache;
+    private Path quarantineRoot;
     private MaintenanceTask task;
 
     @BeforeEach
@@ -43,10 +61,28 @@ class MaintenanceTaskTest {
         Schema.migrate(database);
         executors = PluginExecutors.create(2, 2, Runnable::run);
         worlds = new PlayerWorldRepository(database);
+        profiles = new ProfileRepository(database);
         transferRequests = new TransferRequestRepository(database);
         nodeCommands = new NodeCommandRepository(database);
-        task = new MaintenanceTask(database, worlds, transferRequests, nodeCommands, NetworkPolicy::defaults, "node-1");
+        localCache = new LocalObjectCache(tempDir.resolve("cache"), PlainFileCloner.INSTANCE);
+        quarantineRoot = tempDir.resolve("quarantine");
+        Files.createDirectories(quarantineRoot);
+        task = maintenanceWith(NetworkPolicy::defaults, Clock.systemUTC());
         MainThread.enter(Thread.currentThread());
+    }
+
+    private MaintenanceTask maintenanceWith(Supplier<NetworkPolicy> policy, Clock clock) {
+        return new MaintenanceTask(
+                database,
+                worlds,
+                profiles,
+                transferRequests,
+                nodeCommands,
+                localCache,
+                quarantineRoot,
+                policy,
+                "node-1",
+                clock);
     }
 
     @AfterEach
@@ -231,5 +267,90 @@ class MaintenanceTaskTest {
                             "node-1", NetworkPolicy.defaults().controlClaimTimeout(), 10)))
                     .isEmpty();
         }
+    }
+
+    @Test
+    @DisplayName("the warm cache is evicted down to storage.local-cache-max-gb (MN-5, FR-15c)")
+    void theWarmCacheIsEvictedToItsBound() throws Exception {
+        // Three cached objects of 1 KiB each, oldest first.
+        for (int i = 0; i < 3; i++) {
+            String sha = Integer.toString(i).repeat(64);
+            Path cached = localCache.pathOf(sha);
+            Files.createDirectories(cached.getParent());
+            Files.write(cached, new byte[1024]);
+            Files.setLastModifiedTime(cached, FileTime.fromMillis(1000L + i));
+        }
+        NetworkPolicy tightCache = NetworkPolicy.fromRaw(Map.of(NetworkPolicy.KEY_LOCAL_CACHE_MAX_GB, "0"));
+
+        MaintenanceTask task = maintenanceWith(() -> tightCache, Clock.systemUTC());
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.cacheBytesEvicted()).isEqualTo(3 * 1024L);
+        assertThat(localCache.contains("0".repeat(64))).isFalse();
+    }
+
+    @Test
+    @DisplayName("quarantine is pruned past its retention window (MN-13a)")
+    void quarantineIsPrunedPastItsRetentionWindow() throws Exception {
+        Path stale = quarantineRoot.resolve("pw_stale_crash_1");
+        Files.createDirectories(stale);
+        Files.write(stale.resolve("region.mca"), new byte[64]);
+        Files.setLastModifiedTime(stale, FileTime.from(Instant.now().minus(Duration.ofDays(30))));
+
+        Path fresh = quarantineRoot.resolve("pw_fresh_crash_2");
+        Files.createDirectories(fresh);
+        Files.write(fresh.resolve("region.mca"), new byte[64]);
+
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.quarantineEntriesPruned()).isEqualTo(1);
+        assertThat(Files.exists(stale)).isFalse();
+        assertThat(Files.exists(fresh)).isTrue();
+    }
+
+    @Test
+    @DisplayName("node-local pruning runs even when another node holds FR-40's lock")
+    void nodeLocalPruningRunsWithoutTheLock() throws Exception {
+        Path stale = quarantineRoot.resolve("pw_stale_crash_1");
+        Files.createDirectories(stale);
+        Files.setLastModifiedTime(stale, FileTime.from(Instant.now().minus(Duration.ofDays(30))));
+
+        // Somebody else is sweeping. Every node still fills its own disk, and
+        // MN-13a is explicit about where that ends: NFR-3's free-space check
+        // failing at the next enable.
+        try (var _ = AdvisoryLock.tryAcquire(database, AdvisoryLock.MAINTENANCE_KEY, Duration.ofSeconds(5))
+                .orElseThrow()) {
+            MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+            assertThat(result.ranWithLock()).isFalse();
+            assertThat(result.quarantineEntriesPruned()).isEqualTo(1);
+            assertThat(Files.exists(stale)).isFalse();
+        }
+    }
+
+    @Test
+    @DisplayName("profile snapshots are pruned to storage.manifest-retention-count (FR-15c)")
+    void profileSnapshotsArePrunedToTheRetentionCount() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            worlds.create(worldId, owner, "pruned-world", 1L, 5000, Visibility.PRIVATE);
+            // Five snapshots; the default retention is three.
+            for (long generation = 1; generation <= 5; generation++) {
+                profiles.commit(worldId, generation, 1, Map.of(owner, new byte[] {(byte) generation}));
+            }
+            return null;
+        });
+
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.ranWithLock()).isTrue();
+        assertThat(result.profileSnapshotsPruned()).isEqualTo(2);
+        // The newest three survive, and the newest of all is the one FR-15b reads.
+        assertThat(onDb(() -> profiles.listSnapshots(worldId, owner))).hasSize(3);
+        assertThat(onDb(() -> profiles.latestSnapshot(worldId)))
+                .get()
+                .extracting(ProfileRepository.Snapshot::generation)
+                .isEqualTo(5L);
     }
 }

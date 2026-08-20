@@ -714,11 +714,16 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
         // FR-40: inactivity archival and recovery of interrupted archival and restore. Every
         // node schedules it; the advisory lock inside decides which one actually sweeps.
+        // R17: the warm cache and the quarantine directory are node-local and are
+        // pruned on every node, outside FR-40's election.
         MaintenanceTask maintenance = new MaintenanceTask(
                 openedDatabase,
                 new PlayerWorldRepository(openedDatabase),
+                new ProfileRepository(openedDatabase),
                 new TransferRequestRepository(openedDatabase),
                 new NodeCommandRepository(openedDatabase),
+                objectCache,
+                node.quarantinePath(),
                 this::policy,
                 node.nodeId());
         long maintenanceSeconds = Math.max(1, this.policy.maintenanceInterval().toSeconds());
