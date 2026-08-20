@@ -29,6 +29,8 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.QuarantineManager;
+import nl.gzmn.playerworlds.core.storage.SnapshotCollector;
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -88,6 +90,10 @@ public final class MaintenanceTask implements Runnable {
     private final MembershipRepository membership;
     private final PendingTransferRepository pendingTransfers;
     private final NoticeRepository notices;
+
+    /** MN-2b's collection, or {@code null} on a node with no object storage to collect. */
+    private final @Nullable SnapshotCollector collector;
+
     private final TransferRequestRepository transferRequests;
     private final NodeCommandRepository nodeCommands;
     private final LocalObjectCache localCache;
@@ -108,6 +114,7 @@ public final class MaintenanceTask implements Runnable {
      * @param invitesExpired expired invite rows removed (FR-40)
      * @param pendingTransfersExpired expired {@code pending_transfer} rows removed (FR-40)
      * @param archivalWarningsSent FR-34 warnings queued for offline owners
+     * @param objectsCollected data and manifest objects reclaimed (MN-2b)
      */
     public record SweepResult(
             boolean ranWithLock,
@@ -121,11 +128,12 @@ public final class MaintenanceTask implements Runnable {
             int commandsSwept,
             int invitesExpired,
             int pendingTransfersExpired,
-            int archivalWarningsSent) {
+            int archivalWarningsSent,
+            int objectsCollected) {
 
         /** No lock, so only the node-local half ran. */
         static SweepResult localOnly(long cacheBytesEvicted, int quarantineEntriesPruned) {
-            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0, 0, 0, 0, 0);
+            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0, 0, 0, 0, 0, 0);
         }
     }
 
@@ -140,6 +148,7 @@ public final class MaintenanceTask implements Runnable {
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
             Path quarantineRoot,
+            @Nullable SnapshotCollector collector,
             Supplier<NetworkPolicy> policy,
             String nodeId) {
         this(
@@ -153,6 +162,7 @@ public final class MaintenanceTask implements Runnable {
                 nodeCommands,
                 localCache,
                 quarantineRoot,
+                collector,
                 policy,
                 nodeId,
                 Clock.systemUTC());
@@ -170,6 +180,7 @@ public final class MaintenanceTask implements Runnable {
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
             Path quarantineRoot,
+            @Nullable SnapshotCollector collector,
             Supplier<NetworkPolicy> policy,
             String nodeId,
             Clock clock) {
@@ -183,6 +194,7 @@ public final class MaintenanceTask implements Runnable {
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.localCache = Objects.requireNonNull(localCache, "localCache");
         this.quarantineRoot = Objects.requireNonNull(quarantineRoot, "quarantineRoot");
+        this.collector = collector;
         this.policy = Objects.requireNonNull(policy, "policy");
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.clock = Objects.requireNonNull(clock, "clock");
@@ -208,11 +220,13 @@ public final class MaintenanceTask implements Runnable {
                             || result.commandsSwept() > 0
                             || result.invitesExpired() > 0
                             || result.pendingTransfersExpired() > 0
-                            || result.archivalWarningsSent() > 0)) {
+                            || result.archivalWarningsSent() > 0
+                            || result.objectsCollected() > 0)) {
                 log.info(
                         "maintenance sweep: {} archivals queued, {} ARCHIVING reset, {} RESTORING reset,"
                                 + " {} transfer requests expired, {} profile rows pruned, {} commands swept,"
-                                + " {} invites expired, {} pending transfers expired, {} archival warnings sent",
+                                + " {} invites expired, {} pending transfers expired, {} archival warnings sent,"
+                                + " {} storage objects collected",
                         result.archivalsQueued(),
                         result.archivingReset(),
                         result.restoringReset(),
@@ -221,7 +235,8 @@ public final class MaintenanceTask implements Runnable {
                         result.commandsSwept(),
                         result.invitesExpired(),
                         result.pendingTransfersExpired(),
-                        result.archivalWarningsSent());
+                        result.archivalWarningsSent(),
+                        result.objectsCollected());
             }
         } catch (SQLException e) {
             log.error("maintenance sweep failed", e);
@@ -269,6 +284,7 @@ public final class MaintenanceTask implements Runnable {
             // After the archival pass, so a world archived in this same sweep is
             // not also warned that it is about to be.
             int warningsSent = queueArchivalWarnings(current);
+            int objectsCollected = collectObjectStorage(current);
             return new SweepResult(
                     true,
                     queued,
@@ -281,7 +297,8 @@ public final class MaintenanceTask implements Runnable {
                     commandsSwept,
                     invitesExpired,
                     transfersExpired,
-                    warningsSent);
+                    warningsSent,
+                    objectsCollected);
         }
     }
 
@@ -321,6 +338,35 @@ public final class MaintenanceTask implements Runnable {
             pruned += profiles.pruneToLatest(worldId, keep);
         }
         return pruned;
+    }
+
+    /**
+     * MN-2b: reclaims data objects no retained manifest references.
+     *
+     * <p>Only worth running since R21 made manifests able to shrink. Before that
+     * nearly every object was still referenced by a retained manifest, because a
+     * manifest could never lose an entry, and a pass would have reclaimed almost
+     * nothing while listing the whole bucket to find out.
+     *
+     * <p>A failure on one world does not stop the others: object storage being
+     * unreachable is a 12.7 condition the rest of the sweep survives.
+     */
+    private int collectObjectStorage(NetworkPolicy current) throws SQLException {
+        SnapshotCollector snapshotCollector = collector;
+        if (snapshotCollector == null) {
+            return 0;
+        }
+        int collected = 0;
+        for (PlayerWorld world : worlds.findCollectable(BATCH_LIMIT)) {
+            try {
+                SnapshotCollector.Collected result =
+                        snapshotCollector.collect(world.id(), world.manifestKey(), current.manifestRetentionCount());
+                collected += result.dataObjectsDeleted() + result.manifestsDeleted();
+            } catch (RuntimeException e) {
+                log.warn("could not collect object storage for world {} (MN-2b)", world.id(), e);
+            }
+        }
+        return collected;
     }
 
     /**

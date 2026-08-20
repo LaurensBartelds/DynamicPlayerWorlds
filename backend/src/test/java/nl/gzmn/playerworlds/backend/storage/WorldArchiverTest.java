@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.Queue;
 import java.util.UUID;
@@ -516,6 +517,11 @@ class WorldArchiverTest {
         @Override
         public void deleteObject(String key) {
             var _ = objects.remove(key);
+        }
+
+        @Override
+        public List<String> listKeys(String prefix) {
+            return List.of();
         }
 
         @Override

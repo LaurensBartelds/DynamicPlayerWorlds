@@ -310,6 +310,11 @@ class WorldCommitServiceTest {
             }
 
             @Override
+            public List<String> listKeys(String prefix) {
+                return List.of();
+            }
+
+            @Override
             public void deletePrefix(String prefix) {
                 objectStore.deletePrefix(prefix);
             }
@@ -440,6 +445,11 @@ class WorldCommitServiceTest {
             @Override
             public void deleteObject(String key) {
                 objectStore.deleteObject(key);
+            }
+
+            @Override
+            public List<String> listKeys(String prefix) {
+                return List.of();
             }
 
             @Override
@@ -590,6 +600,11 @@ class WorldCommitServiceTest {
             @Override
             public void deleteObject(String key) {
                 objectStore.deleteObject(key);
+            }
+
+            @Override
+            public List<String> listKeys(String prefix) {
+                return List.of();
             }
 
             @Override

@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16–R19. Next is R20.
+Status: in progress — Phases A, B, C, D and E complete (R0–R23). Next is Phase F (R24–R28).
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -161,7 +161,7 @@ to hold for an `Error` too.
 | A | R1–R5 | Data loss and access control. No open decisions. **Complete.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
-| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16–R19 done.** |
+| D | R16–R20 | FR-40: the maintenance job the system has been running without. **Complete.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
@@ -992,25 +992,55 @@ invite *rows* rather than through `findLiveInvite`, which already filters on
 plan lists it as an open question — 30 days, 90, or until handled — and it is
 still open, so nothing sweeps that table yet.
 
-#### R20 — Archival warnings, and object-storage garbage collection
+#### R20 — Archival warnings, and object-storage garbage collection — **DONE**
 
 **Requirement:** FR-34 (`archive.warn-days`), MN-2b.
-**Files:** `backend/storage/MaintenanceTask.java`, `core/storage/ObjectStore.java`.
+**Files:** `core/db/NoticeRepository.java`, `core/storage/SnapshotCollector.java`,
+`core/storage/ObjectStore.java`, `core/storage/S3ObjectStore.java`,
+`core/db/PlayerWorldRepository.java`, `backend/storage/MaintenanceTask.java`,
+`proxy/GzmnWorldsProxyPlugin.java`, migration `V5__archive_warnings.sql`.
 
-Two separate pieces that both live in the sweep:
+Two pieces, landed as two commits.
 
-- **FR-34's warnings** at 14 and 3 days. The owner is offline by definition —
-  that is why the world is being archived — so this needs a durable channel. The
-  simplest one consistent with §13 is a `node_command` on `gzmn_proxy` that the
-  proxy delivers on next login, alongside the transfer-request reminder it
-  already sends in `onPostLogin`. Record the warning on the row so it is not
-  re-sent every sweep.
-- **MN-2b's GC.** Only correct once D16 lands: today every manifest is
-  cumulative, so nearly every object is referenced by a retained manifest and
-  the pass would reclaim almost nothing. List `worlds/<id>/data/`, subtract the
-  union of the retained manifests' hashes, delete the remainder. Bound it per
-  sweep the way `BATCH_LIMIT` bounds the others.
+**FR-34's warnings.** `archive.warn-days` was read into `NetworkPolicy` and
+consulted by nothing, so an inactive world simply vanished into the archive on
+day 90. V5 adds `player_notice` and `player_world.archive_warned_days`;
+`touchLastPlayed` clears the latter, so a world played again and then left quiet
+again earns its warnings a second time rather than being archived in silence.
+The proxy delivers on `PostLoginEvent` beside the transfer-request reminder, and
+`takeUndelivered` reads and marks delivered in one statement so a player
+connecting twice is not told twice.
 
+*Divergence from the plan, deliberate.* The plan proposed a `node_command` on
+`gzmn_proxy`. That does not work: those rows are claimed by the control-plane
+poll the moment they appear (CP-2), so a notice meant to sit for days is claimed
+within seconds and completed as "no handler" (CP-6) — and R18's sweep, which now
+runs, then deletes it. CP-6 is also explicit that a command "never carries state
+that belongs in the tables in §4"; a pending warning *is* that state. The
+confirmed decision — in game on next login, no Discord — is unchanged; only the
+storage is.
+
+**MN-2b's collection.** `ObjectStore` gained `listKeys(prefix)`, without which
+"any object not referenced by a retained manifest" was a set nothing could
+compute. `SnapshotCollector` reads the retained manifests, unions their hashes,
+and deletes the data objects and superseded manifests left over. It refuses to
+delete anything if a retained manifest cannot be read — a short referenced set
+would make every object it was missing look like an orphan (CONTRIBUTING rule 8)
+— and it only visits unleased worlds, because a node mid-upload has objects on
+the way to a manifest that has not committed yet.
+
+Retention is ordered by `(generation, sequence)`, not by key. The keys are
+decimal and unpadded, so `10-1.json` sorts before `9-1.json` as a string; and the
+world's current `manifest_key` is retained however old it sorts, which is what a
+world restored from an archive looks like mid-flight.
+
+**Failing test first (proven by temporary revert):**
+`MaintenanceTaskTest#ownersAreWarnedBeforeAutoArchival_FR34`,
+`#theTighterThresholdWarnsAgain` and `#playingAWorldAgainResetsItsWarnings` for
+the first half. `SnapshotCollectorTest#aChurnedWorldReclaimsStorage_MN2b`,
+`#anOrphanFromAFencedNodeIsReclaimed` and `#theCurrentManifestIsAlwaysRetained`
+for the second — the last of which fails against key-ordered retention by
+deleting the world's current snapshot.
 **Acceptance:** an owner returning after an auto-archive has been warned twice;
 a world that has churned its region files reclaims storage after its old
 manifests age out.

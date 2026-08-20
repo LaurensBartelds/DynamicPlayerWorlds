@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.core.storage;
 
 import java.io.Closeable;
 import java.nio.file.Path;
+import java.util.List;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -71,6 +72,23 @@ public interface ObjectStore extends Closeable {
      * @throws StorageException if deletion fails
      */
     void deletePrefix(String prefix);
+
+    /**
+     * Every key under {@code prefix}, in lexicographical order.
+     *
+     * <p>What MN-2b's collection needs and could not have: without it, "any
+     * {@code worlds/<world_id>/data/<sha256>} not referenced by a retained
+     * manifest" is a set nothing can enumerate.
+     *
+     * <p>Reads the whole listing rather than streaming it. A world's data prefix
+     * holds one key per distinct file version it has ever had, which is thousands
+     * rather than millions, and the caller bounds how many worlds it visits per
+     * sweep.
+     *
+     * @param prefix key prefix to list; {@code ""} lists the bucket
+     * @return the keys found, sorted
+     */
+    List<String> listKeys(String prefix);
 
     /**
      * Returns the size of an object in bytes.

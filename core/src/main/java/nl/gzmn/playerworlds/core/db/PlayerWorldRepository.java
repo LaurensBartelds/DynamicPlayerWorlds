@@ -734,6 +734,34 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Worlds to visit for MN-2b's collection, oldest-touched first.
+     *
+     * <p>Ordered by {@code last_played} so a sweep that only gets through
+     * {@code limit} worlds keeps moving round the network rather than collecting
+     * the same busy handful every five minutes.
+     *
+     * <p>Unleased only: a world a node is holding may be uploading objects for a
+     * snapshot whose manifest has not committed yet, and those are exactly the
+     * objects that look like orphans while being the opposite.
+     */
+    public List<PlayerWorld> findCollectable(int limit) throws SQLException {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE assigned_node IS NULL
+                   AND manifest_key IS NOT NULL
+                 ORDER BY COALESCE(last_played, created_at)
+                 LIMIT ?
+                """,
+                statement -> statement.setInt(1, limit),
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
      * Worlds close enough to auto-archival to warn their owner about (FR-34).
      *
      * <p>"Close enough" is {@code afterDays - warnDays} of silence: at the

@@ -94,6 +94,7 @@ class MaintenanceTaskTest {
                 nodeCommands,
                 localCache,
                 quarantineRoot,
+                null,
                 policy,
                 "node-1",
                 clock);

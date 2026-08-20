@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
@@ -198,6 +199,11 @@ class WorldEraserTest {
         @Override
         public void deleteObject(String key) {
             delegate.deleteObject(key);
+        }
+
+        @Override
+        public List<String> listKeys(String prefix) {
+            return delegate.listKeys(prefix);
         }
 
         @Override

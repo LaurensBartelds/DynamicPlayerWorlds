@@ -97,6 +97,7 @@ import nl.gzmn.playerworlds.core.storage.ObjectStore;
 import nl.gzmn.playerworlds.core.storage.QuarantineManager;
 import nl.gzmn.playerworlds.core.storage.ReflinkFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
+import nl.gzmn.playerworlds.core.storage.SnapshotCollector;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
 import nl.gzmn.playerworlds.core.storage.WorldDownloader;
@@ -728,6 +729,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new NodeCommandRepository(openedDatabase),
                 objectCache,
                 node.quarantinePath(),
+                store != null ? new SnapshotCollector(store) : null,
                 this::policy,
                 node.nodeId());
         long maintenanceSeconds = Math.max(1, this.policy.maintenanceInterval().toSeconds());
