@@ -21,6 +21,8 @@ import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
+import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.control.WorldPayload;
 import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
@@ -101,6 +103,7 @@ class WorldActionsTest {
                 registry,
                 new Placement(nodeRepo, worlds),
                 nodeCommands,
+                database,
                 () -> policy);
     }
 
@@ -623,5 +626,43 @@ class WorldActionsTest {
         assertThat(result).isInstanceOf(ActionResult.Ok.class);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
                 .contains("archiving 'slowworld'");
+    }
+
+    @Test
+    @DisplayName("deleting a world stuck in CREATING reports success, not failure (FR-27, R25)")
+    void deletingACreatingWorldReportsSuccess_FR27() throws Exception {
+        nodeRepo.heartbeat("paper-a", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        // Left in CREATING: the create failed before the world reached READY, so
+        // the row is the only thing that exists and it is consuming a cap slot.
+        worlds.create(worldId, owner, "halfworld", 12345L, 5000, Visibility.PRIVATE);
+
+        ActionResult result = actions.delete(player, "halfworld", true).get();
+
+        // The bug: the enqueue set node_command.world_id, whose foreign key had
+        // just been deleted. The SQLException reached the outer handler and the
+        // owner was told "that did not work" -- after the world was gone and
+        // their slot freed.
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("removed incomplete world 'halfworld'");
+        assertThat(worlds.findById(worldId)).isEmpty();
+
+        // And the node was still told to drop whatever it materialised, with the
+        // world named in the payload because the column would have cascaded away.
+        NodeCommandRepository commands = new NodeCommandRepository(database);
+        List<Long> queued = commands.findClaimableIds("paper-a", Duration.ofMinutes(1), 10);
+        assertThat(queued).hasSize(1);
+        NodeCommand command = commands.findById(queued.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.UNLOAD_WORLD.name());
+        assertThat(command.worldId()).isNull();
+        assertThat(WorldPayload.parse(command.payloadJson()))
+                .get()
+                .extracting(WorldPayload::worldId)
+                .isEqualTo(worldId);
     }
 }

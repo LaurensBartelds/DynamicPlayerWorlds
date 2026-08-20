@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24. Next is R25.
+Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24 and R25. Next is R26.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -163,7 +163,7 @@ to hold for an `Error` too.
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. **Complete.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
-| F | R24–R28 | Reporting, messaging, and de-duplication. **R24 done.** |
+| F | R24–R28 | Reporting, messaging, and de-duplication. **R24, R25 done.** |
 
 ---
 
@@ -1205,22 +1205,36 @@ other half: silence is not a refusal, because an archive of a large world is
 silent for minutes.
 **Acceptance:** an archive discarded as stale reports the discard to the owner.
 
-#### R25 — `/world delete` on a CREATING world stops reporting failure after succeeding
+#### R25 — `/world delete` on a CREATING world stops reporting failure after succeeding — **DONE**
 
 **Requirement:** FR-27, OQ-18.
-**Files:** `proxy/command/WorldActions.java`.
+**Files:** `proxy/command/WorldActions.java`, `core/control/WorldPayload.java`,
+`backend/control/UnloadWorldHandler.java`.
 
-`deleteIfCreating` commits, then `enqueueToWorldOrAliveNodes` inserts a
-`node_command` whose `world_id` references the row just deleted. The foreign key
-rejects it, the `SQLException` reaches the method's outer handler, and the owner
-is told *"that did not work"* — after the world is gone and their cap slot is
-freed. The success message and the log line after it are unreachable.
+`deleteIfCreating` committed, then `enqueueToWorldOrAliveNodes` inserted a
+`node_command` whose `world_id` referenced the row just deleted. The foreign key
+rejected it, the `SQLException` reached the method's outer handler, and the owner
+was told *"that did not work"* — after the world was gone and their cap slot
+freed. The success message and the log line after it were unreachable.
 
-Enqueue inside the same transaction as the delete using the `Connection`-taking
-overloads that already exist, and order the insert before the delete; or carry
-the world id in the payload and leave the column null.
+**Landed** as the plan's second option, and the first turns out not to work:
+`node_command.world_id` cascades on delete, so an insert *before* the delete is
+removed by the cascade in the same transaction and an insert *after* it violates
+the key. The world is therefore named in the payload — a new `WorldPayload` — and
+the column left null, so the instruction survives the world it is about.
+`UnloadWorldHandler` reads the column first and falls back to the payload. CP-4's
+generation check skips a null column, which is also right here: there is no row
+left to compare a generation against.
 
-**Failing test first:** `deletingACreatingWorldReportsSuccess_FR27`.
+Delete and enqueue now share one transaction, so a world cannot be removed
+without the nodes being told to drop what they materialised of it — which is the
+second bug the old code had, since the enqueue never succeeded at all.
+
+**Failing test first (proven by temporary revert):**
+`WorldActionsTest#deletingACreatingWorldReportsSuccess_FR27` asserts the owner is
+told it worked, the row is gone, and the queued `UNLOAD_WORLD` names the world in
+its payload with a null column. Filling the column in makes it fail exactly as
+the bug did.
 
 #### R26 — `info`/`error`/`success` stop sending as a side effect
 

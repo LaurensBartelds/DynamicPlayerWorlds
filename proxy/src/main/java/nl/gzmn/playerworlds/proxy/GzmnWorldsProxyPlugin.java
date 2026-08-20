@@ -211,6 +211,7 @@ public final class GzmnWorldsProxyPlugin {
                 registry,
                 placementService,
                 nodeCommands,
+                openedDatabase,
                 this::policy);
 
         WorldCommand command = new WorldCommand(

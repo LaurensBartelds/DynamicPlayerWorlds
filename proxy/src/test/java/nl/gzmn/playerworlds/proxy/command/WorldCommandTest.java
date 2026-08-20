@@ -113,6 +113,7 @@ class WorldCommandTest {
                 registry,
                 new Placement(nodeRepo, worlds),
                 nodeCommands,
+                database,
                 () -> policy);
         BrigadierCommand brigadierCommand = worldCommand.build();
         dispatcher = new CommandDispatcher<>();

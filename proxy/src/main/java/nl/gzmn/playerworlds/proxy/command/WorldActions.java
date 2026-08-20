@@ -24,6 +24,8 @@ import nl.gzmn.playerworlds.core.control.CommandOutcomes;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
 import nl.gzmn.playerworlds.core.control.EjectPayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.control.WorldPayload;
+import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
@@ -72,6 +74,10 @@ public final class WorldActions {
     private final NodeRegistry registry;
     private final Placement placement;
     private final NodeCommandRepository nodeCommands;
+
+    /** For the one place that has to compose a delete and an enqueue into one transaction (R25). */
+    private final Database database;
+
     private final Supplier<NetworkPolicy> policy;
     private final StorageTiers storageTiers;
 
@@ -87,6 +93,7 @@ public final class WorldActions {
             NodeRegistry registry,
             Placement placement,
             NodeCommandRepository nodeCommands,
+            Database database,
             Supplier<NetworkPolicy> policy) {
         this(
                 proxy,
@@ -100,6 +107,7 @@ public final class WorldActions {
                 registry,
                 placement,
                 nodeCommands,
+                database,
                 policy,
                 new StorageTiers());
     }
@@ -116,6 +124,7 @@ public final class WorldActions {
             NodeRegistry registry,
             Placement placement,
             NodeCommandRepository nodeCommands,
+            Database database,
             Supplier<NetworkPolicy> policy,
             StorageTiers storageTiers) {
         this.proxy = Objects.requireNonNull(proxy, "proxy");
@@ -129,6 +138,7 @@ public final class WorldActions {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.placement = Objects.requireNonNull(placement, "placement");
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
+        this.database = Objects.requireNonNull(database, "database");
         this.policy = Objects.requireNonNull(policy, "policy");
         this.storageTiers = Objects.requireNonNull(storageTiers, "storageTiers");
     }
@@ -255,16 +265,14 @@ public final class WorldActions {
                         }
 
                         if (world.state() == WorldState.CREATING) {
-                            if (!worlds.deleteIfCreating(world.id())) {
+                            if (!removeIncompleteWorld(world, current)) {
                                 return ActionResult.failure(
                                         "STATE_CHANGED",
                                         error(caller, "'" + name + "' changed while you were confirming; try again"));
                             }
-                            enqueueToWorldOrAliveNodes(
-                                    world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
                             Component msg = success(
                                     caller, "removed incomplete world '" + name + "'; you have a world slot free");
-                            log.info("world {} removed while in CREATING state by its owner", world.id());
+                            log.info("world {} removed while in CREATING state by its owner (FR-27)", world.id());
                             return ActionResult.success(msg);
                         }
 
@@ -1760,6 +1768,58 @@ public final class WorldActions {
         }
         PlacementDecision decision = placement.forExistingWorld(world.id(), current);
         return routableNodeOrExplain(caller, decision, world.id());
+    }
+
+    /**
+     * FR-27: removes a world that never finished being created, and tells the
+     * nodes to drop whatever they materialised of it.
+     *
+     * <p>Both in one transaction, and the command carries the world in its
+     * <em>payload</em> rather than in {@code node_command.world_id}. Filling the
+     * column in was the bug: it references {@code player_world(id)} with
+     * {@code ON DELETE CASCADE}, so an insert before the delete was removed by the
+     * cascade, and an insert after it violated the foreign key — which is what
+     * happened. The {@code SQLException} reached the method's outer handler and
+     * the owner was told "that did not work", after the world was gone and their
+     * cap slot freed. The success message and the log line after it were
+     * unreachable.
+     *
+     * @return false when the world stopped being CREATING while the owner
+     *     confirmed, in which case nothing is deleted and nothing is enqueued
+     */
+    private boolean removeIncompleteWorld(PlayerWorld world, NetworkPolicy current) throws SQLException {
+        return database.inTransaction(connection -> {
+            if (!worlds.deleteIfCreating(connection, world.id())) {
+                return false;
+            }
+            String payload = WorldPayload.format(world.id());
+            if (world.assignedNode() != null) {
+                var _ = nodeCommands.enqueue(
+                        connection,
+                        world.assignedNode(),
+                        null,
+                        null,
+                        CommandKind.UNLOAD_WORLD.name(),
+                        payload,
+                        current.holdingTimeout(),
+                        ControlChannels.forNode(world.assignedNode()));
+                return true;
+            }
+            // Unleased, so any alive node may be holding the folders a failed
+            // create left behind. Idempotent: a node that has nothing completes OK.
+            for (var alive : registry.aliveNodes(current.deadAfter())) {
+                var _ = nodeCommands.enqueue(
+                        connection,
+                        alive.nodeId(),
+                        null,
+                        null,
+                        CommandKind.UNLOAD_WORLD.name(),
+                        payload,
+                        current.holdingTimeout(),
+                        ControlChannels.forNode(alive.nodeId()));
+            }
+            return true;
+        });
     }
 
     /**

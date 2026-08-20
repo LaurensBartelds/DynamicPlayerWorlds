@@ -112,6 +112,7 @@ class MenuChannelListenerTest {
                 registry,
                 new Placement(nodeRepo, worlds),
                 nodeCommands,
+                database,
                 () -> policy);
         listener = new MenuChannelListener(actions);
     }

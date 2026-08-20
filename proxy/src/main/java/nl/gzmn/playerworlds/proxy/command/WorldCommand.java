@@ -27,6 +27,7 @@ import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
 import nl.gzmn.playerworlds.core.control.MigratePayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus;
@@ -134,6 +135,7 @@ public final class WorldCommand {
             NodeRegistry registry,
             Placement placement,
             NodeCommandRepository nodeCommands,
+            Database database,
             Supplier<NetworkPolicy> policy) {
         this(
                 new WorldActions(
@@ -148,6 +150,7 @@ public final class WorldCommand {
                         registry,
                         placement,
                         nodeCommands,
+                        database,
                         policy),
                 proxy,
                 executors,

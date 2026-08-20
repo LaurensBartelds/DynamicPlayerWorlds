@@ -9,6 +9,7 @@ import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.control.WorldPayload;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -45,7 +46,16 @@ public final class UnloadWorldHandler implements CommandHandler {
 
     @Override
     public CommandResult handle(NodeCommand command) throws Exception {
+        // The column first, the payload second (R25). FR-27's removal of a world
+        // stuck in CREATING deletes the row, and node_command.world_id cascades
+        // with it — so that one enqueues with the column null and the world named
+        // in the payload, and the node still has folders to drop.
         WorldId worldId = command.worldId();
+        if (worldId == null) {
+            worldId = WorldPayload.parse(command.payloadJson())
+                    .map(WorldPayload::worldId)
+                    .orElse(null);
+        }
         if (worldId == null) {
             return CommandResult.error("missing world_id");
         }
