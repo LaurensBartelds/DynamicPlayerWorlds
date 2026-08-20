@@ -720,6 +720,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 openedDatabase,
                 new PlayerWorldRepository(openedDatabase),
                 new ProfileRepository(openedDatabase),
+                new MembershipRepository(openedDatabase),
+                new PendingTransferRepository(openedDatabase),
                 new TransferRequestRepository(openedDatabase),
                 new NodeCommandRepository(openedDatabase),
                 objectCache,

@@ -8,6 +8,7 @@ import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -19,10 +20,13 @@ import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.db.AdvisoryLock;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
@@ -49,6 +53,8 @@ class MaintenanceTaskTest {
     private PluginExecutors executors;
     private PlayerWorldRepository worlds;
     private ProfileRepository profiles;
+    private MembershipRepository membership;
+    private PendingTransferRepository pendingTransfers;
     private TransferRequestRepository transferRequests;
     private NodeCommandRepository nodeCommands;
     private LocalObjectCache localCache;
@@ -62,6 +68,8 @@ class MaintenanceTaskTest {
         executors = PluginExecutors.create(2, 2, Runnable::run);
         worlds = new PlayerWorldRepository(database);
         profiles = new ProfileRepository(database);
+        membership = new MembershipRepository(database);
+        pendingTransfers = new PendingTransferRepository(database);
         transferRequests = new TransferRequestRepository(database);
         nodeCommands = new NodeCommandRepository(database);
         localCache = new LocalObjectCache(tempDir.resolve("cache"), PlainFileCloner.INSTANCE);
@@ -76,6 +84,8 @@ class MaintenanceTaskTest {
                 database,
                 worlds,
                 profiles,
+                membership,
+                pendingTransfers,
                 transferRequests,
                 nodeCommands,
                 localCache,
@@ -352,5 +362,114 @@ class MaintenanceTaskTest {
                 .get()
                 .extracting(ProfileRepository.Snapshot::generation)
                 .isEqualTo(5L);
+    }
+
+    @Test
+    @DisplayName("completed and expired node_command rows are swept after their retention (CP-7)")
+    void completedCommandsAreSweptAfterTheirRetention_CP7() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            worlds.create(worldId, owner, "swept-world", 1L, 5000, Visibility.PRIVATE);
+            return null;
+        });
+
+        long completedLongAgo = onDb(() -> nodeCommands.enqueue(
+                "node-1",
+                worldId,
+                null,
+                CommandKind.INVALIDATE_CACHE.name(),
+                NodeCommand.EMPTY_PAYLOAD,
+                Duration.ofMinutes(5),
+                "gzmn_node_node-1"));
+        long expiredLongAgo = onDb(() -> nodeCommands.enqueue(
+                "node-1",
+                worldId,
+                null,
+                CommandKind.INVALIDATE_CACHE.name(),
+                NodeCommand.EMPTY_PAYLOAD,
+                Duration.ofMinutes(5),
+                "gzmn_node_node-1"));
+        long stillLive = onDb(() -> nodeCommands.enqueue(
+                "node-1",
+                worldId,
+                null,
+                CommandKind.INVALIDATE_CACHE.name(),
+                NodeCommand.EMPTY_PAYLOAD,
+                Duration.ofMinutes(5),
+                "gzmn_node_node-1"));
+
+        onDb(() -> {
+            nodeCommands.complete(completedLongAgo, CommandResult.ok());
+            return null;
+        });
+        // Age both past the retention window, in database time.
+        backdate("UPDATE node_command SET completed_at = now() - interval '2 hours' WHERE id = ?", completedLongAgo);
+        // Never completed, and its window closed two hours ago: findClaimableIds
+        // already refuses to hand it out, so nothing will ever finish it.
+        backdate("UPDATE node_command SET expires_at = now() - interval '2 hours' WHERE id = ?", expiredLongAgo);
+
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.ranWithLock()).isTrue();
+        assertThat(result.commandsSwept()).isEqualTo(2);
+        assertThat(onDb(() -> nodeCommands.findById(completedLongAgo))).isEmpty();
+        assertThat(onDb(() -> nodeCommands.findById(expiredLongAgo))).isEmpty();
+        assertThat(onDb(() -> nodeCommands.findById(stillLive))).isPresent();
+    }
+
+    @Test
+    @DisplayName("expired invites and pending transfers are swept (FR-40)")
+    void expiredInvitesAndPendingTransfersAreSwept() throws Exception {
+        UUID owner = UUID.randomUUID();
+        UUID invitee = UUID.randomUUID();
+        UUID stillInvited = UUID.randomUUID();
+        UUID traveller = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+
+        onDb(() -> {
+            worlds.create(worldId, owner, "invite-world", 1L, 5000, Visibility.PRIVATE);
+            var _ = membership.invite(worldId, invitee, owner, Duration.ofMinutes(10));
+            var _ = membership.invite(worldId, stillInvited, owner, Duration.ofMinutes(10));
+            pendingTransfers.route(traveller, worldId, "node-1", 0L);
+            return null;
+        });
+        backdate("UPDATE player_world_invite SET expires_at = now() - interval '1 minute' WHERE uuid = ?", invitee);
+        backdate("UPDATE pending_transfer SET created_at = now() - interval '1 hour' WHERE uuid = ?", traveller);
+
+        MaintenanceTask.SweepResult result = onDb(task::sweep);
+
+        assertThat(result.invitesExpired()).isEqualTo(1);
+        assertThat(result.pendingTransfersExpired()).isEqualTo(1);
+        // Asserted on the rows, not on findLiveInvite: that already filters on
+        // expires_at, so it cannot tell a swept row from an expired one.
+        assertThat(inviteRows(worldId)).containsExactly(stillInvited);
+    }
+
+    /** Every invite row for a world, expired or not. */
+    private List<UUID> inviteRows(WorldId worldId) throws Exception {
+        return onDb(() -> database.withConnection(connection -> {
+            try (var statement =
+                    connection.prepareStatement("SELECT uuid FROM player_world_invite WHERE world_id = ?")) {
+                statement.setObject(1, worldId.value());
+                List<UUID> found = new ArrayList<>();
+                try (var rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        found.add(rows.getObject(1, UUID.class));
+                    }
+                }
+                return found;
+            }
+        }));
+    }
+
+    /** Ages a row in database time (rule 5): node clocks drift, the server's does not. */
+    private void backdate(String sql, Object key) throws Exception {
+        onDb(() -> database.inTransaction(connection -> {
+            try (var statement = connection.prepareStatement(sql)) {
+                statement.setObject(1, key);
+                return statement.executeUpdate();
+            }
+        }));
     }
 }

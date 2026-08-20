@@ -15,7 +15,9 @@ import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
 import nl.gzmn.playerworlds.core.db.AdvisoryLock;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
+import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
@@ -57,9 +59,22 @@ public final class MaintenanceTask implements Runnable {
     /** How long to wait for the lock. Zero would be racy on a busy pool; long would stack sweeps. */
     private static final Duration LOCK_TIMEOUT = Duration.ofSeconds(2);
 
+    /**
+     * How long a finished {@code node_command} row is kept (CP-7).
+     *
+     * <p>Not a configuration key, because §7 does not name one and CP-7 does not
+     * ask for one. An hour is comfortably longer than the longest TTL any
+     * producer sets ({@code transfers.holding-timeout-seconds}, 90s by default),
+     * so a producer waiting on a result still finds the row, and short enough
+     * that the table stays a queue rather than a log.
+     */
+    private static final Duration COMMAND_RETENTION = Duration.ofHours(1);
+
     private final Database database;
     private final PlayerWorldRepository worlds;
     private final ProfileRepository profiles;
+    private final MembershipRepository membership;
+    private final PendingTransferRepository pendingTransfers;
     private final TransferRequestRepository transferRequests;
     private final NodeCommandRepository nodeCommands;
     private final LocalObjectCache localCache;
@@ -76,6 +91,9 @@ public final class MaintenanceTask implements Runnable {
      * @param cacheBytesEvicted warm-cache bytes freed (MN-5, {@code storage.local-cache-max-gb})
      * @param quarantineEntriesPruned quarantine directories removed (MN-13a)
      * @param profileSnapshotsPruned profile rows removed (FR-15c)
+     * @param commandsSwept finished {@code node_command} rows removed (CP-7)
+     * @param invitesExpired expired invite rows removed (FR-40)
+     * @param pendingTransfersExpired expired {@code pending_transfer} rows removed (FR-40)
      */
     public record SweepResult(
             boolean ranWithLock,
@@ -85,11 +103,14 @@ public final class MaintenanceTask implements Runnable {
             int transferRequestsExpired,
             long cacheBytesEvicted,
             int quarantineEntriesPruned,
-            int profileSnapshotsPruned) {
+            int profileSnapshotsPruned,
+            int commandsSwept,
+            int invitesExpired,
+            int pendingTransfersExpired) {
 
         /** No lock, so only the node-local half ran. */
         static SweepResult localOnly(long cacheBytesEvicted, int quarantineEntriesPruned) {
-            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0);
+            return new SweepResult(false, 0, 0, 0, 0, cacheBytesEvicted, quarantineEntriesPruned, 0, 0, 0, 0);
         }
     }
 
@@ -97,6 +118,8 @@ public final class MaintenanceTask implements Runnable {
             Database database,
             PlayerWorldRepository worlds,
             ProfileRepository profiles,
+            MembershipRepository membership,
+            PendingTransferRepository pendingTransfers,
             TransferRequestRepository transferRequests,
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
@@ -107,6 +130,8 @@ public final class MaintenanceTask implements Runnable {
                 database,
                 worlds,
                 profiles,
+                membership,
+                pendingTransfers,
                 transferRequests,
                 nodeCommands,
                 localCache,
@@ -121,6 +146,8 @@ public final class MaintenanceTask implements Runnable {
             Database database,
             PlayerWorldRepository worlds,
             ProfileRepository profiles,
+            MembershipRepository membership,
+            PendingTransferRepository pendingTransfers,
             TransferRequestRepository transferRequests,
             NodeCommandRepository nodeCommands,
             LocalObjectCache localCache,
@@ -131,6 +158,8 @@ public final class MaintenanceTask implements Runnable {
         this.database = Objects.requireNonNull(database, "database");
         this.worlds = Objects.requireNonNull(worlds, "worlds");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
+        this.membership = Objects.requireNonNull(membership, "membership");
+        this.pendingTransfers = Objects.requireNonNull(pendingTransfers, "pendingTransfers");
         this.transferRequests = Objects.requireNonNull(transferRequests, "transferRequests");
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.localCache = Objects.requireNonNull(localCache, "localCache");
@@ -156,15 +185,22 @@ public final class MaintenanceTask implements Runnable {
                             || result.archivingReset() > 0
                             || result.restoringReset() > 0
                             || result.transferRequestsExpired() > 0
-                            || result.profileSnapshotsPruned() > 0)) {
+                            || result.profileSnapshotsPruned() > 0
+                            || result.commandsSwept() > 0
+                            || result.invitesExpired() > 0
+                            || result.pendingTransfersExpired() > 0)) {
                 log.info(
                         "maintenance sweep: {} archivals queued, {} ARCHIVING reset, {} RESTORING reset,"
-                                + " {} transfer requests expired, {} profile rows pruned",
+                                + " {} transfer requests expired, {} profile rows pruned, {} commands swept,"
+                                + " {} invites expired, {} pending transfers expired",
                         result.archivalsQueued(),
                         result.archivingReset(),
                         result.restoringReset(),
                         result.transferRequestsExpired(),
-                        result.profileSnapshotsPruned());
+                        result.profileSnapshotsPruned(),
+                        result.commandsSwept(),
+                        result.invitesExpired(),
+                        result.pendingTransfersExpired());
             }
         } catch (SQLException e) {
             log.error("maintenance sweep failed", e);
@@ -177,7 +213,8 @@ public final class MaintenanceTask implements Runnable {
     /**
      * Runs one sweep, if this node can take FR-40's lock.
      *
-     * @return what the sweep did, or {@link SweepResult#skipped()} when another node holds the lock
+     * @return what the sweep did; the node-local counters are filled whether or not
+     *     this node took the lock, and the rest are zero when it did not
      */
     public SweepResult sweep() throws SQLException, InterruptedException {
         NetworkPolicy current = policy.get();
@@ -200,6 +237,13 @@ public final class MaintenanceTask implements Runnable {
             int queued = queueInactiveArchivals(current);
             int expired = transferRequests.deleteExpired();
             int profilesPruned = pruneProfileSnapshots(current);
+            // CP-7 and FR-40's remaining sweeps. All three tables filter their
+            // reads on expiry already, so this is hygiene — but an unswept table
+            // grows for the life of the network, and node_command's is the one
+            // every poll of every node scans an index of.
+            int commandsSwept = nodeCommands.deleteFinishedBefore(COMMAND_RETENTION, BATCH_LIMIT);
+            int invitesExpired = membership.sweepExpiredInvites(BATCH_LIMIT);
+            int transfersExpired = pendingTransfers.sweepExpired(current.transferExpiry());
             return new SweepResult(
                     true,
                     queued,
@@ -208,7 +252,10 @@ public final class MaintenanceTask implements Runnable {
                     expired,
                     cacheEvicted,
                     quarantinePruned,
-                    profilesPruned);
+                    profilesPruned,
+                    commandsSwept,
+                    invitesExpired,
+                    transfersExpired);
         }
     }
 

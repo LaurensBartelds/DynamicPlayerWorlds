@@ -401,4 +401,30 @@ public final class MembershipRepository extends Repository {
         OffsetDateTime value = row.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
     }
+
+    /**
+     * Removes invites whose {@code expires_at} has passed (FR-40).
+     *
+     * <p>Every read already filters on {@code expires_at > now()}, so this is
+     * hygiene rather than correctness — but nothing swept the table, and an
+     * invite nobody accepted is a row that stays for the life of the world.
+     *
+     * @param limit most rows to delete in one sweep
+     * @return rows removed
+     */
+    public int sweepExpiredInvites(int limit) throws SQLException {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.inTransaction(connection -> execute(connection, """
+                DELETE FROM player_world_invite
+                 WHERE (world_id, uuid) IN (
+                   SELECT world_id, uuid
+                     FROM player_world_invite
+                    WHERE expires_at <= now()
+                    ORDER BY expires_at
+                    LIMIT ?
+                 )
+                """, statement -> statement.setInt(1, limit)));
+    }
 }

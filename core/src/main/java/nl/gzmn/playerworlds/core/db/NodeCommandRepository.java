@@ -304,4 +304,47 @@ public final class NodeCommandRepository extends Repository {
         OffsetDateTime value = row.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
     }
+
+    /**
+     * Removes rows that are finished with (CP-7, FR-40).
+     *
+     * <p>CP-7 says "expired and completed rows are swept by the maintenance job
+     * in FR-40", and nothing swept them: the table grew for the life of the
+     * network and {@code findClaimableIds} scanned an ever-larger index on every
+     * poll of every node.
+     *
+     * <p>Both shapes go: a completed row, and a row whose {@code expires_at} has
+     * passed without anyone completing it — the second is a command whose window
+     * closed, which {@code findClaimableIds} already refuses to hand out.
+     *
+     * @param retain how long a finished row is kept for diagnostics and for the
+     *     producer to read its result back
+     * @param limit most rows to delete in one sweep, so the lock is not held
+     *     while a long-neglected table is emptied
+     * @return rows removed
+     */
+    public int deleteFinishedBefore(Duration retain, int limit) throws SQLException {
+        Objects.requireNonNull(retain, "retain");
+        if (retain.isNegative()) {
+            throw new IllegalArgumentException("retain must not be negative, was: " + retain);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.inTransaction(connection -> execute(connection, """
+                DELETE FROM node_command
+                 WHERE id IN (
+                   SELECT id
+                     FROM node_command
+                    WHERE (completed_at IS NOT NULL AND completed_at <= now() - (? * INTERVAL '1 second'))
+                       OR (completed_at IS NULL AND expires_at <= now() - (? * INTERVAL '1 second'))
+                    ORDER BY id
+                    LIMIT ?
+                 )
+                """, statement -> {
+            statement.setDouble(1, retain.toMillis() / 1000.0);
+            statement.setDouble(2, retain.toMillis() / 1000.0);
+            statement.setInt(3, limit);
+        }));
+    }
 }

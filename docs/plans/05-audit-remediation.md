@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16 and R17. Next is R18.
+Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16–R19. Next is R20.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -161,7 +161,7 @@ to hold for an `Error` too.
 | A | R1–R5 | Data loss and access control. No open decisions. **Complete.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
-| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16, R17 done.** |
+| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16–R19 done.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
@@ -946,30 +946,51 @@ four report zero.
 `storage.quarantine-max-gb` rather than failing `PathChecks.requireFreeSpace` at
 the next enable.
 
-#### R18 — Sweep `node_command`
+#### R18 — Sweep `node_command` — **DONE**
 
 **Requirement:** CP-7, FR-40.
 **Files:** `core/db/NodeCommandRepository.java`, `backend/storage/MaintenanceTask.java`.
 
 CP-7: *"Expired and completed rows are swept by the maintenance job in FR-40."*
-`nodeCommands` is injected into `MaintenanceTask` and used only to enqueue. The
-table grows forever, and `findClaimableIds` scans an ever-larger index.
+`nodeCommands` was injected into `MaintenanceTask` and used only to enqueue. The
+table grew for the life of the network, and `findClaimableIds` scanned an
+ever-larger index on every poll of every node.
 
-Add `deleteCompletedBefore(Duration retain)` and call it under the lock.
+**Landed.** `deleteFinishedBefore(retain, limit)` removes both shapes CP-7 names:
+a completed row past its retention, and a row whose `expires_at` passed without
+anyone completing it — the second being a command whose window closed, which
+`findClaimableIds` already refuses to hand out. Bounded per sweep, so a
+long-neglected table is not emptied while the lock is held.
 
-**Failing test first:** `completedCommandsAreSweptAfterTheirRetention_CP7`.
+Retention is a constant of one hour, not a configuration key: §7 does not name
+one and CP-7 does not ask for one. An hour is comfortably longer than the longest
+TTL any producer sets (`transfers.holding-timeout-seconds`, 90s), so R24's
+result read-back still finds its row, and short enough that the table stays a
+queue rather than a log.
 
-#### R19 — Expire invites and `pending_transfer` rows
+**Failing test first (proven by temporary revert):**
+`MaintenanceTaskTest#completedCommandsAreSweptAfterTheirRetention_CP7` ages one
+completed and one expired row past the window in database time and asserts both
+go while a live one stays.
+
+#### R19 — Expire invites and `pending_transfer` rows — **DONE**
 
 **Requirement:** FR-40.
-**Files:** `core/db/MembershipRepository.java`,
-`core/db/PendingTransferRepository.java`, `backend/storage/MaintenanceTask.java`.
+**Files:** `core/db/MembershipRepository.java`, `backend/storage/MaintenanceTask.java`.
 
-Both tables filter on `expires_at > now()` at read time, so behaviour is
-correct, but neither is ever swept. `PendingTransferRepository.deleteExpired`
-already exists and has no production caller.
+Both tables filter on expiry at read time, so behaviour was correct, but neither
+was ever swept. `PendingTransferRepository.sweepExpired` already existed with no
+production caller; `MembershipRepository` gained `sweepExpiredInvites(limit)`.
+Both now run under FR-40's lock, bounded per sweep.
 
-**Acceptance:** both tables are bounded by their configured expiry.
+**Failing test first (proven by temporary revert):**
+`MaintenanceTaskTest#expiredInvitesAndPendingTransfersAreSwept`. It asserts on the
+invite *rows* rather than through `findLiveInvite`, which already filters on
+`expires_at` and so cannot tell a swept row from an expired one.
+
+**Not done here:** OQ-14's retention for `player_world_report` chat logs. The
+plan lists it as an open question — 30 days, 90, or until handled — and it is
+still open, so nothing sweeps that table yet.
 
 #### R20 — Archival warnings, and object-storage garbage collection
 
