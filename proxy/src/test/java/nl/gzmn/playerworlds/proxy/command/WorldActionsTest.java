@@ -33,6 +33,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
@@ -433,7 +434,7 @@ class WorldActionsTest {
 
         ActionResult result = actions.join(player, worldId).get();
         assertThat(result).isInstanceOf(ActionResult.Failed.class);
-        assertThat(((ActionResult.Failed) result).code()).isEqualTo("NOT_ROUTABLE");
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo(FailureCode.SERVER_UNROUTABLE);
 
         var placement = worlds.placementContext(worldId).orElseThrow();
         assertThat(placement.leaseHolder())
@@ -471,7 +472,7 @@ class WorldActionsTest {
 
         ActionResult result = actions.setPublic(player, true, "nope").get();
         assertThat(result).isInstanceOf(ActionResult.Failed.class);
-        assertThat(((ActionResult.Failed) result).code()).isEqualTo("PERMISSION_DENIED");
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo(FailureCode.PERMISSION_DENIED);
         assertThat(worlds.findById(worldId).orElseThrow().visibility()).isEqualTo(Visibility.PRIVATE);
     }
 
@@ -601,7 +602,7 @@ class WorldActionsTest {
         node.join(Duration.ofSeconds(10).toMillis());
 
         assertThat(result).isInstanceOf(ActionResult.Failed.class);
-        assertThat(((ActionResult.Failed) result).code()).isEqualTo("COMMAND_REFUSED");
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo(FailureCode.STATE_CONFLICT);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
                 .contains("archiving 'staleworld' did not happen")
                 .contains("the world moved on");

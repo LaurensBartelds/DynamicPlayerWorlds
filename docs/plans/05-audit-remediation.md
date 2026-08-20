@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24 and R25. Next is R26.
+Status: in progress — Phases A, B, C, D and E complete (R0–R23), plus R24–R26. Next is R27.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -163,7 +163,7 @@ to hold for an `Error` too.
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
 | D | R16–R20 | FR-40: the maintenance job the system has been running without. **Complete.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
-| F | R24–R28 | Reporting, messaging, and de-duplication. **R24, R25 done.** |
+| F | R24–R28 | Reporting, messaging, and de-duplication. **R24–R26 done.** |
 
 ---
 
@@ -1236,31 +1236,48 @@ told it worked, the row is gone, and the queued `UNLOAD_WORLD` names the world i
 its payload with a null column. Filling the column in makes it fail exactly as
 the bug did.
 
-#### R26 — `info`/`error`/`success` stop sending as a side effect
+#### R26 — `info`/`error`/`success` stop sending as a side effect — **DONE**
 
 **Requirement:** NFR-5.
 **Files:** `proxy/command/WorldActions.java`, `proxy/command/ActionResult.java`,
-`proxy/menu/MenuChannelListener.java`.
+`proxy/command/WorldCommand.java`, `proxy/menu/MenuChannelListener.java`.
 
-The three helpers both send the message and return it, and the returned
-`Component` goes into an `ActionResult` that the menu channel serialises and
-sends again — so every GUI-driven action delivers its message twice. Several
-return values are also discarded (`WorldActions:242`, `:277`, `:357`), so those
-lines reach chat but never the GUI: an invisible split in what the two surfaces
-say, and `deleteHard`'s "this cannot be undone" warning is one of them.
+**Pure builders.** The three helpers both built and sent, and the built
+`Component` then went into an `ActionResult` that the menu channel serialised and
+sent again — so every GUI-driven action delivered its message twice. They now
+only build. One place decides delivery: `WorldCommand` sends `result.message()`
+(it discarded all thirty futures before and relied on the side effect), the menu
+channel serialises it. Output that is genuinely several lines and one outcome —
+`/world list`, `bans`, `members`, `settings`, `storage` — sends through an
+explicit `tell`, so which sends happen is visible rather than incidental.
 
-Make them pure builders. One place decides delivery: the command tree sends
-`result.message()`, the menu channel serialises it.
+**`FailureCode` end to end.** `ActionResult.Failed` carries a `FailureCode`
+instead of one of thirty-three ad-hoc strings, and
+`MenuChannelListener.mapFailureCode`'s twenty-five-case translation table is
+gone. Anything the table had not heard of became `GENERIC_ERROR` without a word,
+which is what had happened to every code added since it was written —
+`COMMAND_REFUSED`, `CONFIRMATION_REQUIRED`, `TRANSFER_FAILED`, `UPDATE_FAILED`,
+`UNCONFIRMED`. No values were added to the enum: `MenuCodec` encodes it by name
+and throws on an unknown one, so a new value would break an older node in a mixed
+pool (§12.9). The two spellings the table mapped differently stay different, now
+visibly: `NOT_MEMBER` is the caller having no business here
+(`PERMISSION_DENIED`), `NOT_A_MEMBER` is the target not being one
+(`STATE_CONFLICT`).
 
-In the same pass, replace `ActionResult.code()`'s `String` and
-`MenuChannelListener.mapFailureCode`'s 25-case translation table with
-`FailureCode` produced directly by `WorldActions`. Both ends are in this
-repository; the string round trip buys nothing and silently degrades an unmapped
-code to `GENERIC_ERROR`.
+**The routing explanation reaches both surfaces.** `routeOrExplain` returns a
+`Routing.To` or a `Routing.Refused` carrying the reason, instead of sending the
+reason and returning null. Four call sites then built an `ActionResult` holding
+the string `"cannot route to node"`, so a chat user saw "that world was saved by
+a newer Minecraft version…" and a GUI user saw developer text.
+`routableNodeOrExplain` survives for the command tree, which sends its own
+replies.
 
-Also fix the raw `Component.text("cannot route to node", RED)` returned by four
-call sites after `routableNodeOrExplain` has already sent the real explanation:
-a chat user sees the explanation, a GUI user sees developer text.
+**Failing test first (proven against the pre-change sources, which the test
+compiles against unchanged):**
+`MenuChannelListenerTest#aGuiActionDeliversItsMessageOnce_NFR5` drives
+`SetVisibility` through the menu channel and asserts the player got the menu
+result and nothing in chat. Before the change the same test fails with the
+message present in both.
 
 #### R27 — Correct the messages that describe behaviour the code no longer has
 

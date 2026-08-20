@@ -532,4 +532,33 @@ class MenuChannelListenerTest {
         }
         assertThat(condition.getAsBoolean()).isTrue();
     }
+
+    @Test
+    void aGuiActionDeliversItsMessageOnce_NFR5() throws Exception {
+        UUID playerId = UUID.randomUUID();
+        Player player = mockPlayer(playerId, "Alice");
+        playersByUuid.put(playerId, player);
+        playersByName.put("Alice", player);
+        names.remember(playerId, "Alice");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, playerId, "guiworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        List<byte[]> sentMessages = Collections.synchronizedList(new ArrayList<>());
+        ServerConnection connection = mockServerConnection(player, sentMessages);
+
+        byte[] payload = MenuCodec.encodeIntent(7L, new MenuIntent.SetVisibility(worldId, Visibility.PUBLIC));
+        listener.onPluginMessage(
+                new PluginMessageEvent(connection, player, MenuChannelListener.CHANNEL_IDENTIFIER, payload));
+        awaitCondition(() -> !sentMessages.isEmpty());
+
+        // The menu result carries the message. The player must not also have been
+        // sent it down chat: info/success/error used to build and send, and the
+        // built Component then went into the ActionResult the menu serialised.
+        assertThat(sentMessages).hasSize(1);
+        assertThat(messagesByPlayer.getOrDefault(playerId, List.of()))
+                .as("a GUI action must not also write to chat")
+                .isEmpty();
+    }
 }

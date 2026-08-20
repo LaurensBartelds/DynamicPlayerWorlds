@@ -201,7 +201,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.invite(caller, StringArgumentType.getString(context, "player"));
+                                        deliver(
+                                                caller,
+                                                actions.invite(
+                                                        caller, StringArgumentType.getString(context, "player")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -211,7 +214,9 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.accept(caller, StringArgumentType.getString(context, "owner"));
+                                        deliver(
+                                                caller,
+                                                actions.accept(caller, StringArgumentType.getString(context, "owner")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -220,7 +225,9 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.kick(caller, StringArgumentType.getString(context, "player"));
+                                        deliver(
+                                                caller,
+                                                actions.kick(caller, StringArgumentType.getString(context, "player")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -229,8 +236,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.promote(
-                                                caller, StringArgumentType.getString(context, "player"));
+                                        deliver(
+                                                caller,
+                                                actions.promote(
+                                                        caller, StringArgumentType.getString(context, "player")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -240,8 +249,11 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.transferAccept(
-                                                        caller, StringArgumentType.getString(context, "owner"));
+                                                deliver(
+                                                        caller,
+                                                        actions.transferAccept(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
@@ -250,8 +262,11 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.transferDecline(
-                                                        caller, StringArgumentType.getString(context, "owner"));
+                                                deliver(
+                                                        caller,
+                                                        actions.transferDecline(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
@@ -260,8 +275,12 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.transfer(
-                                                caller, StringArgumentType.getString(context, "player"), false);
+                                        deliver(
+                                                caller,
+                                                actions.transfer(
+                                                        caller,
+                                                        StringArgumentType.getString(context, "player"),
+                                                        false));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -269,8 +288,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.transfer(
-                                                        caller, StringArgumentType.getString(context, "player"), true);
+                                                deliver(
+                                                        caller,
+                                                        actions.transfer(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "player"),
+                                                                true));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
@@ -280,8 +303,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.create(
-                                                caller, StringArgumentType.getString(context, "name"), null);
+                                        deliver(
+                                                caller,
+                                                actions.create(
+                                                        caller, StringArgumentType.getString(context, "name"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -289,10 +314,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.create(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "name"),
-                                                        StringArgumentType.getString(context, "seed"));
+                                                        actions.create(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                StringArgumentType.getString(context, "seed")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
@@ -301,8 +328,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.delete(
-                                                caller, StringArgumentType.getString(context, "name"), false);
+                                        deliver(
+                                                caller,
+                                                actions.delete(
+                                                        caller, StringArgumentType.getString(context, "name"), false));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -310,8 +339,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.delete(
-                                                        caller, StringArgumentType.getString(context, "name"), true);
+                                                deliver(
+                                                        caller,
+                                                        actions.delete(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                true));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))
@@ -319,8 +352,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.deleteHard(
-                                                        caller, StringArgumentType.getString(context, "name"), false);
+                                                deliver(
+                                                        caller,
+                                                        actions.deleteHard(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                false));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })
@@ -328,10 +365,12 @@ public final class WorldCommand {
                                                 .executes(context -> {
                                                     Player caller = playerOrNull(context);
                                                     if (caller != null) {
-                                                        var _ = actions.deleteHard(
+                                                        deliver(
                                                                 caller,
-                                                                StringArgumentType.getString(context, "name"),
-                                                                true);
+                                                                actions.deleteHard(
+                                                                        caller,
+                                                                        StringArgumentType.getString(context, "name"),
+                                                                        true));
                                                     }
                                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                                 })))))
@@ -340,7 +379,9 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.restore(caller, StringArgumentType.getString(context, "name"));
+                                        deliver(
+                                                caller,
+                                                actions.restore(caller, StringArgumentType.getString(context, "name")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
@@ -350,8 +391,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.join(
-                                                caller, StringArgumentType.getString(context, "owner"), null);
+                                        deliver(
+                                                caller,
+                                                actions.join(
+                                                        caller, StringArgumentType.getString(context, "owner"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -359,31 +402,33 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.join(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "owner"),
-                                                        StringArgumentType.getString(context, "name"));
+                                                        actions.join(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner"),
+                                                                StringArgumentType.getString(context, "name")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("members").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.members(caller);
+                        deliver(caller, actions.members(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("list").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.list(caller);
+                        deliver(caller, actions.list(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("browse")
                         .requires(source -> maySee(source, JOIN_PERMISSION))
                         .executes(context -> {
-                            var _ = actions.browse(context.getSource());
+                            deliver(context.getSource(), actions.browse(context.getSource()));
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                         }))
                 .then(BrigadierCommand.literalArgumentBuilder("public")
@@ -392,7 +437,7 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.setPublic(caller, true, null);
+                                        deliver(caller, actions.setPublic(caller, true, null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -401,17 +446,19 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.setPublic(
+                                                deliver(
                                                         caller,
-                                                        true,
-                                                        StringArgumentType.getString(context, "description"));
+                                                        actions.setPublic(
+                                                                caller,
+                                                                true,
+                                                                StringArgumentType.getString(context, "description")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
                         .then(BrigadierCommand.literalArgumentBuilder("off").executes(context -> {
                             Player caller = playerOrNull(context);
                             if (caller != null) {
-                                var _ = actions.setPublic(caller, false, null);
+                                deliver(caller, actions.setPublic(caller, false, null));
                             }
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                         })))
@@ -421,17 +468,19 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.setSetting(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "setting"),
-                                                        StringArgumentType.getString(context, "value"));
+                                                        actions.setSetting(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "setting"),
+                                                                StringArgumentType.getString(context, "value")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("settings").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.showSettings(caller);
+                        deliver(caller, actions.showSettings(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
@@ -441,8 +490,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.ban(
-                                                caller, StringArgumentType.getString(context, "player"), null);
+                                        deliver(
+                                                caller,
+                                                actions.ban(
+                                                        caller, StringArgumentType.getString(context, "player"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -451,10 +502,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.ban(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "player"),
-                                                        StringArgumentType.getString(context, "reason"));
+                                                        actions.ban(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "player"),
+                                                                StringArgumentType.getString(context, "reason")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
@@ -463,21 +516,23 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.unban(caller, StringArgumentType.getString(context, "player"));
+                                        deliver(
+                                                caller,
+                                                actions.unban(caller, StringArgumentType.getString(context, "player")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("storage").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.storage(caller);
+                        deliver(caller, actions.storage(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("bans").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.listBans(caller);
+                        deliver(caller, actions.listBans(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
@@ -1124,16 +1179,38 @@ public final class WorldCommand {
         source.sendMessage(Component.text("/world <" + String.join("|", SUBCOMMANDS) + ">", NamedTextColor.YELLOW));
     }
 
+    /**
+     * Builds and sends, because these are the command tree's own replies rather
+     * than an action's result. {@link WorldActions}' builders are pure (NFR-5);
+     * the sending is here, where the surface is known.
+     */
     private static Component info(CommandSource source, String message) {
-        return WorldActions.info(source, message);
+        Component line = WorldActions.info(message);
+        source.sendMessage(line);
+        return line;
     }
 
     private static Component success(CommandSource source, String message) {
-        return WorldActions.success(source, message);
+        Component line = WorldActions.success(message);
+        source.sendMessage(line);
+        return line;
     }
 
     private static Component error(CommandSource source, String message) {
-        return WorldActions.error(source, message);
+        Component line = WorldActions.error(message);
+        source.sendMessage(line);
+        return line;
+    }
+
+    /**
+     * Sends an action's outcome to whoever asked for it.
+     *
+     * <p>The command tree used to discard every one of these futures and rely on
+     * {@link WorldActions} sending as a side effect of building the message. One
+     * place decides delivery now, and this is it for chat (NFR-5).
+     */
+    private static void deliver(CommandSource source, java.util.concurrent.CompletionStage<ActionResult> pending) {
+        var _ = pending.thenAccept(result -> source.sendMessage(result.message()));
     }
 
     @FunctionalInterface

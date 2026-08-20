@@ -92,8 +92,7 @@ public final class MenuChannelListener {
                 menuResult = new MenuResult.Ok(correlationId, msg);
             } else if (actionResult instanceof ActionResult.Failed failed) {
                 String msg = PlainTextComponentSerializer.plainText().serialize(failed.message());
-                FailureCode code = mapFailureCode(failed.code());
-                menuResult = new MenuResult.Failed(correlationId, code, msg);
+                menuResult = new MenuResult.Failed(correlationId, failed.code(), msg);
             } else {
                 menuResult =
                         new MenuResult.Failed(correlationId, FailureCode.GENERIC_ERROR, "Unknown action result type");
@@ -137,48 +136,6 @@ public final class MenuChannelListener {
             case MenuIntent.HardDeleteWorld hardDelete ->
                 // ConfirmMenu is FR-37's confirmation substitute (admin hard-delete).
                 actions.deleteHard(player, hardDelete.worldId());
-        };
-    }
-
-    /**
-     * Maps an internal {@link ActionResult.Failed#code()} string to a wire protocol {@link FailureCode}.
-     */
-    public static FailureCode mapFailureCode(@org.jspecify.annotations.Nullable String code) {
-        if (code == null) {
-            return FailureCode.GENERIC_ERROR;
-        }
-        return switch (code) {
-            case "LIMIT_REACHED", "CAP_REACHED" -> FailureCode.CAP_REACHED;
-            case "NAME_TAKEN", "ALREADY_MEMBER", "ALREADY_EXISTS" -> FailureCode.ALREADY_EXISTS;
-            case "QUOTA_EXCEEDED" -> FailureCode.QUOTA_EXCEEDED;
-            case "ROUTING_FAILED", "NOT_ROUTABLE", "SERVER_UNROUTABLE" -> FailureCode.SERVER_UNROUTABLE;
-            case "WORLD_NOT_FOUND", "NO_TARGET_WORLD" -> FailureCode.WORLD_NOT_FOUND;
-            case "PLAYER_NOT_FOUND" -> FailureCode.PLAYER_NOT_FOUND;
-            case "BANNED" -> FailureCode.BANNED;
-            case "NOT_MEMBER", "CANNOT_KICK_OWNER", "CANNOT_BAN_OWNER", "PERMISSION_DENIED" ->
-                FailureCode.PERMISSION_DENIED;
-            case "ALREADY_ARCHIVED",
-                    "ILLEGAL_STATE",
-                    "STATE_CHANGED",
-                    "NOT_ARCHIVED",
-                    "LEASE_RACE",
-                    "NO_LIVE_INVITE",
-                    "NOT_A_MEMBER",
-                    "NO_REQUEST",
-                    "OWNER_CHANGED",
-                    "NOT_BANNED",
-                    "STATE_CONFLICT" -> FailureCode.STATE_CONFLICT;
-            case "CANNOT_TARGET_SELF", "UNKNOWN_SETTING", "INVALID_NAME" -> FailureCode.INVALID_NAME;
-            case "ISOLATION_VIOLATION" -> FailureCode.ISOLATION_VIOLATION;
-            case "TIMEOUT" -> FailureCode.TIMEOUT;
-            case "DATABASE_ERROR", "GENERIC_ERROR" -> FailureCode.GENERIC_ERROR;
-            default -> {
-                try {
-                    yield FailureCode.fromName(code);
-                } catch (IllegalArgumentException e) {
-                    yield FailureCode.GENERIC_ERROR;
-                }
-            }
         };
     }
 }

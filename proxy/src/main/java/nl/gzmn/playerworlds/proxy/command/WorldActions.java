@@ -33,6 +33,7 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
@@ -164,34 +165,32 @@ public final class WorldActions {
                         int owned = worlds.countOwnedBy(owner);
                         if (owned >= current.maxWorldsPerPlayer()) {
                             return ActionResult.failure(
-                                    "LIMIT_REACHED",
-                                    error(
-                                            caller,
-                                            "you already own " + owned + " worlds (limit "
-                                                    + current.maxWorldsPerPlayer() + ")"));
+                                    FailureCode.CAP_REACHED,
+                                    error("you already own " + owned + " worlds (limit " + current.maxWorldsPerPlayer()
+                                            + ")"));
                         }
                         if (worlds.findByOwnerAndName(owner, name).isPresent()) {
                             return ActionResult.failure(
-                                    "NAME_TAKEN", error(caller, "you already own a world called '" + name + "'"));
+                                    FailureCode.ALREADY_EXISTS, error("you already own a world called '" + name + "'"));
                         }
                         StorageQuota quota = quotaFor(caller, current);
                         if (quota.isExceeded()) {
                             return ActionResult.failure(
-                                    "QUOTA_EXCEEDED", refuseForQuota(caller, quota, "create another world"));
+                                    FailureCode.QUOTA_EXCEEDED, refuseForQuota(caller, quota, "create another world"));
                         }
 
                         WorldId newId = WorldId.random();
                         Visibility visibility = Visibility.valueOf(current.defaultVisibility());
                         PlacementDecision decision = placement.forNewWorld(newId, visibility, current);
-                        String nodeId = routableNodeOrExplain(caller, decision, newId);
-                        if (nodeId == null) {
-                            return ActionResult.failure(
-                                    "ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
+                        Routing routing = routeOrExplain(decision, newId);
+                        if (routing instanceof Routing.Refused refused) {
+                            return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
                         }
+                        String nodeId = ((Routing.To) routing).nodeId();
                         var targetServer = registry.server(nodeId);
                         if (targetServer.isEmpty()) {
                             return ActionResult.failure(
-                                    "NOT_ROUTABLE", error(caller, "that server is not routable right now"));
+                                    FailureCode.SERVER_UNROUTABLE, error("that server is not routable right now"));
                         }
 
                         long seed =
@@ -207,14 +206,14 @@ public final class WorldActions {
                                 current.leaseDuration());
 
                         transfers.route(owner, world.id(), nodeId, world.generation());
-                        Component msg = info(
-                                caller, "creating '" + name + "' on " + nodeId + "; this may take a few seconds...");
+                        Component msg =
+                                info("creating '" + name + "' on " + nodeId + "; this may take a few seconds...");
                         caller.createConnectionRequest(targetServer.get()).fireAndForget();
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world create failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -233,54 +232,51 @@ public final class WorldActions {
                         Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), name);
                         if (found.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "you own no world called '" + name + "'"));
+                                    FailureCode.WORLD_NOT_FOUND, error("you own no world called '" + name + "'"));
                         }
                         PlayerWorld world = found.get();
                         if (world.state() == WorldState.ARCHIVED) {
                             return ActionResult.failure(
-                                    "ALREADY_ARCHIVED",
-                                    info(
-                                            caller,
-                                            "'" + name + "' is already archived; use /world restore " + name
-                                                    + " to bring it back"));
+                                    FailureCode.STATE_CONFLICT,
+                                    info("'" + name + "' is already archived; use /world restore " + name
+                                            + " to bring it back"));
                         }
                         if (world.state() != WorldState.READY && world.state() != WorldState.CREATING) {
                             return ActionResult.failure(
-                                    "ILLEGAL_STATE",
-                                    error(
-                                            caller,
-                                            "'" + name + "' is " + world.state() + " and cannot be deleted right now"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error("'" + name + "' is " + world.state() + " and cannot be deleted right now"));
                         }
                         if (!confirmed) {
                             if (world.state() == WorldState.CREATING) {
-                                error(
+                                tell(
                                         caller,
-                                        "'" + name
-                                                + "' was never completed. This removes the incomplete world and frees your slot.");
+                                        error(
+                                                "'" + name
+                                                        + "' was never completed. This removes the incomplete world and frees your slot."));
                             } else {
-                                error(caller, "this archives '" + name + "' and frees a world slot.");
+                                tell(caller, error("this archives '" + name + "' and frees a world slot."));
                             }
-                            Component infoMsg = info(caller, "type /world delete " + name + " confirm to go ahead");
-                            return ActionResult.failure("CONFIRMATION_REQUIRED", infoMsg);
+                            Component infoMsg = info("type /world delete " + name + " confirm to go ahead");
+                            return ActionResult.failure(FailureCode.STATE_CONFLICT, infoMsg);
                         }
 
                         if (world.state() == WorldState.CREATING) {
                             if (!removeIncompleteWorld(world, current)) {
                                 return ActionResult.failure(
-                                        "STATE_CHANGED",
-                                        error(caller, "'" + name + "' changed while you were confirming; try again"));
+                                        FailureCode.STATE_CONFLICT,
+                                        error("'" + name + "' changed while you were confirming; try again"));
                             }
-                            Component msg = success(
-                                    caller, "removed incomplete world '" + name + "'; you have a world slot free");
+                            Component msg =
+                                    success("removed incomplete world '" + name + "'; you have a world slot free");
                             log.info("world {} removed while in CREATING state by its owner (FR-27)", world.id());
                             return ActionResult.success(msg);
                         }
 
-                        String node = archivalNodeOrExplain(caller, world, current);
-                        if (node == null) {
-                            return ActionResult.failure(
-                                    "ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
+                        Routing routing = routeForExistingWorld(world, current);
+                        if (routing instanceof Routing.Refused refused) {
+                            return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
                         }
+                        String node = ((Routing.To) routing).nodeId();
                         long commandId = enqueueTo(
                                 node,
                                 world,
@@ -291,20 +287,18 @@ public final class WorldActions {
                         if (refused != null) {
                             return refused;
                         }
-                        Component msg = info(
+                        Component msg = info("archiving '" + name + "' on " + node
+                                + "; this may take a few minutes for a large world");
+                        tell(
                                 caller,
-                                "archiving '" + name + "' on " + node
-                                        + "; this may take a few minutes for a large world");
-                        info(
-                                caller,
-                                "nothing is erased - the world is packed to cold storage and /world restore " + name
-                                        + " brings it back");
+                                info("nothing is erased - the world is packed to cold storage and /world restore "
+                                        + name + " brings it back"));
                         log.info("world {} queued for archival on {} by its owner (FR-27, FR-35)", world.id(), node);
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world delete failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -325,13 +319,13 @@ public final class WorldActions {
                         Optional<PlayerWorld> worldOpt = worlds.findByOwnerAndName(caller.getUniqueId(), name);
                         if (worldOpt.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "you own no world called '" + name + "'"));
+                                    FailureCode.WORLD_NOT_FOUND, error("you own no world called '" + name + "'"));
                         }
                         return executeDeleteHard(caller, worldOpt.get(), confirmed);
                     } catch (SQLException e) {
                         log.error("deleteHard failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -351,19 +345,19 @@ public final class WorldActions {
                     try {
                         Optional<PlayerWorld> worldOpt = worlds.findById(worldId);
                         if (worldOpt.isEmpty()) {
-                            return ActionResult.failure("WORLD_NOT_FOUND", error(caller, "world not found"));
+                            return ActionResult.failure(FailureCode.WORLD_NOT_FOUND, error("world not found"));
                         }
                         PlayerWorld world = worldOpt.get();
                         if (!world.ownerUuid().equals(caller.getUniqueId())) {
                             return ActionResult.failure(
-                                    "PERMISSION_DENIED", error(caller, "you are not the owner of this world"));
+                                    FailureCode.PERMISSION_DENIED, error("you are not the owner of this world"));
                         }
                         // ConfirmMenu on the backend is FR-37's confirmation substitute.
                         return executeDeleteHard(caller, world, true);
                     } catch (SQLException e) {
                         log.error("deleteHard by id failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -372,20 +366,21 @@ public final class WorldActions {
     private ActionResult executeDeleteHard(Player caller, PlayerWorld world, boolean confirmed) throws SQLException {
         if (!WorldPermissions.allows(caller, WorldPermissions.HARD_DELETE)) {
             return ActionResult.failure(
-                    "PERMISSION_DENIED", error(caller, "you do not have permission to permanently delete worlds"));
+                    FailureCode.PERMISSION_DENIED, error("you do not have permission to permanently delete worlds"));
         }
         if (world.state() != WorldState.ARCHIVED) {
             return ActionResult.failure(
-                    "STATE_CONFLICT",
-                    error(caller, "'" + world.name() + "' must be archived before it can be permanently deleted"));
+                    FailureCode.STATE_CONFLICT,
+                    error("'" + world.name() + "' must be archived before it can be permanently deleted"));
         }
         if (!confirmed) {
-            info(
+            tell(
                     caller,
-                    "this permanently destroys '" + world.name() + "' and all backup archives. This cannot be undone.");
+                    info("this permanently destroys '" + world.name()
+                            + "' and all backup archives. This cannot be undone."));
             return ActionResult.failure(
-                    "UNCONFIRMED",
-                    info(caller, "type /world delete " + world.name() + " hard confirm to permanently delete"));
+                    FailureCode.STATE_CONFLICT,
+                    info("type /world delete " + world.name() + " hard confirm to permanently delete"));
         }
         // R23 / FR-37: routed to a node rather than done here. The confirmation
         // promises to destroy the world "and all backup archives", and the proxy
@@ -394,10 +389,11 @@ public final class WorldActions {
         // object they named, permanently, because MN-2b's collection walks per
         // world and the world was gone.
         NetworkPolicy current = policy.get();
-        String node = archivalNodeOrExplain(caller, world, current);
-        if (node == null) {
-            return ActionResult.failure("ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
+        Routing routing = routeForExistingWorld(world, current);
+        if (routing instanceof Routing.Refused refused) {
+            return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
         }
+        String node = ((Routing.To) routing).nodeId();
         long commandId = enqueueTo(node, world, CommandKind.DELETE_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
         ActionResult refused = outcomeOrRunning(caller, commandId, "permanently deleting '" + world.name() + "'");
         if (refused != null) {
@@ -409,8 +405,7 @@ public final class WorldActions {
                 world.name(),
                 node,
                 caller.getUsername());
-        return ActionResult.success(
-                info(caller, "permanently deleting '" + world.name() + "' and its archives on " + node));
+        return ActionResult.success(info("permanently deleting '" + world.name() + "' and its archives on " + node));
     }
 
     /**
@@ -426,50 +421,46 @@ public final class WorldActions {
                         Optional<PlayerWorld> found = worlds.findByOwnerAndName(caller.getUniqueId(), name);
                         if (found.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "you own no world called '" + name + "'"));
+                                    FailureCode.WORLD_NOT_FOUND, error("you own no world called '" + name + "'"));
                         }
                         PlayerWorld world = found.get();
                         if (world.state() != WorldState.ARCHIVED) {
                             return ActionResult.failure(
-                                    "NOT_ARCHIVED",
-                                    error(
-                                            caller,
-                                            "'" + name + "' is " + world.state() + " and does not need restoring"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error("'" + name + "' is " + world.state() + " and does not need restoring"));
                         }
                         int owned = worlds.countOwnedBy(caller.getUniqueId());
                         if (owned >= current.maxWorldsPerPlayer()) {
                             return ActionResult.failure(
-                                    "LIMIT_REACHED",
-                                    error(
-                                            caller,
-                                            "you already own " + owned + " worlds (limit "
-                                                    + current.maxWorldsPerPlayer()
-                                                    + "); archive one before restoring this"));
+                                    FailureCode.CAP_REACHED,
+                                    error("you already own " + owned + " worlds (limit "
+                                            + current.maxWorldsPerPlayer()
+                                            + "); archive one before restoring this"));
                         }
                         StorageQuota quota = quotaFor(caller, current);
                         if (quota.isExceeded()) {
                             return ActionResult.failure(
-                                    "QUOTA_EXCEEDED", refuseForQuota(caller, quota, "restore '" + name + "'"));
+                                    FailureCode.QUOTA_EXCEEDED,
+                                    refuseForQuota(caller, quota, "restore '" + name + "'"));
                         }
-                        String node = archivalNodeOrExplain(caller, world, current);
-                        if (node == null) {
-                            return ActionResult.failure(
-                                    "ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
+                        Routing routing = routeForExistingWorld(world, current);
+                        if (routing instanceof Routing.Refused refused) {
+                            return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
                         }
+                        String node = ((Routing.To) routing).nodeId();
                         long commandId =
                                 enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(null), current);
                         ActionResult refused = outcomeOrRunning(caller, commandId, "restoring '" + name + "'");
                         if (refused != null) {
                             return refused;
                         }
-                        Component msg =
-                                info(caller, "restoring '" + name + "' on " + node + "; this may take a few minutes");
+                        Component msg = info("restoring '" + name + "' on " + node + "; this may take a few minutes");
                         log.info("world {} queued for restore on {} by its owner (FR-36)", world.id(), node);
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world restore failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -494,7 +485,7 @@ public final class WorldActions {
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "no world you can join matches that"));
+                                    FailureCode.WORLD_NOT_FOUND, error("no world you can join matches that"));
                         }
                         List<PlayerWorld> owned = worlds.listOwnedBy(owner.get());
                         Optional<PlayerWorld> target = owned.stream()
@@ -505,13 +496,13 @@ public final class WorldActions {
                                 .findFirst();
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "no world you can join matches that"));
+                                    FailureCode.WORLD_NOT_FOUND, error("no world you can join matches that"));
                         }
                         return doJoin(caller, target.get(), current);
                     } catch (SQLException e) {
                         log.error("/world join failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -538,13 +529,13 @@ public final class WorldActions {
                                 || (target.get().state() != WorldState.READY
                                         && target.get().state() != WorldState.CREATING)) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "no world you can join matches that"));
+                                    FailureCode.WORLD_NOT_FOUND, error("no world you can join matches that"));
                         }
                         return doJoin(caller, target.get(), current);
                     } catch (SQLException e) {
                         log.error("/world join failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -556,22 +547,24 @@ public final class WorldActions {
             String reason = ban.flatMap(b -> Optional.ofNullable(b.reason()))
                     .map(r -> ": " + r)
                     .orElse("");
-            return ActionResult.failure("BANNED", error(caller, "you are banned from '" + world.name() + "'" + reason));
+            return ActionResult.failure(
+                    FailureCode.BANNED, error("you are banned from '" + world.name() + "'" + reason));
         }
 
         if (membership.findMember(world.id(), caller.getUniqueId()).isEmpty()) {
             if (world.visibility() == Visibility.PUBLIC) {
                 membership.addVisitorIfAbsent(world.id(), caller.getUniqueId());
             } else {
-                return ActionResult.failure("NOT_MEMBER", error(caller, "no world you can join matches that"));
+                return ActionResult.failure(FailureCode.PERMISSION_DENIED, error("no world you can join matches that"));
             }
         }
 
         PlacementDecision decision = placement.forExistingWorld(world.id(), current);
-        String nodeId = routableNodeOrExplain(caller, decision, world.id());
-        if (nodeId == null) {
-            return ActionResult.failure("ROUTING_FAILED", Component.text("cannot route to node", NamedTextColor.RED));
+        Routing routing = routeOrExplain(decision, world.id());
+        if (routing instanceof Routing.Refused refused) {
+            return ActionResult.failure(FailureCode.SERVER_UNROUTABLE, refused.explanation());
         }
+        String nodeId = ((Routing.To) routing).nodeId();
 
         long routingGeneration = world.generation();
         // R12: track a lease this join acquired so terminal failures before the
@@ -584,8 +577,8 @@ public final class WorldActions {
                     worlds.acquireLease(world.id(), nodeId, selected.node().dataVersion(), current.leaseDuration());
             if (grant.isEmpty()) {
                 return ActionResult.failure(
-                        "LEASE_RACE",
-                        error(caller, "that world is being opened elsewhere right now; try again in a moment"));
+                        FailureCode.STATE_CONFLICT,
+                        error("that world is being opened elsewhere right now; try again in a moment"));
             }
             routingGeneration = grant.get().generation();
             acquiredForNode = nodeId;
@@ -602,9 +595,10 @@ public final class WorldActions {
             var targetServer = registry.server(nodeId);
             if (targetServer.isEmpty()) {
                 releaseJoinLease(world.id(), acquiredForNode, acquiredGeneration);
-                return ActionResult.failure("NOT_ROUTABLE", error(caller, "that server is not routable right now"));
+                return ActionResult.failure(
+                        FailureCode.SERVER_UNROUTABLE, error("that server is not routable right now"));
             }
-            Component msg = info(caller, "sending you to '" + world.name() + "'...");
+            Component msg = info("sending you to '" + world.name() + "'...");
             caller.createConnectionRequest(targetServer.get()).fireAndForget();
             return ActionResult.success(msg);
         } catch (SQLException e) {
@@ -648,34 +642,30 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (target.get().equals(caller.getUniqueId())) {
                             return ActionResult.failure(
-                                    "CANNOT_TARGET_SELF", error(caller, "you are already the owner of that world"));
+                                    FailureCode.INVALID_NAME, error("you are already the owner of that world"));
                         }
                         if (membership
                                 .findMember(world.get().id(), target.get())
                                 .isPresent()) {
                             return ActionResult.failure(
-                                    "ALREADY_MEMBER",
-                                    error(
-                                            caller,
-                                            targetName + " is already a member of '"
-                                                    + world.get().name() + "'"));
+                                    FailureCode.ALREADY_EXISTS,
+                                    error(targetName + " is already a member of '"
+                                            + world.get().name() + "'"));
                         }
 
                         membership.invite(world.get().id(), target.get(), caller.getUniqueId(), current.inviteExpiry());
                         Component msg = success(
-                                caller,
                                 "invited " + targetName + " to '" + world.get().name() + "'; the invite expires in "
                                         + current.inviteExpiry().toMinutes() + " minutes");
 
@@ -688,7 +678,7 @@ public final class WorldActions {
                     } catch (SQLException e) {
                         log.error("/world invite failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -712,28 +702,24 @@ public final class WorldActions {
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + ownerName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + ownerName + "' has been seen on this network"));
                         }
                         List<PlayerWorld> owned = worlds.listOwnedBy(owner.get());
                         for (PlayerWorld world : owned) {
                             switch (membership.acceptInvite(world.id(), caller.getUniqueId())) {
                                 case MembershipRepository.AcceptOutcome.Accepted accepted -> {
                                     Component msg = success(
-                                            caller,
                                             "you are now a " + accepted.member().role() + " of '" + world.name() + "'");
-                                    info(
+                                    tell(
                                             caller,
-                                            "joining a world from here arrives with the transfer path; "
-                                                    + "use /pworld on the node until then");
+                                            info("joining a world from here arrives with the transfer path; "
+                                                    + "use /pworld on the node until then"));
                                     return ActionResult.success(msg);
                                 }
                                 case MembershipRepository.AcceptOutcome.AlreadyMember already -> {
-                                    Component msg = info(
-                                            caller,
-                                            "you were already a " + already.role() + " of '" + world.name() + "'");
+                                    Component msg =
+                                            info("you were already a " + already.role() + " of '" + world.name() + "'");
                                     return ActionResult.success(msg);
                                 }
                                 case MembershipRepository.AcceptOutcome.NoLiveInvite ignored -> {
@@ -742,11 +728,11 @@ public final class WorldActions {
                             }
                         }
                         return ActionResult.failure(
-                                "NO_LIVE_INVITE", error(caller, "you have no live invite from " + ownerName));
+                                FailureCode.STATE_CONFLICT, error("you have no live invite from " + ownerName));
                     } catch (SQLException e) {
                         log.error("/world accept failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -769,31 +755,27 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (target.get().equals(world.get().ownerUuid())) {
                             return ActionResult.failure(
-                                    "CANNOT_KICK_OWNER",
+                                    FailureCode.PERMISSION_DENIED,
                                     error(
-                                            caller,
                                             "you cannot kick yourself from your own world; use /world transfer or /world delete"));
                         }
                         membership.revokeInvite(world.get().id(), target.get());
                         if (!membership.removeMember(world.get().id(), target.get())) {
                             return ActionResult.failure(
-                                    "NOT_A_MEMBER",
-                                    error(
-                                            caller,
-                                            targetName + " is not a member of '"
-                                                    + world.get().name() + "'"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error(targetName + " is not a member of '"
+                                            + world.get().name() + "'"));
                         }
                         enqueueToWorldOrAliveNodes(
                                 world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
@@ -802,16 +784,16 @@ public final class WorldActions {
                                 CommandKind.KICK_MEMBER,
                                 EjectPayload.format(target.get(), "You were removed from this world"),
                                 current);
-                        Component msg = success(
+                        Component msg = success("removed " + targetName + " from '"
+                                + world.get().name() + "'");
+                        tell(
                                 caller,
-                                "removed " + targetName + " from '"
-                                        + world.get().name() + "'");
-                        info(caller, "if they are inside the world right now they will be removed on their next join");
+                                info("if they are inside the world right now they will be removed on their next join"));
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world kick failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -834,36 +816,31 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (membership.setRole(world.get().id(), target.get(), Role.BUILDER)) {
                             enqueueToWorldOrAliveNodes(
                                     world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
-                            Component msg = success(
-                                    caller,
-                                    targetName + " is now a BUILDER of '"
-                                            + world.get().name() + "'");
+                            Component msg = success(targetName + " is now a BUILDER of '"
+                                    + world.get().name() + "'");
                             return ActionResult.success(msg);
                         } else {
                             return ActionResult.failure(
-                                    "NOT_A_MEMBER",
-                                    error(
-                                            caller,
-                                            targetName + " is not a member of '"
-                                                    + world.get().name() + "', or is its owner"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error(targetName + " is not a member of '"
+                                            + world.get().name() + "', or is its owner"));
                         }
                     } catch (SQLException e) {
                         log.error("/world promote failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -887,49 +864,41 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (target.get().equals(caller.getUniqueId())) {
-                            return ActionResult.failure(
-                                    "CANNOT_TARGET_SELF", error(caller, "you already own this world"));
+                            return ActionResult.failure(FailureCode.INVALID_NAME, error("you already own this world"));
                         }
                         if (membership
                                 .findMember(world.get().id(), target.get())
                                 .isEmpty()) {
                             return ActionResult.failure(
-                                    "NOT_A_MEMBER",
-                                    error(
-                                            caller,
-                                            targetName + " is not a member of '"
-                                                    + world.get().name() + "'"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error(targetName + " is not a member of '"
+                                            + world.get().name() + "'"));
                         }
                         int ownedCount = worlds.countOwnedBy(target.get());
                         if (ownedCount >= current.maxWorldsPerPlayer()) {
                             return ActionResult.failure(
-                                    "LIMIT_REACHED",
-                                    error(
-                                            caller,
-                                            targetName + " has reached their world limit ("
-                                                    + current.maxWorldsPerPlayer() + ")"));
+                                    FailureCode.CAP_REACHED,
+                                    error(targetName + " has reached their world limit (" + current.maxWorldsPerPlayer()
+                                            + ")"));
                         }
 
                         if (!confirmed) {
-                            Component msg = info(
-                                    caller,
-                                    "Are you sure you want to transfer ownership of '"
-                                            + world.get().name()
-                                            + "' to " + targetName
-                                            + "? You will become a BUILDER. Type /world transfer "
-                                            + targetName + " confirm to proceed.");
-                            return ActionResult.failure("CONFIRMATION_REQUIRED", msg);
+                            Component msg = info("Are you sure you want to transfer ownership of '"
+                                    + world.get().name()
+                                    + "' to " + targetName
+                                    + "? You will become a BUILDER. Type /world transfer "
+                                    + targetName + " confirm to proceed.");
+                            return ActionResult.failure(FailureCode.STATE_CONFLICT, msg);
                         }
 
                         Optional<Player> online = proxy.getPlayer(target.get());
@@ -938,18 +907,14 @@ public final class WorldActions {
                             if (!worlds.transferOwnership(
                                     world.get().id(), caller.getUniqueId(), target.get(), "MANUAL")) {
                                 return ActionResult.failure(
-                                        "TRANSFER_FAILED",
-                                        error(
-                                                caller,
-                                                "could not transfer ownership of '"
-                                                        + world.get().name() + "'"));
+                                        FailureCode.GENERIC_ERROR,
+                                        error("could not transfer ownership of '"
+                                                + world.get().name() + "'"));
                             }
                             enqueueToWorldOrAliveNodes(
                                     world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
-                            Component msg = success(
-                                    caller,
-                                    "transferred ownership of '" + world.get().name() + "' to " + targetName
-                                            + "; you are now a BUILDER");
+                            Component msg = success("transferred ownership of '"
+                                    + world.get().name() + "' to " + targetName + "; you are now a BUILDER");
                             online.get()
                                     .sendMessage(Component.text(
                                             "You are now the owner of '"
@@ -963,16 +928,14 @@ public final class WorldActions {
                                     target.get(),
                                     caller.getUniqueId(),
                                     current.transferPendingExpiry());
-                            Component msg = success(
-                                    caller,
-                                    "created transfer request for " + targetName
-                                            + "; they can accept it next time they log in");
+                            Component msg = success("created transfer request for " + targetName
+                                    + "; they can accept it next time they log in");
                             return ActionResult.success(msg);
                         }
                     } catch (SQLException e) {
                         log.error("/world transfer failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -991,10 +954,8 @@ public final class WorldActions {
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + ownerName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + ownerName + "' has been seen on this network"));
                         }
                         List<TransferRequest> pending = transferRequests.findLiveRequestsFor(caller.getUniqueId());
                         Optional<TransferRequest> matching = pending.stream()
@@ -1002,29 +963,26 @@ public final class WorldActions {
                                 .findFirst();
                         if (matching.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_REQUEST",
-                                    error(caller, "you have no pending transfer requests from " + ownerName));
+                                    FailureCode.STATE_CONFLICT,
+                                    error("you have no pending transfer requests from " + ownerName));
                         }
                         int ownedCount = worlds.countOwnedBy(caller.getUniqueId());
                         if (ownedCount >= current.maxWorldsPerPlayer()) {
                             return ActionResult.failure(
-                                    "LIMIT_REACHED",
-                                    error(
-                                            caller,
-                                            "you have reached your world limit (" + current.maxWorldsPerPlayer()
-                                                    + ")"));
+                                    FailureCode.CAP_REACHED,
+                                    error("you have reached your world limit (" + current.maxWorldsPerPlayer() + ")"));
                         }
                         Optional<PlayerWorld> worldOpt =
                                 worlds.findById(matching.get().worldId());
                         if (worldOpt.isEmpty()) {
                             return ActionResult.failure(
-                                    "WORLD_NOT_FOUND", error(caller, "that world no longer exists"));
+                                    FailureCode.WORLD_NOT_FOUND, error("that world no longer exists"));
                         }
                         PlayerWorld world = worldOpt.get();
                         StorageQuota quota = quotaFor(caller, current);
                         if (!quota.unlimited() && quota.usedBytes() + world.storageBytes() > quota.limitBytes()) {
                             return ActionResult.failure(
-                                    "QUOTA_EXCEEDED",
+                                    FailureCode.QUOTA_EXCEEDED,
                                     refuseForQuota(
                                             caller,
                                             new StorageQuota(
@@ -1037,17 +995,17 @@ public final class WorldActions {
                         if (!world.ownerUuid().equals(owner.get())) {
                             transferRequests.deleteRequest(world.id(), caller.getUniqueId());
                             return ActionResult.failure(
-                                    "OWNER_CHANGED",
-                                    error(caller, ownerName + " is no longer the owner of '" + world.name() + "'"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error(ownerName + " is no longer the owner of '" + world.name() + "'"));
                         }
                         if (!worlds.transferOwnership(world.id(), owner.get(), caller.getUniqueId(), "MANUAL")) {
                             return ActionResult.failure(
-                                    "TRANSFER_FAILED",
-                                    error(caller, "could not accept transfer of '" + world.name() + "'"));
+                                    FailureCode.GENERIC_ERROR,
+                                    error("could not accept transfer of '" + world.name() + "'"));
                         }
                         enqueueToWorldOrAliveNodes(
                                 world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
-                        Component msg = success(caller, "you are now the owner of '" + world.name() + "'!");
+                        Component msg = success("you are now the owner of '" + world.name() + "'!");
                         proxy.getPlayer(owner.get())
                                 .ifPresent(online -> online.sendMessage(Component.text(
                                         caller.getUsername() + " accepted ownership transfer of '" + world.name()
@@ -1057,7 +1015,7 @@ public final class WorldActions {
                     } catch (SQLException e) {
                         log.error("/world transfer accept failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1075,10 +1033,8 @@ public final class WorldActions {
                         Optional<UUID> owner = resolvePlayer(ownerName);
                         if (owner.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + ownerName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + ownerName + "' has been seen on this network"));
                         }
                         List<TransferRequest> pending = transferRequests.findLiveRequestsFor(caller.getUniqueId());
                         Optional<TransferRequest> matching = pending.stream()
@@ -1086,11 +1042,11 @@ public final class WorldActions {
                                 .findFirst();
                         if (matching.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_REQUEST",
-                                    error(caller, "you have no pending transfer requests from " + ownerName));
+                                    FailureCode.STATE_CONFLICT,
+                                    error("you have no pending transfer requests from " + ownerName));
                         }
                         transferRequests.deleteRequest(matching.get().worldId(), caller.getUniqueId());
-                        Component msg = success(caller, "declined transfer request from " + ownerName);
+                        Component msg = success("declined transfer request from " + ownerName);
                         proxy.getPlayer(owner.get())
                                 .ifPresent(online -> online.sendMessage(Component.text(
                                         caller.getUsername() + " declined ownership transfer of your world",
@@ -1099,7 +1055,7 @@ public final class WorldActions {
                     } catch (SQLException e) {
                         log.error("/world transfer decline failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1129,7 +1085,8 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Visibility visibility = isPublic ? Visibility.PUBLIC : Visibility.PRIVATE;
                         String desc = isPublic
@@ -1140,28 +1097,25 @@ public final class WorldActions {
 
                         if (!worlds.updateVisibility(world.get().id(), visibility, desc)) {
                             return ActionResult.failure(
-                                    "UPDATE_FAILED", error(caller, "could not update world visibility; try again"));
+                                    FailureCode.GENERIC_ERROR, error("could not update world visibility; try again"));
                         }
                         enqueueToWorldOrAliveNodes(
                                 world.get(), CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
 
                         if (isPublic) {
-                            Component msg = success(
-                                    caller,
-                                    "'" + world.get().name() + "' is now PUBLIC"
-                                            + (desc != null ? " (\"" + desc + "\")" : "")
-                                            + "; strangers can now browse and join as visitors");
+                            Component msg = success("'" + world.get().name() + "' is now PUBLIC"
+                                    + (desc != null ? " (\"" + desc + "\")" : "")
+                                    + "; strangers can now browse and join as visitors");
                             return ActionResult.success(msg);
                         } else {
                             Component msg = success(
-                                    caller,
                                     "'" + world.get().name() + "' is now PRIVATE; existing members are still members");
                             return ActionResult.success(msg);
                         }
                     } catch (SQLException e) {
                         log.error("/world public failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1186,7 +1140,8 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         WorldSettings settings =
                                 WorldSettings.fromJson(world.get().settingsJson());
@@ -1206,32 +1161,28 @@ public final class WorldActions {
                             case "mob-griefing", "mobgriefing" -> updated = settings.withMobGriefing(boolVal);
                             default -> {
                                 return ActionResult.failure(
-                                        "UNKNOWN_SETTING",
-                                        error(
-                                                caller,
-                                                "unknown setting '" + settingName
-                                                        + "'; valid settings: pvp, containers, interact, mob-griefing"));
+                                        FailureCode.INVALID_NAME,
+                                        error("unknown setting '" + settingName
+                                                + "'; valid settings: pvp, containers, interact, mob-griefing"));
                             }
                         }
 
                         if (!worlds.updateSettings(world.get().id(), updated.toJson())) {
                             return ActionResult.failure(
-                                    "UPDATE_FAILED", error(caller, "could not update world settings; try again"));
+                                    FailureCode.GENERIC_ERROR, error("could not update world settings; try again"));
                         }
                         // R9 / FR-9e: APPLY_SETTINGS refreshes the settings cache and
                         // re-asserts PVP / mob-griefing gamerules on loaded dimensions.
                         // INVALIDATE_CACHE alone left those gamerules stuck at load time.
                         enqueueToWorldOrAliveNodes(
                                 world.get(), CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
-                        Component msg = success(
-                                caller,
-                                "set " + normKey + " = " + boolVal + " for '"
-                                        + world.get().name() + "'");
+                        Component msg = success("set " + normKey + " = " + boolVal + " for '"
+                                + world.get().name() + "'");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world set failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1252,26 +1203,27 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         WorldSettings settings =
                                 WorldSettings.fromJson(world.get().settingsJson());
-                        info(caller, "Settings for '" + world.get().name() + "':");
-                        info(caller, "  PVP: " + (settings.pvp() ? "on" : "off"));
-                        info(
+                        tell(caller, info("Settings for '" + world.get().name() + "':"));
+                        tell(caller, info("  PVP: " + (settings.pvp() ? "on" : "off")));
+                        tell(
                                 caller,
-                                "  Visitors may open containers: "
-                                        + (settings.visitorsMayOpenContainers() ? "on" : "off"));
-                        info(
+                                info("  Visitors may open containers: "
+                                        + (settings.visitorsMayOpenContainers() ? "on" : "off")));
+                        tell(
                                 caller,
-                                "  Visitors may interact (doors/buttons/redstone): "
-                                        + (settings.visitorsMayInteract() ? "on" : "off"));
-                        Component msg = info(caller, "  Mob griefing: " + (settings.mobGriefing() ? "on" : "off"));
+                                info("  Visitors may interact (doors/buttons/redstone): "
+                                        + (settings.visitorsMayInteract() ? "on" : "off")));
+                        Component msg = info("  Mob griefing: " + (settings.mobGriefing() ? "on" : "off"));
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world settings failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1295,19 +1247,19 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (target.get().equals(world.get().ownerUuid())) {
                             return ActionResult.failure(
-                                    "CANNOT_BAN_OWNER", error(caller, "you cannot ban yourself from your own world"));
+                                    FailureCode.PERMISSION_DENIED,
+                                    error("you cannot ban yourself from your own world"));
                         }
 
                         bans.ban(world.get().id(), target.get(), caller.getUniqueId(), reason);
@@ -1324,13 +1276,12 @@ public final class WorldActions {
                                 current);
 
                         Component msg = success(
-                                caller,
                                 "banned " + targetName + " from '" + world.get().name() + "'");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world ban failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1352,34 +1303,29 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         Optional<UUID> target = resolvePlayer(targetName);
                         if (target.isEmpty()) {
                             return ActionResult.failure(
-                                    "PLAYER_NOT_FOUND",
-                                    error(
-                                            caller,
-                                            "no player called '" + targetName + "' has been seen on this network"));
+                                    FailureCode.PLAYER_NOT_FOUND,
+                                    error("no player called '" + targetName + "' has been seen on this network"));
                         }
                         if (bans.unban(world.get().id(), target.get())) {
-                            Component msg = success(
-                                    caller,
-                                    "unbanned " + targetName + " from '"
-                                            + world.get().name() + "'");
+                            Component msg = success("unbanned " + targetName + " from '"
+                                    + world.get().name() + "'");
                             return ActionResult.success(msg);
                         } else {
                             return ActionResult.failure(
-                                    "NOT_BANNED",
-                                    error(
-                                            caller,
-                                            targetName + " was not banned from '"
-                                                    + world.get().name() + "'"));
+                                    FailureCode.STATE_CONFLICT,
+                                    error(targetName + " was not banned from '"
+                                            + world.get().name() + "'"));
                         }
                     } catch (SQLException e) {
                         log.error("/world unban failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1400,32 +1346,31 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         List<WorldBan> list = bans.listBans(world.get().id());
                         if (list.isEmpty()) {
-                            Component msg = info(
-                                    caller,
-                                    "No players are currently banned from '"
-                                            + world.get().name() + "'.");
+                            Component msg = info("No players are currently banned from '"
+                                    + world.get().name() + "'.");
                             return ActionResult.success(msg);
                         }
                         List<UUID> targets = list.stream().map(WorldBan::uuid).toList();
                         Map<UUID, String> resolved = names.namesOf(targets);
 
-                        info(caller, "Bans for '" + world.get().name() + "':");
+                        tell(caller, info("Bans for '" + world.get().name() + "':"));
                         Component last = null;
                         for (WorldBan b : list) {
                             String name =
                                     resolved.getOrDefault(b.uuid(), b.uuid().toString());
                             String r = b.reason() != null ? " (" + b.reason() + ")" : "";
-                            last = info(caller, "  • " + name + r);
+                            last = info("  • " + name + r);
                         }
                         return ActionResult.success(last != null ? last : Component.empty());
                     } catch (SQLException e) {
                         log.error("/world bans failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1446,24 +1391,25 @@ public final class WorldActions {
                         Optional<PlayerWorld> world = targetWorld(caller, worldId);
                         if (world.isEmpty()) {
                             return ActionResult.failure(
-                                    "NO_TARGET_WORLD", Component.text("target world not found", NamedTextColor.RED));
+                                    FailureCode.WORLD_NOT_FOUND,
+                                    Component.text("target world not found", NamedTextColor.RED));
                         }
                         List<WorldMember> list =
                                 membership.listMembers(world.get().id());
                         Map<UUID, String> resolved = names.namesOf(
                                 list.stream().map(WorldMember::uuid).toList());
-                        info(caller, "members of '" + world.get().name() + "':");
+                        tell(caller, info("members of '" + world.get().name() + "':"));
                         Component last = null;
                         for (WorldMember member : list) {
                             String display = resolved.getOrDefault(
                                     member.uuid(), member.uuid().toString());
-                            last = info(caller, "  " + display + "  " + member.role());
+                            last = info("  " + display + "  " + member.role());
                         }
                         return ActionResult.success(last != null ? last : Component.empty());
                     } catch (SQLException e) {
                         log.error("/world members failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1485,27 +1431,26 @@ public final class WorldActions {
 
                         if (owned.isEmpty() && memberships.isEmpty()) {
                             Component msg = info(
-                                    caller,
                                     "You do not own or belong to any worlds yet. Use /world create <name> to create one.");
                             return ActionResult.success(msg);
                         }
 
-                        info(caller, "Your worlds:");
+                        tell(caller, info("Your worlds:"));
                         if (owned.isEmpty()) {
-                            info(caller, "  (none)");
+                            tell(caller, info("  (none)"));
                         } else {
                             for (PlayerWorld world : owned) {
-                                info(
+                                tell(
                                         caller,
-                                        "  • " + world.name() + " [" + world.state() + "] (visibility: "
-                                                + world.visibility() + ")");
+                                        info("  • " + world.name() + " [" + world.state() + "] (visibility: "
+                                                + world.visibility() + ")"));
                             }
                         }
 
-                        info(caller, "");
-                        info(caller, "Shared worlds (member):");
+                        tell(caller, info(""));
+                        tell(caller, info("Shared worlds (member):"));
                         if (memberships.isEmpty()) {
-                            info(caller, "  (none)");
+                            tell(caller, info("  (none)"));
                         } else {
                             List<UUID> ownerUuids = new ArrayList<>();
                             List<PlayerWorld> sharedWorlds = new ArrayList<>();
@@ -1522,14 +1467,16 @@ public final class WorldActions {
                                 WorldMember m = memberships.get(i);
                                 String ownerDisplayName = ownerNames.getOrDefault(
                                         sw.ownerUuid(), sw.ownerUuid().toString());
-                                info(caller, "  • " + sw.name() + " (Owner: " + ownerDisplayName + ") - " + m.role());
+                                tell(
+                                        caller,
+                                        info("  • " + sw.name() + " (Owner: " + ownerDisplayName + ") - " + m.role()));
                             }
                         }
                         return ActionResult.success(Component.text("Your worlds", NamedTextColor.GRAY));
                     } catch (SQLException e) {
                         log.error("/world list failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1559,7 +1506,7 @@ public final class WorldActions {
                         }
                         List<PlayerWorld> publicWorlds = worlds.listPublicWorlds();
                         if (publicWorlds.isEmpty()) {
-                            Component msg = info(source, "There are no public worlds available right now.");
+                            Component msg = info("There are no public worlds available right now.");
                             return ActionResult.success(msg);
                         }
                         List<UUID> owners = publicWorlds.stream()
@@ -1567,7 +1514,7 @@ public final class WorldActions {
                                 .toList();
                         Map<UUID, String> ownerNames = names.namesOf(owners);
 
-                        info(source, "Public worlds:");
+                        tell(source, info("Public worlds:"));
                         for (PlayerWorld w : publicWorlds) {
                             String ownerName = ownerNames.getOrDefault(
                                     w.ownerUuid(), w.ownerUuid().toString());
@@ -1575,13 +1522,13 @@ public final class WorldActions {
                             String status = (w.assignedNode() != null && w.leaseExpires() != null)
                                     ? "[LOADED on " + w.assignedNode() + "]"
                                     : "[UNLOADED]";
-                            info(source, "  • " + w.name() + " (Owner: " + ownerName + ") " + status + desc);
+                            tell(source, info("  • " + w.name() + " (Owner: " + ownerName + ") " + status + desc));
                         }
                         return ActionResult.success(Component.text("Public worlds:", NamedTextColor.GRAY));
                     } catch (SQLException e) {
                         log.error("/world browse failed", e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(source, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1606,18 +1553,18 @@ public final class WorldActions {
                         if (resolved.source() == StorageTiers.Source.PROBED
                                 && WorldPermissions.allows(caller, WorldPermissions.ADMIN)
                                 && !current.storageQuotaTiers().isEmpty()) {
-                            info(
+                            tell(
                                     caller,
-                                    "  (no enumerable permission plugin: only the "
+                                    info("  (no enumerable permission plugin: only the "
                                             + current.storageQuotaTiers().size()
-                                            + " tiers in storage.quota-tiers are recognised)");
+                                            + " tiers in storage.quota-tiers are recognised)"));
                         }
                         return ActionResult.success(Component.text(
                                 "Storage: " + StorageQuotaResolver.formatBytes(used), NamedTextColor.GRAY));
                     } catch (SQLException e) {
                         log.error("/world storage failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
-                                "DATABASE_ERROR", error(caller, "that did not work; the failure is in the proxy log"));
+                                FailureCode.GENERIC_ERROR, error("that did not work; the failure is in the proxy log"));
                     }
                 },
                 executors.db());
@@ -1637,19 +1584,19 @@ public final class WorldActions {
             return Optional.empty();
         }
         return Optional.of(ActionResult.failure(
-                "PERMISSION_DENIED", error(source, "you do not have permission to do that (" + permission + ")")));
+                FailureCode.PERMISSION_DENIED, error("you do not have permission to do that (" + permission + ")")));
     }
 
     private Optional<PlayerWorld> targetWorld(Player caller, @Nullable WorldId worldId) throws SQLException {
         if (worldId != null) {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(caller, "that world no longer exists");
+                tell(caller, error("that world no longer exists"));
                 return Optional.empty();
             }
             PlayerWorld world = found.get();
             if (!world.ownerUuid().equals(caller.getUniqueId())) {
-                error(caller, "you do not own that world");
+                tell(caller, error("you do not own that world"));
                 return Optional.empty();
             }
             return Optional.of(world);
@@ -1660,15 +1607,15 @@ public final class WorldActions {
     private Optional<PlayerWorld> soleOwnedWorld(Player caller) throws SQLException {
         List<PlayerWorld> owned = worlds.listOwnedBy(caller.getUniqueId());
         if (owned.isEmpty()) {
-            error(caller, "you do not own a world yet");
+            tell(caller, error("you do not own a world yet"));
             return Optional.empty();
         }
         if (owned.size() > 1) {
-            error(
+            tell(
                     caller,
-                    "you own " + owned.size()
+                    error("you own " + owned.size()
                             + " worlds and these commands do not take a world name yet; that arrives with the "
-                            + "transfer path in milestone 5");
+                            + "transfer path in milestone 5"));
             return Optional.empty();
         }
         return Optional.of(owned.getFirst());
@@ -1680,35 +1627,35 @@ public final class WorldActions {
     }
 
     public static Component refuseForQuota(CommandSource caller, StorageQuota quota, String attempted) {
-        Component err = error(
-                caller,
-                "you cannot " + attempted + ": that would use "
-                        + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " of your "
-                        + StorageQuotaResolver.formatBytes(quota.limitBytes()) + " storage allowance");
-        info(caller, "/world storage shows where it has gone; archiving a world does not free it, deleting does");
+        Component err = error("you cannot " + attempted + ": that would use "
+                + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " of your "
+                + StorageQuotaResolver.formatBytes(quota.limitBytes()) + " storage allowance");
+        tell(caller, info("/world storage shows where it has gone; archiving a world does not free it, deleting does"));
         return err;
     }
 
     public static void renderStorage(CommandSource target, String who, StorageQuota quota, List<PlayerWorld> owned) {
         if (quota.unlimited()) {
-            info(target, who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " (unlimited)");
-        } else {
-            info(
+            tell(
                     target,
-                    who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " / "
+                    info(who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " (unlimited)"));
+        } else {
+            tell(
+                    target,
+                    info(who + " storage: " + StorageQuotaResolver.formatBytes(quota.usedBytes()) + " / "
                             + StorageQuotaResolver.formatBytes(quota.limitBytes()) + " "
                             + progressBar(quota.percentage()) + " "
-                            + String.format(Locale.ROOT, "%.0f%%", quota.percentage()));
+                            + String.format(Locale.ROOT, "%.0f%%", quota.percentage())));
         }
         if (owned.isEmpty()) {
-            info(target, "  no worlds owned");
+            tell(target, info("  no worlds owned"));
             return;
         }
         for (PlayerWorld world : owned) {
-            info(
+            tell(
                     target,
-                    "  " + world.name() + " - " + StorageQuotaResolver.formatBytes(world.storageBytes()) + " - "
-                            + (world.state() == WorldState.ARCHIVED ? "archived" : "live"));
+                    info("  " + world.name() + " - " + StorageQuotaResolver.formatBytes(world.storageBytes()) + " - "
+                            + (world.state() == WorldState.ARCHIVED ? "archived" : "live")));
         }
     }
 
@@ -1729,10 +1676,32 @@ public final class WorldActions {
         return names.uuidOf(name);
     }
 
-    public @Nullable String routableNodeOrExplain(CommandSource caller, PlacementDecision decision, WorldId worldId) {
+    /** Either the node a world goes to, or why there isn't one. */
+    public sealed interface Routing {
+
+        /** Send it here. */
+        record To(String nodeId) implements Routing {}
+
+        /**
+         * There is nowhere to send it, and this says why in words the player can
+         * act on.
+         *
+         * <p>The explanation is <em>returned</em> rather than sent. Sent, it
+         * reached a chat user and nobody else: four call sites then built an
+         * {@code ActionResult} carrying the string "cannot route to node", so a
+         * GUI user got developer text while the real reason — a world saved by a
+         * newer Minecraft version, every server full — went to a surface they
+         * were not looking at (NFR-5).
+         */
+        record Refused(Component explanation) implements Routing {}
+    }
+
+    /** Turns a placement decision into a node or an explanation. */
+    public Routing routeOrExplain(PlacementDecision decision, WorldId worldId) {
         return switch (decision) {
-            case PlacementDecision.Held held -> held.nodeId();
-            case PlacementDecision.Selected selected -> selected.node().nodeId();
+            case PlacementDecision.Held held -> new Routing.To(held.nodeId());
+            case PlacementDecision.Selected selected ->
+                new Routing.To(selected.node().nodeId());
             case PlacementDecision.NoNodeNewEnough tooOld -> {
                 log.warn(
                         "world {} was last saved at data version {} and the newest live node is at {}; "
@@ -1740,34 +1709,43 @@ public final class WorldActions {
                         worldId,
                         tooOld.worldDataVersion(),
                         tooOld.newestNodeDataVersion());
-                error(
-                        caller,
-                        "that world was saved by a newer Minecraft version than any server currently running. "
-                                + "It is safe, and it will be reachable again when one is back.");
-                yield null;
+                yield new Routing.Refused(
+                        error("that world was saved by a newer Minecraft version than any server currently running. "
+                                + "It is safe, and it will be reachable again when one is back."));
             }
             case PlacementDecision.NoCapacity full -> {
                 log.warn(
                         "no capacity for world {}: all {} version-capable nodes are over a threshold (MN-15)",
                         worldId,
                         full.candidates());
-                error(caller, "every server is full right now; please try again in a few minutes");
-                yield null;
+                yield new Routing.Refused(error("every server is full right now; please try again in a few minutes"));
             }
-            case PlacementDecision.NoNodesAlive ignored -> {
-                error(caller, "no server is available right now");
-                yield null;
-            }
+            case PlacementDecision.NoNodesAlive ignored ->
+                new Routing.Refused(error("no server is available right now"));
         };
     }
 
-    public @Nullable String archivalNodeOrExplain(CommandSource caller, PlayerWorld world, NetworkPolicy current)
-            throws SQLException {
+    /** {@link #routeOrExplain} for a world that may already be leased somewhere. */
+    public Routing routeForExistingWorld(PlayerWorld world, NetworkPolicy current) throws SQLException {
         if (world.assignedNode() != null) {
-            return world.assignedNode();
+            return new Routing.To(world.assignedNode());
         }
-        PlacementDecision decision = placement.forExistingWorld(world.id(), current);
-        return routableNodeOrExplain(caller, decision, world.id());
+        return routeOrExplain(placement.forExistingWorld(world.id(), current), world.id());
+    }
+
+    /**
+     * The node, or {@code null} after sending the caller the reason.
+     *
+     * <p>For the command tree, which sends its own replies. Actions use
+     * {@link #routeOrExplain} and put the explanation in their result instead.
+     */
+    public @Nullable String routableNodeOrExplain(CommandSource caller, PlacementDecision decision, WorldId worldId) {
+        Routing routing = routeOrExplain(decision, worldId);
+        if (routing instanceof Routing.Refused refused) {
+            tell(caller, refused.explanation());
+            return null;
+        }
+        return ((Routing.To) routing).nodeId();
     }
 
     /**
@@ -1864,13 +1842,13 @@ public final class WorldActions {
                 }
                 log.warn("{} (command {}) was refused: {}", what, commandId, completed.result());
                 yield ActionResult.failure(
-                        "COMMAND_REFUSED", error(caller, what + " did not happen: " + completed.detail()));
+                        FailureCode.STATE_CONFLICT, error(what + " did not happen: " + completed.detail()));
             }
             case CommandOutcomes.Outcome.Gone ignored -> {
                 // Swept, or the world went with it. Either way nobody ran it.
                 log.warn("{} (command {}) vanished before it was completed", what, commandId);
                 yield ActionResult.failure(
-                        "COMMAND_REFUSED", error(caller, what + " did not happen; the instruction was lost"));
+                        FailureCode.STATE_CONFLICT, error(what + " did not happen; the instruction was lost"));
             }
         };
     }
@@ -1908,21 +1886,38 @@ public final class WorldActions {
         }
     }
 
-    public static Component info(CommandSource source, String message) {
-        Component comp = Component.text(message, NamedTextColor.GRAY);
-        source.sendMessage(comp);
-        return comp;
+    /**
+     * Builds an informational line. Does not send it.
+     *
+     * <p>These three used to both build <em>and</em> send, and the built
+     * {@link Component} then went into an {@link ActionResult} that the menu
+     * channel serialised and sent again — so every GUI-driven action delivered
+     * its message twice. One place decides delivery now: the command tree sends
+     * {@code result.message()}, the menu channel serialises it (NFR-5).
+     */
+    public static Component info(String message) {
+        return Component.text(message, NamedTextColor.GRAY);
     }
 
-    public static Component success(CommandSource source, String message) {
-        Component comp = Component.text(message, NamedTextColor.GREEN);
-        source.sendMessage(comp);
-        return comp;
+    /** Builds a success line. Does not send it. */
+    public static Component success(String message) {
+        return Component.text(message, NamedTextColor.GREEN);
     }
 
-    public static Component error(CommandSource source, String message) {
-        Component comp = Component.text(message, NamedTextColor.RED);
-        source.sendMessage(comp);
-        return comp;
+    /** Builds an error line. Does not send it. */
+    public static Component error(String message) {
+        return Component.text(message, NamedTextColor.RED);
+    }
+
+    /**
+     * Sends one line now, for output that is not the action's result.
+     *
+     * <p>The long listings — {@code /world list}, {@code bans}, {@code members},
+     * {@code settings} — are several lines and one outcome, and the lines are the
+     * point. Explicit, so it is visible which sends happen and which are the
+     * caller's to make.
+     */
+    private static void tell(CommandSource source, Component line) {
+        source.sendMessage(line);
     }
 }
