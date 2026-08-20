@@ -32,6 +32,28 @@ public final class WorldDownloader {
     }
 
     /**
+     * How much a local file has to prove before it is accepted as already correct
+     * (MN-4).
+     */
+    public enum Verification {
+
+        /**
+         * Size and mtime against the manifest entry. What MN-4 asks for on the
+         * join path: "rehashing gigabytes is the last thing wanted during the
+         * join that NFR-1's budget applies to".
+         */
+        FINGERPRINT,
+
+        /**
+         * Content hash. MN-4's other half — "a world whose marker is absent is
+         * fully rehashed before use" — for a directory nothing vouches for. Size
+         * and mtime are exactly what a half-finished write preserves, so a file
+         * truncated by a crash can match its entry on both and still be wrong.
+         */
+        REHASH
+    }
+
+    /**
      * Makes the local world folders under {@code scratchRoot} match {@code manifest}.
      *
      * <p><em>Match</em>, not <em>include</em> (MN-4, D16). Every entry in the
@@ -55,10 +77,12 @@ public final class WorldDownloader {
      * @throws StorageException if an IO error occurs during download or cloning
      * @throws IllegalArgumentException if an entry path attempts directory traversal outside scratchRoot
      */
-    public Result materialize(Manifest manifest, Path scratchRoot, Collection<Path> relativeDimensionRoots) {
+    public Result materialize(
+            Manifest manifest, Path scratchRoot, Collection<Path> relativeDimensionRoots, Verification verification) {
         Objects.requireNonNull(manifest, "manifest");
         Objects.requireNonNull(scratchRoot, "scratchRoot");
         Objects.requireNonNull(relativeDimensionRoots, "relativeDimensionRoots");
+        Objects.requireNonNull(verification, "verification");
 
         Path normalizedScratch = scratchRoot.toAbsolutePath().normalize();
         int filesChecked = 0;
@@ -73,18 +97,7 @@ public final class WorldDownloader {
                 throw new IllegalArgumentException("Manifest entry path escapes scratch root: " + entry.path());
             }
 
-            boolean cleanMatch = false;
-            if (Files.isRegularFile(destination)) {
-                try {
-                    BasicFileAttributes attrs = Files.readAttributes(destination, BasicFileAttributes.class);
-                    if (attrs.size() == entry.sizeBytes()
-                            && attrs.lastModifiedTime().toMillis() == entry.lastModifiedMillis()) {
-                        cleanMatch = true;
-                    }
-                } catch (IOException ignored) {
-                    cleanMatch = false;
-                }
-            }
+            boolean cleanMatch = matchesLocally(destination, entry, verification);
 
             if (cleanMatch) {
                 continue;
@@ -121,10 +134,11 @@ public final class WorldDownloader {
 
         boolean wasWarm = (filesDownloaded == 0);
         log.debug(
-                "Materialized manifest for world {} at {}: checked={}, restored={}, downloaded={}, bytes={}, "
-                        + "removed={}, warm={}",
+                "Materialized manifest for world {} at {}: verification={}, checked={}, restored={}, "
+                        + "downloaded={}, bytes={}, removed={}, warm={}",
                 manifest.worldId().value(),
                 scratchRoot,
+                verification,
                 filesChecked,
                 filesRestored,
                 filesDownloaded,
@@ -132,6 +146,34 @@ public final class WorldDownloader {
                 filesRemoved,
                 wasWarm);
         return new Result(filesChecked, filesRestored, filesDownloaded, bytesDownloaded, filesRemoved, wasWarm);
+    }
+
+    /**
+     * Whether the file already on disk is the one the manifest names.
+     *
+     * <p>Unreadable, wrong size or a failed hash all answer no, which costs a
+     * download. Answering yes wrongly costs the world.
+     */
+    private boolean matchesLocally(Path destination, ManifestEntry entry, Verification verification) {
+        if (!Files.isRegularFile(destination)) {
+            return false;
+        }
+        try {
+            BasicFileAttributes attrs = Files.readAttributes(destination, BasicFileAttributes.class);
+            if (attrs.size() != entry.sizeBytes()) {
+                return false;
+            }
+            if (verification == Verification.REHASH) {
+                // Structure is not validated here: a region file that fails MN-5c
+                // is a real file that simply is not this manifest's, and the
+                // answer to that is the same download as any other mismatch.
+                return ContentHasher.hash(destination).sha256Hex().equals(entry.sha256Hex());
+            }
+            return attrs.lastModifiedTime().toMillis() == entry.lastModifiedMillis();
+        } catch (IOException | RuntimeException e) {
+            log.debug("could not verify {} against manifest entry {}; will re-fetch", destination, entry.path(), e);
+            return false;
+        }
     }
 
     /**
@@ -185,7 +227,7 @@ public final class WorldDownloader {
     }
 
     /**
-     * Statistics and outcome of a {@link #materialize(Manifest, Path)} invocation.
+     * Statistics and outcome of a {@code materialize} invocation.
      *
      * @param filesChecked total entries inspected from the manifest
      * @param filesRestored files copied or cloned from cache to the scratch directory

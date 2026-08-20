@@ -1,6 +1,6 @@
 # Implementation Plan 05 — Audit Remediation
 
-Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23). Next is Phase D from R16, then Phase F.
+Status: in progress — Phases A, B, C and E complete (R0–R15, R21–R23), plus R16. Next is R17.
 The e2e suite runs with object storage enabled and is 9/9 green across
 consecutive runs.
 Covers: the defects found by the intent and behaviour audit of milestones 1–8,
@@ -161,7 +161,7 @@ to hold for an `Error` too.
 | A | R1–R5 | Data loss and access control. No open decisions. **Complete.** |
 | B | R6–R10 | The commit path: what reaches durable storage, and when. **Complete.** |
 | C | R11–R15 | Lease and lifecycle hygiene. **Complete.** |
-| D | R16–R20 | FR-40: the maintenance job the system has been running without. |
+| D | R16–R20 | FR-40: the maintenance job the system has been running without. **R16 done.** |
 | E | R21–R23 | Storage-model correctness. **Complete.** |
 | F | R24–R28 | Reporting, messaging, and de-duplication. |
 
@@ -851,24 +851,57 @@ ARCHIVING, reset stuck RESTORING, queue inactivity archivals, expire transfer
 requests. The rest of this phase is the other five, plus the three pruners that
 already exist and have no production caller.
 
-#### R16 — Startup quarantine uses the completion marker (D18)
+#### R16 — Startup quarantine uses the completion marker (D18) — **DONE**
 
 **Requirement:** MN-4, MN-5, MN-13, MN-15a.
-**Files:** `core/storage/QuarantineManager.java`, `core/storage/WorldDownloader.java`,
-`backend/world/WorldLifecycleService.java`, `backend/GzmnWorldsPlugin.java`.
+**Files:** `core/storage/CleanUnloadMarker.java`, `core/storage/QuarantineManager.java`,
+`core/storage/WorldDownloader.java`, `backend/world/WorldLifecycleService.java`,
+`backend/world/WorldFolders.java`, `backend/lease/SelfFencingHandler.java`,
+`backend/GzmnWorldsPlugin.java`.
 
-Write the marker on clean unload (in `afterUnload`, after the commit has
-landed), naming the committed `manifest_key`. At startup, `sweepStartup` reads
-each world's marker and quarantines only directories without a valid one. Pass
-the node's actually-held leases too — `PlayerWorldRepository.worldsLeasedTo`
-already exists and is unused by this path.
+**Landed.** `CleanUnloadMarker` holds MN-4's marker, extended per D18 to name the
+`manifest_key` it was written against. `afterUnload` writes it after the final
+commit — reading the key from the row, because the commit has just moved it — and
+before the lease release, so a node that takes the world next finds a marker that
+is already true. The load path **clears** it: the marker means "nothing has
+touched these files since that commit", and a load is exactly that. Without the
+clear, a world unloaded cleanly, loaded again and then crashed would still carry
+a marker that still matched `manifest_key`, because the crash committed nothing —
+it would read as a warm cache while being the debris this exists to catch.
 
-Implement MN-4's other half while the marker is being added: a world whose
-marker is absent is fully rehashed before use rather than trusted on size and
-mtime.
+`sweepStartup` now takes a `StartupSweep` parameter object and keeps a directory
+only when its marker names the world's current manifest. A world this node still
+holds a live lease on is debris regardless: a clean shutdown releases every lease
+(FR-28), so a live lease at startup means the previous process died holding it.
 
-**Failing test first:** `aCleanlyUnloadedWorldSurvivesRestartAsAWarmCache_MN5`,
-and `aWorldWithNoMarkerIsQuarantined_MN13`.
+**MN-4's other half** landed with it: `WorldDownloader.materialize` takes a
+`Verification` mode, and a world with no valid marker is verified by content hash
+rather than by size and mtime. Size and mtime are exactly what an interrupted
+write preserves.
+
+**A node with no object storage no longer sweeps at all.** Quarantine there has
+nothing to restore from, so moving a world's directory aside *is* losing the
+world — MN-13's recoverable fault turned into an unrecoverable one, which is the
+opposite of what it is for. `isWarmCache` likewise refuses a world with no current
+`manifest_key`: a scratch copy is not a cache of anything when nothing durable
+exists to be warm relative to.
+
+**R21's deferral is closed here.** `QuarantineManager` no longer appends
+`_nether` / `_the_end` or rebuilds Paper 26's nesting: `quarantineWorld` is given
+its folders and the sweep is given its dimensions root and a name→world resolver,
+all from `WorldFolders`, which recovers them from the layout with the same probe
+`resolve` already uses.
+
+**Failing test first (proven by temporary revert):**
+`QuarantineManagerTest#aCleanlyUnloadedWorldSurvivesRestartAsAWarmCache_MN5` —
+under MN-13's literal lease-only rule the world is quarantined, which is the
+every-restart working-set loss D18 describes.
+`#aWorldWithNoMarkerIsQuarantined_MN13`, `#aMarkerNamingADifferentManifestIsDebris`,
+`#aWorldStillLeasedHereIsDebris` and `#aWorldWithNoCurrentManifestIsDebris` cover
+the other branches.
+`WorldDownloaderTest#rehashCatchesAFileThatMatchesOnSizeAndMtime_MN4` plants a
+torn file with the manifest's size and mtime: fingerprint mode believes it,
+rehash does not.
 **Acceptance:** a planned restart preserves warm copies; a `kill -9` restart
 quarantines them.
 

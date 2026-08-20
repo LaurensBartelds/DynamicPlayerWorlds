@@ -64,8 +64,11 @@ class WorldDownloaderTest {
             Manifest manifest = new Manifest(worldId, 1L, 1, 3953, "1.21.4", Instant.now(), entries);
 
             // Cold download into empty targetScratch
-            WorldDownloader.Result coldResult =
-                    downloader.materialize(manifest, targetScratch, WorldFixture.relativeDimensionFolders(worldId));
+            WorldDownloader.Result coldResult = downloader.materialize(
+                    manifest,
+                    targetScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
 
             assertThat(coldResult.filesChecked()).isEqualTo(entries.size());
             assertThat(coldResult.filesRestored()).isEqualTo(entries.size());
@@ -89,8 +92,11 @@ class WorldDownloaderTest {
             }
 
             // Warm check on already populated scratch
-            WorldDownloader.Result warmResult =
-                    downloader.materialize(manifest, targetScratch, WorldFixture.relativeDimensionFolders(worldId));
+            WorldDownloader.Result warmResult = downloader.materialize(
+                    manifest,
+                    targetScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
 
             assertThat(warmResult.filesChecked()).isEqualTo(entries.size());
             assertThat(warmResult.filesRestored()).isZero();
@@ -132,14 +138,20 @@ class WorldDownloaderTest {
             Manifest manifest = new Manifest(worldId, 1L, 1, 3953, "1.21.4", Instant.now(), entries);
 
             // Cold download first to fill cache
-            WorldDownloader.Result firstResult =
-                    downloader.materialize(manifest, targetScratch1, WorldFixture.relativeDimensionFolders(worldId));
+            WorldDownloader.Result firstResult = downloader.materialize(
+                    manifest,
+                    targetScratch1,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
             assertThat(firstResult.filesDownloaded()).isEqualTo(entries.size());
             assertThat(firstResult.wasWarm()).isFalse();
 
             // Materialize second scratch from warm cache
-            WorldDownloader.Result secondResult =
-                    downloader.materialize(manifest, targetScratch2, WorldFixture.relativeDimensionFolders(worldId));
+            WorldDownloader.Result secondResult = downloader.materialize(
+                    manifest,
+                    targetScratch2,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
             assertThat(secondResult.filesChecked()).isEqualTo(entries.size());
             assertThat(secondResult.filesRestored()).isEqualTo(entries.size());
             assertThat(secondResult.filesDownloaded()).isZero();
@@ -184,7 +196,11 @@ class WorldDownloaderTest {
             }
 
             Manifest manifest = new Manifest(worldId, 1L, 1, 3953, "1.21.4", Instant.now(), entries);
-            downloader.materialize(manifest, targetScratch, WorldFixture.relativeDimensionFolders(worldId));
+            downloader.materialize(
+                    manifest,
+                    targetScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
 
             // Mutate one file's content and mtime
             String mutatedPath = relativePaths.get(0);
@@ -192,8 +208,11 @@ class WorldDownloaderTest {
             Files.write(mutatedFile, new byte[] {0x42, 0x43});
             Files.setLastModifiedTime(mutatedFile, FileTime.fromMillis(12345L));
 
-            WorldDownloader.Result result =
-                    downloader.materialize(manifest, targetScratch, WorldFixture.relativeDimensionFolders(worldId));
+            WorldDownloader.Result result = downloader.materialize(
+                    manifest,
+                    targetScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
             assertThat(result.filesChecked()).isEqualTo(entries.size());
             assertThat(result.filesRestored()).isEqualTo(1);
             assertThat(result.filesDownloaded()).isZero();
@@ -225,8 +244,12 @@ class WorldDownloaderTest {
 
             WorldId worldId = WorldId.random();
             Manifest emptyManifest = new Manifest(worldId, 1L, 1, 3953, "1.21.4", Instant.now(), Map.of());
-            assertThatNullPointerException().isThrownBy(() -> downloader.materialize(null, tempDir, List.of()));
-            assertThatNullPointerException().isThrownBy(() -> downloader.materialize(emptyManifest, null, List.of()));
+            assertThatNullPointerException()
+                    .isThrownBy(() ->
+                            downloader.materialize(null, tempDir, List.of(), WorldDownloader.Verification.FINGERPRINT));
+            assertThatNullPointerException()
+                    .isThrownBy(() -> downloader.materialize(
+                            emptyManifest, null, List.of(), WorldDownloader.Verification.FINGERPRINT));
 
             // Path traversal in entry
             Manifest traversalManifest = new Manifest(
@@ -245,7 +268,11 @@ class WorldDownloaderTest {
                                     1000L)));
 
             assertThatIllegalArgumentException()
-                    .isThrownBy(() -> downloader.materialize(traversalManifest, tempDir.resolve("scratch"), List.of()));
+                    .isThrownBy(() -> downloader.materialize(
+                            traversalManifest,
+                            tempDir.resolve("scratch"),
+                            List.of(),
+                            WorldDownloader.Verification.FINGERPRINT));
         }
     }
 
@@ -280,7 +307,7 @@ class WorldDownloaderTest {
 
             LocalObjectCache downloaderCache = new LocalObjectCache(downloaderCacheRoot, PlainFileCloner.INSTANCE);
             WorldDownloader downloader = new WorldDownloader(store, downloaderCache, PlainFileCloner.INSTANCE);
-            downloader.materialize(manifest, targetScratch, roots);
+            downloader.materialize(manifest, targetScratch, roots, WorldDownloader.Verification.FINGERPRINT);
 
             // Debris the manifest does not know about: a region file from an
             // earlier generation, left behind by a crash. Merging rather than
@@ -295,7 +322,8 @@ class WorldDownloaderTest {
             Files.createDirectories(unrelated.getParent());
             Files.write(unrelated, new byte[] {4});
 
-            WorldDownloader.Result result = downloader.materialize(manifest, targetScratch, roots);
+            WorldDownloader.Result result =
+                    downloader.materialize(manifest, targetScratch, roots, WorldDownloader.Verification.FINGERPRINT);
 
             assertThat(Files.exists(stale)).isFalse();
             assertThat(result.filesRemoved()).isEqualTo(1);
@@ -306,6 +334,69 @@ class WorldDownloaderTest {
                         .as("manifest entry must survive the prune: %s", entry.path())
                         .isTrue();
             }
+        }
+    }
+
+    @Test
+    @DisplayName("REHASH catches a file that matches on size and mtime but not on content (MN-4)")
+    void rehashCatchesAFileThatMatchesOnSizeAndMtime_MN4(@TempDir Path tempDir) throws Exception {
+        Path sourceScratch = tempDir.resolve("source");
+        Path targetScratch = tempDir.resolve("target");
+
+        WorldId worldId = WorldId.random();
+        WorldFixture.materialize(sourceScratch, worldId, WorldFixture.DimensionSet.OVERWORLD_ONLY);
+        List<Path> roots = WorldFixture.relativeDimensionFolders(worldId);
+
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(settings)) {
+            LocalObjectCache engineCache =
+                    new LocalObjectCache(tempDir.resolve("engine-cache"), PlainFileCloner.INSTANCE);
+            SnapshotEngine engine =
+                    new SnapshotEngine(store, engineCache, new SnapshotCopier(PlainFileCloner.INSTANCE));
+            Manifest manifest = engine.executeSnapshot(
+                            sourceScratch,
+                            worldId,
+                            0L,
+                            1,
+                            4903,
+                            "26.2",
+                            Map.of(),
+                            DirtyScanner.scan(sourceScratch, roots, Map.of(), List.of("session.lock", "uid.dat")),
+                            true)
+                    .manifest();
+
+            LocalObjectCache downloaderCache =
+                    new LocalObjectCache(tempDir.resolve("downloader-cache"), PlainFileCloner.INSTANCE);
+            WorldDownloader downloader = new WorldDownloader(store, downloaderCache, PlainFileCloner.INSTANCE);
+            downloader.materialize(manifest, targetScratch, roots, WorldDownloader.Verification.FINGERPRINT);
+
+            // A file a crash left half-written: the same length and the same
+            // mtime, different bytes. This is exactly what MN-4's "a world whose
+            // marker is absent is fully rehashed before use" is for — size and
+            // mtime are what an interrupted write preserves.
+            ManifestEntry entry = manifest.entries().values().stream()
+                    .filter(e -> e.sizeBytes() > 4)
+                    .findFirst()
+                    .orElseThrow();
+            Path corrupted = targetScratch.resolve(entry.path());
+            byte[] good = Files.readAllBytes(corrupted);
+            byte[] torn = good.clone();
+            torn[torn.length - 1] = (byte) (torn[torn.length - 1] ^ 0xFF);
+            Files.write(corrupted, torn);
+            Files.setLastModifiedTime(corrupted, FileTime.fromMillis(entry.lastModifiedMillis()));
+
+            // Fingerprint mode believes it, which is the trade MN-4 makes on the
+            // join path NFR-1 budgets.
+            WorldDownloader.Result trusting =
+                    downloader.materialize(manifest, targetScratch, roots, WorldDownloader.Verification.FINGERPRINT);
+            assertThat(trusting.filesRestored()).isZero();
+            assertThat(Files.readAllBytes(corrupted)).isEqualTo(torn);
+
+            // Rehash does not.
+            WorldDownloader.Result verifying =
+                    downloader.materialize(manifest, targetScratch, roots, WorldDownloader.Verification.REHASH);
+            assertThat(verifying.filesRestored()).isEqualTo(1);
+            assertThat(Files.readAllBytes(corrupted)).isEqualTo(good);
         }
     }
 }

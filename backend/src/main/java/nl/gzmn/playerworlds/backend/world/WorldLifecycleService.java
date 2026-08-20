@@ -34,6 +34,7 @@ import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.EventLogger;
 import nl.gzmn.playerworlds.core.obs.LogEvent;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
+import nl.gzmn.playerworlds.core.storage.CleanUnloadMarker;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.Manifest;
 import nl.gzmn.playerworlds.core.storage.ManifestCodec;
@@ -607,11 +608,28 @@ public final class WorldLifecycleService implements WorldLoader {
                 byte[] manifestBytes = objectStore.getBytes(row.manifestKey());
                 String manifestJson = new String(manifestBytes, StandardCharsets.UTF_8);
                 Manifest manifest = ManifestCodec.decode(manifestJson);
+                // MN-4: a world whose completion marker is absent, or names a
+                // different manifest, may have diverged — so its local files are
+                // rehashed rather than trusted on size and mtime. The marker is
+                // then cleared, because from here the world is live and nothing
+                // may vouch for these files until the next clean unload.
+                boolean warm = CleanUnloadMarker.isWarmCache(worldContainer, row.id(), row.manifestKey());
+                CleanUnloadMarker.clear(worldContainer, row.id());
+                if (!warm) {
+                    log.info(
+                            "world {} has no clean-unload marker for manifest {}; verifying local files by hash "
+                                    + "before use (MN-4)",
+                            row.id(),
+                            row.manifestKey());
+                }
                 // MN-4: match the manifest rather than merge into whatever the
                 // folder held, so a stale file from an earlier generation cannot
                 // survive a cold load and be re-uploaded by the next snapshot.
                 WorldDownloader.Result dlResult = worldDownloader.materialize(
-                        manifest, worldContainer, folders.relativeDimensionFolders(primaryLevelName, row.id()));
+                        manifest,
+                        worldContainer,
+                        folders.relativeDimensionFolders(primaryLevelName, row.id()),
+                        warm ? WorldDownloader.Verification.FINGERPRINT : WorldDownloader.Verification.REHASH);
                 isCold = !dlResult.wasWarm();
                 if (commitService != null) {
                     // R7: successful materialize clears any prior self-fence on this id.
@@ -816,6 +834,15 @@ public final class WorldLifecycleService implements WorldLoader {
                 () -> {
                     try {
                         worlds.touchLastPlayed(loaded.id());
+                        // MN-4 / D18: the marker names the manifest this world was
+                        // unloaded at, read here rather than carried in, because
+                        // the final commit has just moved it and the row is what
+                        // knows. Written before the release, so a node that takes
+                        // the lease next finds a marker that is already true.
+                        String manifestKey = worlds.findById(loaded.id())
+                                .map(PlayerWorld::manifestKey)
+                                .orElse(null);
+                        CleanUnloadMarker.write(worldContainer, loaded.id(), manifestKey);
                         if (nodeId != null) {
                             boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
                             if (released) {

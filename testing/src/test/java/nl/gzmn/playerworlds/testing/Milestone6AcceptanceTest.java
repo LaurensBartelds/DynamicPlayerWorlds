@@ -62,7 +62,10 @@ class Milestone6AcceptanceTest {
             WorldDownloader downloader = new WorldDownloader(store, downloaderCache, PlainFileCloner.INSTANCE);
 
             WorldDownloader.Result coldResult = downloader.materialize(
-                    snapResult.manifest(), restoreScratch, WorldFixture.relativeDimensionFolders(worldId));
+                    snapResult.manifest(),
+                    restoreScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
 
             assertThat(coldResult.wasWarm()).isFalse();
             assertThat(coldResult.filesChecked()).isEqualTo(expectedPaths.size());
@@ -85,7 +88,10 @@ class Milestone6AcceptanceTest {
 
             // Second materialization on populated directory: warm check
             WorldDownloader.Result warmResult = downloader.materialize(
-                    snapResult.manifest(), restoreScratch, WorldFixture.relativeDimensionFolders(worldId));
+                    snapResult.manifest(),
+                    restoreScratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    WorldDownloader.Verification.FINGERPRINT);
 
             assertThat(warmResult.wasWarm()).isTrue();
             assertThat(warmResult.filesChecked()).isEqualTo(expectedPaths.size());

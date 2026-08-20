@@ -240,7 +240,13 @@ public final class WorldArchiver {
                     // Fresh temp directory, so the mirror half has nothing to
                     // remove; the roots are passed because materialize will not
                     // guess which files it is allowed to delete.
-                    downloader.materialize(manifest, tempMaterializeDir, relativeDimensionFolders(folderBase));
+                    // Fresh temp directory, so nothing local can be trusted and
+                    // nothing has to be: every file is a download either way.
+                    downloader.materialize(
+                            manifest,
+                            tempMaterializeDir,
+                            relativeDimensionFolders(folderBase),
+                            WorldDownloader.Verification.REHASH);
 
                     for (DimensionKind dimension : DimensionKind.values()) {
                         Path matDir = worldLayout.bukkitWorldFolder(

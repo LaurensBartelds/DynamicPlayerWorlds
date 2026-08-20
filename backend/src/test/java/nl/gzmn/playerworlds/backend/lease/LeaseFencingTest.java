@@ -133,6 +133,7 @@ class LeaseFencingTest {
                 nodeCommands,
                 metrics,
                 scratchDir,
+                WorldFixture.PRIMARY_LEVEL_NAME,
                 quarantineDir,
                 () -> policy);
 

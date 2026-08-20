@@ -4,6 +4,9 @@ import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -80,6 +83,8 @@ import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
@@ -142,6 +147,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
      * and neither touches object storage; this is slack, not a target.
      */
     private static final Duration SHUTDOWN_UNLOAD_MARGIN = Duration.ofSeconds(5);
+
+    /**
+     * How long enable waits for the MN-13 startup sweep. It walks the scratch
+     * volume, so it scales with how many worlds this node was holding, and it has
+     * to finish before anything can load.
+     */
+    private static final Duration STARTUP_SWEEP_TIMEOUT = Duration.ofSeconds(60);
 
     private @Nullable Platform platform;
     private @Nullable PluginExecutors executors;
@@ -409,6 +421,79 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * MN-13 and MN-5a: quarantines crash debris and deletes leftover snapshot
+     * directories, before any world can load.
+     *
+     * <p>Off the tick thread, because it reads the lease table and walks the
+     * scratch volume, and enable waits for it: a world that loads first would be
+     * swept out from under itself.
+     *
+     * <p>Skipped entirely on a node with no object storage. There, quarantine has
+     * nothing to restore from — moving a world's directory aside <em>is</em>
+     * losing the world, which turns MN-13's recoverable fault into an
+     * unrecoverable one and is the opposite of what it is for.
+     */
+    private void sweepStartupScratch(
+            Database openedDatabase,
+            PluginExecutors pools,
+            NodeConfig node,
+            WorldFolders worldFolders,
+            String primaryLevelName,
+            boolean hasObjectStorage) {
+        if (!hasObjectStorage) {
+            getLogger()
+                    .info("no object storage configured; skipping the MN-13 startup sweep, which would move the "
+                            + "only copy of every world into quarantine");
+            return;
+        }
+        try {
+            var _ = pools.db()
+                    .submit(() -> {
+                        PlayerWorldRepository sweepWorlds = new PlayerWorldRepository(openedDatabase);
+                        var quarantined = QuarantineManager.sweepStartup(new QuarantineManager.StartupSweep(
+                                node.scratchPath(),
+                                worldFolders.dimensionsRoot(node.scratchPath(), primaryLevelName),
+                                node.quarantinePath(),
+                                worldFolders::worldIdOf,
+                                Set.copyOf(sweepWorlds.worldsLeasedTo(node.nodeId())),
+                                id -> currentManifestKey(sweepWorlds, id),
+                                UUID.randomUUID().toString()));
+                        if (!quarantined.isEmpty()) {
+                            getLogger()
+                                    .warning(() -> "startup sweep quarantined " + quarantined.size()
+                                            + " directory/directories as crash debris (MN-13)");
+                        }
+                        return null;
+                    })
+                    .get(STARTUP_SWEEP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            getLogger().warning("interrupted during the startup quarantine sweep");
+        } catch (Exception e) {
+            getLogger().warning(() -> "could not complete startup quarantine sweep: " + e.getMessage());
+        }
+    }
+
+    /**
+     * A world's current {@code manifest_key}, or empty when it has none or the row
+     * is gone.
+     *
+     * <p>A read that fails also answers empty, which quarantines. Losing a warm
+     * copy costs one cold load; keeping a directory nothing could vouch for costs
+     * whatever diverged in it.
+     */
+    private Optional<String> currentManifestKey(PlayerWorldRepository worlds, WorldId worldId) {
+        try {
+            return worlds.findById(worldId).map(PlayerWorld::manifestKey);
+        } catch (SQLException e) {
+            getLogger()
+                    .warning(() -> "could not read manifest_key for " + worldId
+                            + " during the startup sweep; treating its scratch copy as debris");
+            return Optional.empty();
+        }
+    }
+
     /** Wires the world lifecycle, storage, and registers listeners, commands and sweeps. */
     private void startWorldLifecycle(
             Platform selected,
@@ -417,13 +502,6 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldsMetrics worldsMetrics,
             NodeConfig node,
             CapabilityReport report) {
-        // MN-13 & MN-5a: Startup quarantine sweep for crash debris and stale snapshot directories
-        try {
-            QuarantineManager.sweepStartup(node.scratchPath(), node.quarantinePath(), java.util.Set.of());
-        } catch (Exception e) {
-            getLogger().warning(() -> "could not complete startup quarantine sweep: " + e.getMessage());
-        }
-
         FileCloner cloner = new ReflinkFileCloner(report.reflink());
         LocalObjectCache objectCache = new LocalObjectCache(node.cachePath(), cloner);
 
@@ -444,6 +522,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         ProfileService profileService = new ProfileService(selected.itemCodec());
         // Paper 26 nests every Bukkit world under the primary save (level-name).
         String primaryLevelName = primaryLevelName();
+
+        sweepStartupScratch(openedDatabase, pools, node, worldFolders, primaryLevelName, store != null);
 
         WorldCommitService worldCommitService = new WorldCommitService(
                 profileRepository,
@@ -468,6 +548,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new NodeCommandRepository(openedDatabase),
                 worldsMetrics,
                 node.scratchPath(),
+                primaryLevelName,
                 node.quarantinePath(),
                 this::policy);
         this.fencingHandler = fencing;

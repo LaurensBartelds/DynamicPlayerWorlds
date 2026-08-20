@@ -87,8 +87,11 @@ public final class WorldRestorer {
             @Nullable String message) {
 
         /**
+         * A successful restore.
+         *
          * @param manifestKey the snapshot the restore committed, or {@code null}
          *     on a node with no object storage, where there is no manifest to name
+         * @param liveStorageBytes what the restored world now occupies
          */
         public static RestoreResult ok(@Nullable String manifestKey, long liveStorageBytes) {
             return new RestoreResult(true, manifestKey, liveStorageBytes, null);

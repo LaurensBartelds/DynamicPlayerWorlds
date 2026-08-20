@@ -488,6 +488,7 @@ class WorldCommitServiceTest {
                 new NodeCommandRepository(database),
                 metrics,
                 scratch,
+                WorldFixture.PRIMARY_LEVEL_NAME,
                 quarantine,
                 NetworkPolicy::defaults);
         service.setFencingHandler(fencing);

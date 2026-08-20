@@ -52,6 +52,7 @@ public final class SelfFencingHandler {
     private final NodeCommandRepository nodeCommands;
     private final WorldsMetrics metrics;
     private final Path scratchPath;
+    private final String primaryLevelName;
     private final Path quarantinePath;
     private final Supplier<NetworkPolicy> policy;
 
@@ -64,6 +65,7 @@ public final class SelfFencingHandler {
             NodeCommandRepository nodeCommands,
             WorldsMetrics metrics,
             Path scratchPath,
+            String primaryLevelName,
             Path quarantinePath,
             Supplier<NetworkPolicy> policy) {
         this.registry = Objects.requireNonNull(registry, "registry");
@@ -74,6 +76,7 @@ public final class SelfFencingHandler {
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.scratchPath = Objects.requireNonNull(scratchPath, "scratchPath");
+        this.primaryLevelName = Objects.requireNonNull(primaryLevelName, "primaryLevelName");
         this.quarantinePath = Objects.requireNonNull(quarantinePath, "quarantinePath");
         this.policy = Objects.requireNonNull(policy, "policy");
     }
@@ -222,7 +225,13 @@ public final class SelfFencingHandler {
             // Move local scratch directory to quarantine (MN-10, MN-13)
             executors.io().execute(() -> {
                 try {
-                    QuarantineManager.quarantineWorld(scratchPath, quarantinePath, worldId);
+                    // The folders come from the layout rather than from string
+                    // suffixes rebuilt here (R16); WorldFolders owns that.
+                    QuarantineManager.quarantineWorld(
+                            scratchPath,
+                            quarantinePath,
+                            worldId,
+                            folders.onDiskFolders(scratchPath, primaryLevelName, worldId));
                 } catch (IOException e) {
                     log.error("Could not quarantine scratch folder for fenced world {}", worldId, e);
                 }
