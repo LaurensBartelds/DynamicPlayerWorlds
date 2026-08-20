@@ -83,7 +83,7 @@ class DrainableMainSchedulerTest {
 
         // The shape every asynchronous path here ends in: finish off-thread, then
         // hop to main to complete. Without the drain this never completes.
-        var _ = worker.submit(() -> scheduler.execute(() -> done.complete("landed")));
+        var unused = worker.submit(() -> scheduler.execute(() -> done.complete("landed")));
 
         assertThat(scheduler.awaitDraining(done, Duration.ofSeconds(5))).isEqualTo("landed");
     }

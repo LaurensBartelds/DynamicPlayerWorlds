@@ -46,7 +46,16 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs(
         "--enable-native-access=ALL-UNNAMED",
-        "--sun-misc-unsafe-memory-access=allow",
+    )
+    val jvmVersion = javaLauncher.map { it.metadata.languageVersion.asInt() }
+    jvmArgumentProviders.add(
+        CommandLineArgumentProvider {
+            if (jvmVersion.getOrElse(21) >= 24) {
+                listOf("--sun-misc-unsafe-memory-access=allow")
+            } else {
+                emptyList()
+            }
+        },
     )
     testLogging {
         events("failed", "skipped")
