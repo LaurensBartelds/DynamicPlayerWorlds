@@ -6,3 +6,9 @@ description: Standalone zero-database lobby menu renderer for DynamicPlayerWorld
 authors: [GZMN]
 website: https://github.com/LaurensBartelds/DynamicPlayerWorlds
 folia-supported: false
+commands:
+  world:
+    description: Open the DynamicPlayerWorlds menu
+    aliases: [worlds]
+    permission: gzmn.worlds.menu
+    permission-message: "§cYou do not have permission to use this command."

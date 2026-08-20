@@ -9,7 +9,7 @@
 # number as `<mc>.build.<n>-stable`. gzmn.plugin-conventions reduces both that
 # and the older `1.21.4-R0.1-SNAPSHOT` shape to the Minecraft version alone.
 paperApi = "26.2.build.112-stable"
-paperApi121 = "1.21.4-R0.1-SNAPSHOT"
+paperApi121 = "1.21.11-R0.1-SNAPSHOT"
 velocityApi = "4.0.0"
 # Optional at runtime: the proxy uses it to enumerate storage tiers when it is
 # installed, and falls back to probing configured nodes when it is not (§4).
