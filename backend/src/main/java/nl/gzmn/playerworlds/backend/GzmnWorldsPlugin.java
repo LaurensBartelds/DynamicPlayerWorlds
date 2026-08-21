@@ -664,11 +664,14 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .runTaskTimer(
                         this,
                         () -> {
+                            // Every online player, not only ones standing in the
+                            // holding area: a player switching from one of this
+                            // node's worlds to another (MN-15) never fires a fresh
+                            // PlayerJoinEvent, so this poll is the only thing that
+                            // claims the pending_transfer their /world join wrote.
+                            // claim() is a no-op DELETE for anyone without one.
                             for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
-                                if (!worldFolders.isPlayerWorld(
-                                        player.getWorld().getName())) {
-                                    transferListener.processPlayer(player);
-                                }
+                                transferListener.processPlayer(player);
                             }
                         },
                         10L,

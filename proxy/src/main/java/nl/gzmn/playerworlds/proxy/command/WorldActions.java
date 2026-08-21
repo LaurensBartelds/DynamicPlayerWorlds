@@ -629,7 +629,20 @@ public final class WorldActions {
                         FailureCode.SERVER_UNROUTABLE, error("that server is not routable right now"));
             }
             Component msg = info("sending you to '" + world.name() + "'...");
-            caller.createConnectionRequest(targetServer.get()).fireAndForget();
+            // One node holds many worlds (MN-15). If the caller is already on this
+            // node -- switching from one of its worlds to another -- Velocity's
+            // createConnectionRequest refuses with ALREADY_CONNECTED and
+            // fireAndForget() answers that by telling the player "You are already
+            // connected to this server!", which is wrong: they are not there yet.
+            // Skip the reconnect and let the pending_transfer row just written
+            // carry them the rest of the way; the node's own poll picks it up and
+            // teleports them in place (FR-11).
+            boolean alreadyOnNode = caller.getCurrentServer()
+                    .map(conn -> conn.getServerInfo().getName().equals(nodeId))
+                    .orElse(false);
+            if (!alreadyOnNode) {
+                caller.createConnectionRequest(targetServer.get()).fireAndForget();
+            }
             return ActionResult.success(msg);
         } catch (SQLException e) {
             releaseJoinLease(world.id(), acquiredForNode, acquiredGeneration);
