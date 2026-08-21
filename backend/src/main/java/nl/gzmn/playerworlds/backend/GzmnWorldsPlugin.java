@@ -67,6 +67,7 @@ import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
 import nl.gzmn.playerworlds.core.config.NodeMode;
@@ -196,6 +197,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
      */
     private volatile NetworkPolicy policy = NetworkPolicy.defaults();
 
+    /** Admin-configurable player-facing text (NFR-5). Refreshed alongside {@link #policy}. */
+    private volatile MessageCatalog messages = MessageCatalog.defaults();
+
     @Override
     public void onEnable() {
         // onEnable runs on the server main thread. Mark it before anything that
@@ -280,7 +284,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 menuNameRepo,
                 channel,
                 pools,
-                this::policy);
+                this::policy,
+                this::messages);
         channel.setMenuService(service);
         channel.register();
         this.menuChannel = channel;
@@ -965,6 +970,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             try {
                                 settings.reload();
                                 this.policy = settings.policy();
+                                this.messages = settings.messages();
                             } catch (SQLException e) {
                                 // Keep the last good policy. A database blip must not
                                 // reset every cap to its default mid-session.
@@ -1023,6 +1029,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
+    }
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    public MessageCatalog messages() {
+        return messages;
     }
 
     /** World archiver service, or {@code null} when enable refused. */

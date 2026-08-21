@@ -9,12 +9,14 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
-import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import nl.gzmn.playerworlds.backend.gui.Messages;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -111,10 +113,16 @@ public final class MyWorldsMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        var messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
         int totalPages = Math.max(1, (int) Math.ceil((double) worlds.size() / PAGE_SIZE));
-        String titleText = "My Worlds (Page " + (page + 1) + "/" + totalPages + ")";
-        Inventory inventory = Bukkit.createInventory(holder, 54, Component.text(titleText, NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(
+                holder,
+                54,
+                messages.render(
+                        "messages.gui.my-worlds-menu.title",
+                        Placeholders.count("page", page + 1),
+                        Placeholders.count("pages", totalPages)));
         holder.setInventory(inventory);
 
         // Fill background
@@ -144,42 +152,46 @@ public final class MyWorldsMenu implements GuiScreen {
             inventory.setItem(
                     SLOT_PREVIOUS_PAGE,
                     ItemUtil.create(
-                            Material.ARROW,
-                            Component.text("◀ Previous Page", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                            Material.ARROW, messages.render("messages.gui.my-worlds-menu.item.previous-page.name")));
         }
 
         inventory.setItem(
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to Main Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.my-worlds-menu.item.back.name"),
+                        messages.renderLore("messages.gui.my-worlds-menu.item.back.lore")));
 
         List<Component> createLore = new ArrayList<>();
-        createLore.add(Component.text("Owned: " + owned.size() + " / " + maxWorlds, NamedTextColor.GRAY));
+        createLore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.create.owned-line",
+                Placeholders.count("owned", owned.size()),
+                Placeholders.count("max", maxWorlds)));
         if (!shared.isEmpty()) {
-            createLore.add(Component.text("Shared with you: " + shared.size(), NamedTextColor.GRAY));
+            createLore.add(messages.render(
+                    "messages.gui.my-worlds-menu.item.create.shared-line", Placeholders.count("count", shared.size())));
         }
         createLore.add(Component.empty());
-        createLore.add(Component.text("▶ Click to create a world", NamedTextColor.YELLOW));
+        createLore.add(messages.render("messages.gui.my-worlds-menu.item.create.hint"));
         inventory.setItem(
                 SLOT_CREATE,
                 ItemUtil.create(
                         Material.NETHER_STAR,
-                        Component.text("Create New World", NamedTextColor.GREEN, TextDecoration.BOLD),
+                        messages.render("messages.gui.my-worlds-menu.item.create.name"),
                         createLore));
 
         if ((page + 1) * PAGE_SIZE < worlds.size()) {
             inventory.setItem(
                     SLOT_NEXT_PAGE,
                     ItemUtil.create(
-                            Material.ARROW, Component.text("Next Page ▶", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                            Material.ARROW, messages.render("messages.gui.my-worlds-menu.item.next-page.name")));
         }
 
         return inventory;
     }
 
     private org.bukkit.inventory.ItemStack renderWorldItem(PlayerWorld world, boolean owned, @Nullable Role role) {
+        Messages messages = menuService.messages();
         Material material =
                 switch (world.state()) {
                     case READY -> owned ? Material.GRASS_BLOCK : Material.PLAYER_HEAD;
@@ -188,29 +200,41 @@ public final class MyWorldsMenu implements GuiScreen {
                     case ARCHIVING, RESTORING -> Material.CLOCK;
                 };
 
-        Component name = Component.text(
+        Component nameValue = Component.text(
                 world.name(), owned ? NamedTextColor.AQUA : NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD);
+        Component name = messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.name", Placeholders.component("world", nameValue));
 
         List<Component> lore = new ArrayList<>();
-        lore.add(Component.text("State: " + world.state().name(), stateColor(world.state())));
+        Component stateValue = Component.text("State: " + world.state().name(), stateColor(world.state()));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.state-line",
+                Placeholders.component("state", stateValue)));
         if (!owned) {
-            lore.add(Component.text(
-                    "Shared with you" + (role == null ? "" : " — " + role.name()), NamedTextColor.LIGHT_PURPLE));
+            lore.add(messages.render(
+                    "messages.gui.my-worlds-menu.item.world-entry.shared-note",
+                    Placeholders.raw("role-suffix", role == null ? "" : " — " + role.name())));
         }
-        lore.add(Component.text("Visibility: " + world.visibility().name(), NamedTextColor.GRAY));
-        lore.add(
-                Component.text("Size: " + StorageQuotaResolver.formatBytes(world.storageBytes()), NamedTextColor.GRAY));
-        lore.add(Component.text("Border: ±" + world.borderRadius() + "m", NamedTextColor.DARK_GRAY));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.visibility-line",
+                Placeholders.raw("visibility", world.visibility().name())));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.size-line",
+                Placeholders.bytes("size", world.storageBytes())));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.border-line",
+                Placeholders.count("radius", world.borderRadius())));
         lore.add(Component.empty());
 
         if (world.state() == WorldState.READY) {
-            lore.add(Component.text("▶ Left-Click: Join World", NamedTextColor.GREEN));
+            lore.add(messages.render("messages.gui.my-worlds-menu.item.world-entry.join-hint"));
         }
         // The proxy is the authority on who may manage a world (FR-31a); a
         // non-owner opening the detail screen reads it rather than being told
         // the world does not exist, so the entry is offered either way.
-        lore.add(Component.text(
-                owned ? "▶ Right-Click: Manage World" : "▶ Right-Click: World Details", NamedTextColor.YELLOW));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.manage-hint",
+                Placeholders.raw("action", owned ? "Manage World" : "World Details")));
 
         return ItemUtil.create(material, name, lore);
     }
@@ -242,8 +266,8 @@ public final class MyWorldsMenu implements GuiScreen {
                                     .sendIntent(player, new MenuIntent.JoinWorld(world.id()))
                                     .whenComplete((result, ex) -> {
                                         if (result instanceof MenuResult.Failed failed) {
-                                            player.sendMessage(Component.text(
-                                                    "Could not join world: " + failed.message(), NamedTextColor.RED));
+                                            player.sendMessage(GsonComponentSerializer.gson()
+                                                    .deserialize(failed.message()));
                                             var _ = menuService.openMyWorldsMenu(player, page);
                                         }
                                     });
@@ -267,8 +291,8 @@ public final class MyWorldsMenu implements GuiScreen {
                         .sendIntent(player, new MenuIntent.CreateWorld(defaultName, null))
                         .whenComplete((result, ex) -> {
                             if (result instanceof MenuResult.Failed failed) {
-                                player.sendMessage(Component.text(
-                                        "Could not create world: " + failed.message(), NamedTextColor.RED));
+                                player.sendMessage(
+                                        GsonComponentSerializer.gson().deserialize(failed.message()));
                                 var _ = menuService.openMyWorldsMenu(player, page);
                             }
                         });

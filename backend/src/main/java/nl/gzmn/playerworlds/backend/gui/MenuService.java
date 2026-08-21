@@ -27,6 +27,7 @@ import nl.gzmn.playerworlds.backend.gui.screen.StorageMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.WorldMenu;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
@@ -67,6 +68,7 @@ public class MenuService {
     private final @Nullable MenuChannel channel;
     private final PluginExecutors executors;
     private final @Nullable Supplier<NetworkPolicy> policy;
+    private final Messages messages;
 
     private final ConcurrentMap<UUID, GuiScreen> activeScreens = new ConcurrentHashMap<>();
     private @Nullable Function<Player, GuiScreen> mainMenuFactory;
@@ -80,6 +82,28 @@ public class MenuService {
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy) {
+        this(
+                worldRepository,
+                membershipRepository,
+                transferRepository,
+                banRepository,
+                nameRepository,
+                channel,
+                executors,
+                policy,
+                null);
+    }
+
+    public MenuService(
+            @Nullable PlayerWorldRepository worldRepository,
+            @Nullable MembershipRepository membershipRepository,
+            @Nullable TransferRequestRepository transferRepository,
+            @Nullable WorldBanRepository banRepository,
+            @Nullable PlayerNameRepository nameRepository,
+            @Nullable MenuChannel channel,
+            PluginExecutors executors,
+            @Nullable Supplier<NetworkPolicy> policy,
+            @Nullable Supplier<MessageCatalog> messageCatalog) {
         this.worldRepository = worldRepository;
         this.membershipRepository = membershipRepository;
         this.transferRepository = transferRepository;
@@ -88,6 +112,7 @@ public class MenuService {
         this.channel = channel;
         this.executors = Objects.requireNonNull(executors, "executors");
         this.policy = policy;
+        this.messages = new Messages(messageCatalog);
     }
 
     public @Nullable PlayerWorldRepository worldRepository() {
@@ -120,6 +145,11 @@ public class MenuService {
 
     public @Nullable Supplier<NetworkPolicy> policy() {
         return policy;
+    }
+
+    /** Renders admin-configurable message/GUI text (NFR-5). */
+    public Messages messages() {
+        return messages;
     }
 
     /** Configures an override factory used to produce the main menu screen (e.g. for tests). */
@@ -380,7 +410,7 @@ public class MenuService {
         Objects.requireNonNull(onConfirm, "onConfirm");
         Objects.requireNonNull(onCancel, "onCancel");
 
-        openScreen(player, new ConfirmMenu(title, description, onConfirm, onCancel));
+        openScreen(player, new ConfirmMenu(messages, title, description, onConfirm, onCancel));
     }
 
     /**

@@ -12,7 +12,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.core.menu.CloseMenuMessage;
 import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.menu.IntentEnvelope;
@@ -422,10 +422,14 @@ public final class MenuChannelListener {
                 String err = throwable.getMessage() != null ? throwable.getMessage() : "Internal server error";
                 menuResult = new MenuResult.Failed(correlationId, FailureCode.GENERIC_ERROR, err);
             } else if (actionResult instanceof ActionResult.Ok ok) {
-                String msg = PlainTextComponentSerializer.plainText().serialize(ok.message());
+                // Gson, not plain text: the message is already a styled MiniMessage
+                // render (NFR-5), and the backend re-displays it verbatim rather than
+                // re-wrapping it in its own hardcoded prefix (see MenuResult.message's
+                // javadoc).
+                String msg = GsonComponentSerializer.gson().serialize(ok.message());
                 menuResult = new MenuResult.Ok(correlationId, msg);
             } else if (actionResult instanceof ActionResult.Failed failed) {
-                String msg = PlainTextComponentSerializer.plainText().serialize(failed.message());
+                String msg = GsonComponentSerializer.gson().serialize(failed.message());
                 menuResult = new MenuResult.Failed(correlationId, failed.code(), msg);
             } else {
                 menuResult =

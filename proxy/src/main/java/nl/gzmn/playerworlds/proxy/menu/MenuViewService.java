@@ -14,6 +14,7 @@ import java.util.concurrent.Executor;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
@@ -31,6 +32,7 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldInvite;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
+import nl.gzmn.playerworlds.proxy.command.Messages;
 import nl.gzmn.playerworlds.proxy.menu.screens.BansScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.BrowseScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.ConfirmScreenBuilder;
@@ -56,6 +58,7 @@ public final class MenuViewService {
     private final PlayerNameRepository nameRepository;
     private final Supplier<NetworkPolicy> policySupplier;
     private final Executor dbExecutor;
+    private final Messages messages;
 
     public MenuViewService(
             PlayerWorldRepository worldRepository,
@@ -72,7 +75,28 @@ public final class MenuViewService {
                 banRepository,
                 nameRepository,
                 policySupplier,
-                Objects.requireNonNull(executors, "executors").db());
+                executors,
+                null);
+    }
+
+    public MenuViewService(
+            PlayerWorldRepository worldRepository,
+            MembershipRepository membershipRepository,
+            TransferRequestRepository transferRepository,
+            WorldBanRepository banRepository,
+            PlayerNameRepository nameRepository,
+            Supplier<NetworkPolicy> policySupplier,
+            PluginExecutors executors,
+            @Nullable Supplier<MessageCatalog> messageCatalog) {
+        this(
+                worldRepository,
+                membershipRepository,
+                transferRepository,
+                banRepository,
+                nameRepository,
+                policySupplier,
+                Objects.requireNonNull(executors, "executors").db(),
+                messageCatalog);
     }
 
     public MenuViewService(
@@ -83,6 +107,26 @@ public final class MenuViewService {
             PlayerNameRepository nameRepository,
             Supplier<NetworkPolicy> policySupplier,
             Executor dbExecutor) {
+        this(
+                worldRepository,
+                membershipRepository,
+                transferRepository,
+                banRepository,
+                nameRepository,
+                policySupplier,
+                dbExecutor,
+                null);
+    }
+
+    public MenuViewService(
+            PlayerWorldRepository worldRepository,
+            MembershipRepository membershipRepository,
+            TransferRequestRepository transferRepository,
+            WorldBanRepository banRepository,
+            PlayerNameRepository nameRepository,
+            Supplier<NetworkPolicy> policySupplier,
+            Executor dbExecutor,
+            @Nullable Supplier<MessageCatalog> messageCatalog) {
         this.worldRepository = Objects.requireNonNull(worldRepository, "worldRepository");
         this.membershipRepository = Objects.requireNonNull(membershipRepository, "membershipRepository");
         this.transferRepository = Objects.requireNonNull(transferRepository, "transferRepository");
@@ -90,6 +134,12 @@ public final class MenuViewService {
         this.nameRepository = Objects.requireNonNull(nameRepository, "nameRepository");
         this.policySupplier = Objects.requireNonNull(policySupplier, "policySupplier");
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor");
+        this.messages = new Messages(messageCatalog);
+    }
+
+    /** Renders admin-configurable message/GUI text (NFR-5). */
+    public Messages messages() {
+        return messages;
     }
 
     /**
@@ -122,7 +172,8 @@ public final class MenuViewService {
                                 permissionCheck,
                                 pol.storageQuotaTiers(),
                                 pol.defaultStorageLimitBytes());
-                        return MainScreenBuilder.build(correlationId, owned, pol.maxWorldsPerPlayer(), invites, quota);
+                        return MainScreenBuilder.build(
+                                messages, correlationId, owned, pol.maxWorldsPerPlayer(), invites, quota);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -151,7 +202,7 @@ public final class MenuViewService {
                         Map<WorldId, Role> roles = sharedRoles(playerUuid, shared);
                         NetworkPolicy pol = policySupplier.get();
                         return MyWorldsScreenBuilder.build(
-                                correlationId, owned, shared, roles, page, pol.maxWorldsPerPlayer());
+                                messages, correlationId, owned, shared, roles, page, pol.maxWorldsPerPlayer());
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -208,7 +259,7 @@ public final class MenuViewService {
                         }
                         PlayerWorld world = worldOpt.get();
                         boolean manage = viewerUuid == null || world.ownerUuid().equals(viewerUuid);
-                        return WorldDetailScreenBuilder.build(correlationId, world, manage);
+                        return WorldDetailScreenBuilder.build(messages, correlationId, world, manage);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -231,7 +282,7 @@ public final class MenuViewService {
                         }
                         PlayerWorld world = worldOpt.get();
                         WorldSettings settings = WorldSettings.fromJson(world.settingsJson());
-                        return SettingsScreenBuilder.build(correlationId, world, settings);
+                        return SettingsScreenBuilder.build(messages, correlationId, world, settings);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -270,7 +321,7 @@ public final class MenuViewService {
                                         m.role(),
                                         m.joinedAt()))
                                 .toList();
-                        return MembersScreenBuilder.build(correlationId, worldOpt.get(), entries, page);
+                        return MembersScreenBuilder.build(messages, correlationId, worldOpt.get(), entries, page);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -305,7 +356,7 @@ public final class MenuViewService {
                                 permissionCheck,
                                 pol.storageQuotaTiers(),
                                 pol.defaultStorageLimitBytes());
-                        return StorageScreenBuilder.build(correlationId, quota, owned);
+                        return StorageScreenBuilder.build(messages, correlationId, quota, owned);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -373,7 +424,7 @@ public final class MenuViewService {
                                     req.worldId(), worldName, req.fromUuid(), senderName, req.expiresAt(), true));
                         }
 
-                        return InvitesScreenBuilder.build(correlationId, List.copyOf(entries), page);
+                        return InvitesScreenBuilder.build(messages, correlationId, List.copyOf(entries), page);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -411,7 +462,7 @@ public final class MenuViewService {
                                         b.reason(),
                                         b.bannedAt()))
                                 .toList();
-                        return BansScreenBuilder.build(correlationId, worldOpt.get(), entries, page);
+                        return BansScreenBuilder.build(messages, correlationId, worldOpt.get(), entries, page);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -448,7 +499,7 @@ public final class MenuViewService {
                                                 w.ownerUuid(), w.ownerUuid().toString()),
                                         w.description()))
                                 .toList();
-                        return BrowseScreenBuilder.build(correlationId, entries, page);
+                        return BrowseScreenBuilder.build(messages, correlationId, entries, page);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -461,6 +512,7 @@ public final class MenuViewService {
      */
     public RenderMenuPayload buildConfirmMenu(
             String title, String description, String confirmActionTag, String cancelActionTag, long correlationId) {
-        return ConfirmScreenBuilder.build(correlationId, title, description, confirmActionTag, cancelActionTag);
+        return ConfirmScreenBuilder.build(
+                messages, correlationId, title, description, confirmActionTag, cancelActionTag);
     }
 }

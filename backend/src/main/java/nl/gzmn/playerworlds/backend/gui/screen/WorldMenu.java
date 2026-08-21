@@ -1,15 +1,14 @@
 package nl.gzmn.playerworlds.backend.gui.screen;
 
 import java.util.Objects;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
-import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import nl.gzmn.playerworlds.backend.gui.Messages;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -73,10 +72,16 @@ public final class WorldMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        Messages messages = menuService.messages();
         boolean manage = manageable(player);
         MenuHolder holder = new MenuHolder(this);
         Inventory inventory = Bukkit.createInventory(
-                holder, 27, Component.text((manage ? "Manage: " : "World: ") + world.name(), NamedTextColor.DARK_GRAY));
+                holder,
+                27,
+                messages.render(
+                        "messages.gui.world-menu.title",
+                        Placeholders.raw("prefix", manage ? "Manage" : "World"),
+                        Placeholders.text("world", world.name())));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 27; i++) {
@@ -88,14 +93,16 @@ public final class WorldMenu implements GuiScreen {
                 SLOT_INFO,
                 ItemUtil.create(
                         Material.BEACON,
-                        Component.text(world.name(), NamedTextColor.GOLD, TextDecoration.BOLD),
-                        Component.text("State: " + world.state().name(), NamedTextColor.GRAY),
-                        Component.text("Visibility: " + world.visibility().name(), NamedTextColor.GRAY),
-                        Component.text("Border: ±" + world.borderRadius() + "m", NamedTextColor.GRAY),
-                        Component.text("Seed: " + world.seed(), NamedTextColor.DARK_GRAY),
-                        Component.text(
-                                "Storage: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
-                                NamedTextColor.GRAY)));
+                        messages.render(
+                                "messages.gui.world-menu.item.info.name", Placeholders.text("world", world.name())),
+                        messages.renderLore(
+                                "messages.gui.world-menu.item.info.lore",
+                                Placeholders.raw("state", world.state().name()),
+                                Placeholders.raw(
+                                        "visibility", world.visibility().name()),
+                                Placeholders.count("radius", world.borderRadius()),
+                                Placeholders.count("seed", world.seed()),
+                                Placeholders.bytes("size", world.storageBytes()))));
         // Slot 10: Join or Restore
         if (world.state() == WorldState.ARCHIVED) {
             inventory.setItem(
@@ -103,28 +110,23 @@ public final class WorldMenu implements GuiScreen {
                     manage
                             ? ItemUtil.create(
                                     Material.ANVIL,
-                                    Component.text("Restore World", NamedTextColor.GREEN, TextDecoration.BOLD),
-                                    Component.text("Restore this world from cold storage", NamedTextColor.GRAY),
-                                    Component.empty(),
-                                    Component.text("▶ Click to restore", NamedTextColor.YELLOW))
+                                    messages.render("messages.gui.world-menu.item.restore.name"),
+                                    messages.renderLore("messages.gui.world-menu.item.restore.lore"))
                             : ItemUtil.create(
                                     Material.ANVIL,
-                                    Component.text("Archived", NamedTextColor.GRAY, TextDecoration.BOLD),
-                                    Component.text(
-                                            "Only its owner can bring this world back", NamedTextColor.DARK_GRAY)));
+                                    messages.render("messages.gui.world-menu.item.archived-locked.name"),
+                                    messages.renderLore("messages.gui.world-menu.item.archived-locked.lore")));
         } else {
             inventory.setItem(
                     SLOT_JOIN,
                     ItemUtil.create(
                             Material.ENDER_PEARL,
-                            Component.text("Join World", NamedTextColor.GREEN, TextDecoration.BOLD),
-                            Component.text("Teleport directly to this world", NamedTextColor.GRAY),
-                            Component.empty(),
-                            Component.text("▶ Click to join", NamedTextColor.YELLOW)));
+                            messages.render("messages.gui.world-menu.item.join.name"),
+                            messages.renderLore("messages.gui.world-menu.item.join.lore")));
         }
 
         if (manage) {
-            renderManagementControls(inventory);
+            renderManagementControls(inventory, messages);
         }
 
         // Slot 18: Back
@@ -132,73 +134,63 @@ public final class WorldMenu implements GuiScreen {
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to My Worlds", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.world-menu.item.back.name"),
+                        messages.renderLore("messages.gui.world-menu.item.back.lore")));
 
         return inventory;
     }
 
     /** The half of the screen only {@code owner_uuid} may act on (FR-31a). */
-    private void renderManagementControls(Inventory inventory) {
+    private void renderManagementControls(Inventory inventory, Messages messages) {
         // Slot 11: Members
         inventory.setItem(
                 SLOT_MEMBERS,
                 ItemUtil.create(
                         Material.PLAYER_HEAD,
-                        Component.text("Members & Permissions", NamedTextColor.AQUA, TextDecoration.BOLD),
-                        Component.text("View members, invite players, or promote builders", NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to manage members", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.world-menu.item.members.name"),
+                        messages.renderLore("messages.gui.world-menu.item.members.lore")));
 
         // Slot 12: Settings
         inventory.setItem(
                 SLOT_SETTINGS,
                 ItemUtil.create(
                         Material.COMPARATOR,
-                        Component.text("World Settings", NamedTextColor.YELLOW, TextDecoration.BOLD),
-                        Component.text("Configure PvP, container access, and mob griefing", NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to configure", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.world-menu.item.settings.name"),
+                        messages.renderLore("messages.gui.world-menu.item.settings.lore")));
 
         // Slot 13: Visibility
+        String visibilityDescription = world.visibility() == Visibility.PUBLIC
+                ? "Public (anyone can browse and join)"
+                : "Private (invite-only)";
         inventory.setItem(
                 SLOT_VISIBILITY,
                 ItemUtil.create(
                         Material.ENDER_EYE,
-                        Component.text(
-                                "Visibility: " + world.visibility().name(),
-                                NamedTextColor.LIGHT_PURPLE,
-                                TextDecoration.BOLD),
-                        Component.text(
-                                "Current: "
-                                        + (world.visibility() == Visibility.PUBLIC
-                                                ? "Public (anyone can browse and join)"
-                                                : "Private (invite-only)"),
-                                NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to toggle Public / Private", NamedTextColor.YELLOW)));
+                        messages.render(
+                                "messages.gui.world-menu.item.visibility.name",
+                                Placeholders.raw(
+                                        "visibility", world.visibility().name())),
+                        messages.renderLore(
+                                "messages.gui.world-menu.item.visibility.lore",
+                                Placeholders.raw("description", visibilityDescription))));
 
         // Slot 14: Bans
         inventory.setItem(
                 SLOT_BANS,
                 ItemUtil.create(
                         Material.IRON_BARS,
-                        Component.text("Banned Players", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("View and revoke bans from this world", NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to manage bans", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.world-menu.item.bans.name"),
+                        messages.renderLore("messages.gui.world-menu.item.bans.lore")));
 
         // Slot 15: Storage
         inventory.setItem(
                 SLOT_STORAGE,
                 ItemUtil.create(
                         Material.CHEST,
-                        Component.text("Storage Usage", NamedTextColor.BLUE, TextDecoration.BOLD),
-                        Component.text(
-                                "World size: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
-                                NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to view storage breakdown", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.world-menu.item.storage.name"),
+                        messages.renderLore(
+                                "messages.gui.world-menu.item.storage.lore",
+                                Placeholders.bytes("size", world.storageBytes()))));
 
         // Slot 16: Archive or Permanently Delete
         if (world.state() == WorldState.ARCHIVED) {
@@ -206,21 +198,15 @@ public final class WorldMenu implements GuiScreen {
                     SLOT_ARCHIVE,
                     ItemUtil.create(
                             Material.LAVA_BUCKET,
-                            Component.text("Permanently Delete World", NamedTextColor.DARK_RED, TextDecoration.BOLD),
-                            Component.text("⚠ Irreversible Action", NamedTextColor.RED, TextDecoration.BOLD),
-                            Component.text("Permanently destroys all chunks and backup archives.", NamedTextColor.GRAY),
-                            Component.empty(),
-                            Component.text(
-                                    "▶ Click to delete permanently (requires confirm)", NamedTextColor.DARK_RED)));
+                            messages.render("messages.gui.world-menu.item.delete-permanently.name"),
+                            messages.renderLore("messages.gui.world-menu.item.delete-permanently.lore")));
         } else {
             inventory.setItem(
                     SLOT_ARCHIVE,
                     ItemUtil.create(
                             Material.TNT,
-                            Component.text("Archive World", NamedTextColor.DARK_RED, TextDecoration.BOLD),
-                            Component.text("Pack this world into cold storage and free a slot", NamedTextColor.GRAY),
-                            Component.empty(),
-                            Component.text("▶ Click to archive (requires confirm)", NamedTextColor.RED)));
+                            messages.render("messages.gui.world-menu.item.archive.name"),
+                            messages.renderLore("messages.gui.world-menu.item.archive.lore")));
         }
     }
 
@@ -248,8 +234,8 @@ public final class WorldMenu implements GuiScreen {
                                 .sendIntent(player, new MenuIntent.RestoreWorld(world.name()))
                                 .whenComplete((result, ex) -> {
                                     if (result instanceof MenuResult.Failed failed) {
-                                        player.sendMessage(Component.text(
-                                                "Could not restore world: " + failed.message(), NamedTextColor.RED));
+                                        player.sendMessage(
+                                                GsonComponentSerializer.gson().deserialize(failed.message()));
                                     }
                                     var _ = menuService.openWorldMenu(player, world.id());
                                 });
@@ -260,8 +246,8 @@ public final class WorldMenu implements GuiScreen {
                                 .sendIntent(player, new MenuIntent.JoinWorld(world.id()))
                                 .whenComplete((result, ex) -> {
                                     if (result instanceof MenuResult.Failed failed) {
-                                        player.sendMessage(Component.text(
-                                                "Could not join world: " + failed.message(), NamedTextColor.RED));
+                                        player.sendMessage(
+                                                GsonComponentSerializer.gson().deserialize(failed.message()));
                                         var _ = menuService.openWorldMenu(player, world.id());
                                     }
                                 });
@@ -283,8 +269,8 @@ public final class WorldMenu implements GuiScreen {
                                 if (result instanceof MenuResult.Ok) {
                                     var _ = menuService.openWorldMenu(player, world.id());
                                 } else if (result instanceof MenuResult.Failed failed) {
-                                    player.sendMessage(Component.text(
-                                            "Could not change visibility: " + failed.message(), NamedTextColor.RED));
+                                    player.sendMessage(
+                                            GsonComponentSerializer.gson().deserialize(failed.message()));
                                     var _ = menuService.openWorldMenu(player, world.id());
                                 }
                             });
@@ -297,29 +283,28 @@ public final class WorldMenu implements GuiScreen {
                 var _ = menuService.openStorageMenu(player);
             }
             case SLOT_ARCHIVE -> {
+                Messages messages = menuService.messages();
                 if (world.state() == WorldState.ARCHIVED) {
                     menuService.openConfirmMenu(
                             player,
-                            Component.text(
-                                    "Permanently Delete '" + world.name() + "'?",
-                                    NamedTextColor.DARK_RED,
-                                    TextDecoration.BOLD),
-                            Component.text(
-                                    "Permanently destroy '" + world.name() + "'? All archives will be lost forever.",
-                                    NamedTextColor.RED),
+                            messages.render(
+                                    "messages.gui.world-menu.confirm.delete.title",
+                                    Placeholders.text("world", world.name())),
+                            messages.render(
+                                    "messages.gui.world-menu.confirm.delete.body",
+                                    Placeholders.text("world", world.name())),
                             () -> {
                                 if (menuChannel != null) {
                                     var _ = menuChannel
                                             .sendIntent(player, new MenuIntent.HardDeleteWorld(world.id()))
                                             .whenComplete((result, ex) -> {
                                                 if (result instanceof MenuResult.Ok ok) {
-                                                    player.sendMessage(
-                                                            Component.text(ok.message(), NamedTextColor.GREEN));
+                                                    player.sendMessage(GsonComponentSerializer.gson()
+                                                            .deserialize(ok.message()));
                                                     var _ = menuService.openMyWorldsMenu(player);
                                                 } else if (result instanceof MenuResult.Failed failed) {
-                                                    player.sendMessage(Component.text(
-                                                            "Could not delete world: " + failed.message(),
-                                                            NamedTextColor.RED));
+                                                    player.sendMessage(GsonComponentSerializer.gson()
+                                                            .deserialize(failed.message()));
                                                     var _ = menuService.openWorldMenu(player, world.id());
                                                 }
                                             });
@@ -331,11 +316,10 @@ public final class WorldMenu implements GuiScreen {
                 } else {
                     menuService.openConfirmMenu(
                             player,
-                            Component.text(
-                                    "Archive '" + world.name() + "'?", NamedTextColor.DARK_RED, TextDecoration.BOLD),
-                            Component.text(
-                                    "This packs the world to cold storage. You can restore it later.",
-                                    NamedTextColor.GRAY),
+                            messages.render(
+                                    "messages.gui.world-menu.confirm.archive.title",
+                                    Placeholders.text("world", world.name())),
+                            messages.render("messages.gui.world-menu.confirm.archive.body"),
                             () -> {
                                 if (menuChannel != null) {
                                     var _ = menuChannel
@@ -344,9 +328,8 @@ public final class WorldMenu implements GuiScreen {
                                                 if (result instanceof MenuResult.Ok) {
                                                     var _ = menuService.openMyWorldsMenu(player);
                                                 } else if (result instanceof MenuResult.Failed failed) {
-                                                    player.sendMessage(Component.text(
-                                                            "Could not archive world: " + failed.message(),
-                                                            NamedTextColor.RED));
+                                                    player.sendMessage(GsonComponentSerializer.gson()
+                                                            .deserialize(failed.message()));
                                                     var _ = menuService.openWorldMenu(player, world.id());
                                                 }
                                             });

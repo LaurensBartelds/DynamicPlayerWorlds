@@ -4,9 +4,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.proxy.command.Messages;
+import nl.gzmn.playerworlds.proxy.command.Placeholders;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -21,6 +25,8 @@ public final class BrowseScreenBuilder {
     public static final int SLOT_PREVIOUS_PAGE = 45;
     public static final int SLOT_BACK = 48;
     public static final int SLOT_NEXT_PAGE = 53;
+
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
     public record PublicWorldEntry(
             WorldId worldId,
@@ -38,11 +44,16 @@ public final class BrowseScreenBuilder {
 
     private BrowseScreenBuilder() {}
 
-    public static RenderMenuPayload build(long correlationId, List<PublicWorldEntry> worlds, int page) {
+    public static RenderMenuPayload build(
+            Messages messages, long correlationId, List<PublicWorldEntry> worlds, int page) {
+        Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(worlds, "worlds");
         int validPage = Math.max(0, page);
         int totalPages = Math.max(1, (int) Math.ceil((double) worlds.size() / PAGE_SIZE));
-        String title = "§8Public Worlds (Page " + (validPage + 1) + "/" + totalPages + ")";
+        String title = legacy(messages.render(
+                "messages.gui.browse-menu.title",
+                Placeholders.count("page", validPage + 1),
+                Placeholders.count("pages", totalPages)));
 
         List<MenuItemDescriptor> items = new ArrayList<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -56,8 +67,8 @@ public final class BrowseScreenBuilder {
                             22,
                             "COMPASS",
                             1,
-                            "§e§lNo Public Worlds",
-                            List.of("§7There are no public worlds currently available."),
+                            legacy(messages.render("messages.gui.browse-menu.item.empty.name")),
+                            legacyLore(messages.renderLore("messages.gui.browse-menu.item.empty.lore")),
                             null,
                             ""));
         } else {
@@ -67,7 +78,7 @@ public final class BrowseScreenBuilder {
             for (int i = startIndex; i < endIndex; i++) {
                 int slot = i - startIndex;
                 PublicWorldEntry entry = worlds.get(i);
-                items.set(slot, renderWorldItem(slot, entry));
+                items.set(slot, renderWorldItem(messages, slot, entry));
             }
         }
 
@@ -83,7 +94,7 @@ public final class BrowseScreenBuilder {
                             SLOT_PREVIOUS_PAGE,
                             "ARROW",
                             1,
-                            "§e§l◀ Previous Page",
+                            legacy(messages.render("messages.gui.browse-menu.item.previous-page.name")),
                             List.of(),
                             null,
                             "NAV:BROWSE:" + (validPage - 1)));
@@ -95,8 +106,8 @@ public final class BrowseScreenBuilder {
                         SLOT_BACK,
                         "OAK_DOOR",
                         1,
-                        "§c§lBack to Main Menu",
-                        List.of("§8▶ Click to return"),
+                        legacy(messages.render("messages.gui.browse-menu.item.back.name")),
+                        legacyLore(messages.renderLore("messages.gui.browse-menu.item.back.lore")),
                         null,
                         "NAV:MAIN"));
 
@@ -107,7 +118,7 @@ public final class BrowseScreenBuilder {
                             SLOT_NEXT_PAGE,
                             "ARROW",
                             1,
-                            "§e§lNext Page ▶",
+                            legacy(messages.render("messages.gui.browse-menu.item.next-page.name")),
                             List.of(),
                             null,
                             "NAV:BROWSE:" + (validPage + 1)));
@@ -116,22 +127,37 @@ public final class BrowseScreenBuilder {
         return new RenderMenuPayload(correlationId, SCREEN_TYPE, title, SIZE, items);
     }
 
-    private static MenuItemDescriptor renderWorldItem(int slot, PublicWorldEntry entry) {
-        List<String> lore = new ArrayList<>();
-        lore.add("§eOwner: " + entry.ownerName());
+    private static MenuItemDescriptor renderWorldItem(Messages messages, int slot, PublicWorldEntry entry) {
+        Component name = messages.render(
+                "messages.gui.browse-menu.item.world-entry.name", Placeholders.text("world", entry.worldName()));
+
+        List<Component> lore;
         if (entry.description() != null && !entry.description().isBlank()) {
-            lore.add("§7" + entry.description());
+            lore = messages.renderLore(
+                    "messages.gui.browse-menu.item.world-entry.lore",
+                    Placeholders.text("owner", entry.ownerName()),
+                    Placeholders.text("description", entry.description()));
+        } else {
+            lore = messages.renderLore(
+                    "messages.gui.browse-menu.item.world-entry.lore-no-description",
+                    Placeholders.text("owner", entry.ownerName()));
         }
-        lore.add("");
-        lore.add("§a▶ Click to Join World");
 
         return new MenuItemDescriptor(
                 slot,
                 "GRASS_BLOCK",
                 1,
-                "§b§l" + entry.worldName(),
-                lore,
+                legacy(name),
+                legacyLore(lore),
                 null,
                 "ACTION:JOIN:" + entry.worldId().value());
+    }
+
+    private static String legacy(Component component) {
+        return LEGACY.serialize(component);
+    }
+
+    private static List<String> legacyLore(List<Component> lines) {
+        return lines.stream().map(BrowseScreenBuilder::legacy).toList();
     }
 }

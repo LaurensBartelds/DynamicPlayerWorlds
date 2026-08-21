@@ -3,12 +3,14 @@ package nl.gzmn.playerworlds.backend.gui.screen;
 import java.util.Objects;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Messages;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -97,9 +99,12 @@ public final class SettingsMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        Messages messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
         Inventory inventory = Bukkit.createInventory(
-                holder, 54, Component.text("Settings: " + world.name(), NamedTextColor.DARK_GRAY));
+                holder,
+                54,
+                messages.render("messages.gui.settings-menu.title", Placeholders.text("world", world.name())));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 54; i++) {
@@ -110,152 +115,102 @@ public final class SettingsMenu implements GuiScreen {
                 SLOT_INFO,
                 ItemUtil.create(
                         Material.BEACON,
-                        Component.text("World Settings: " + world.name(), NamedTextColor.GOLD, TextDecoration.BOLD),
-                        Component.text("Configure gameplay & interaction rules", NamedTextColor.GRAY)));
+                        messages.render(
+                                "messages.gui.settings-menu.item.info.name", Placeholders.text("world", world.name())),
+                        messages.renderLore("messages.gui.settings-menu.item.info.lore")));
 
-        inventory.setItem(
-                SLOT_PVP,
-                toggleItem(
-                        Material.DIAMOND_SWORD, "PvP Combat", "Allows players to damage each other", settings.pvp()));
+        inventory.setItem(SLOT_PVP, toggleItem(messages, Material.DIAMOND_SWORD, "pvp", settings.pvp()));
         inventory.setItem(
                 SLOT_CONTAINERS,
                 toggleItem(
+                        messages,
                         Material.CHEST,
-                        "Visitor Containers",
-                        "Allows visitors to open chests & containers",
+                        "containers",
                         settings.visitorsMayOpenContainers(),
                         "Allowed",
                         "Restricted"));
         inventory.setItem(
                 SLOT_INTERACT,
                 toggleItem(
-                        Material.LEVER,
-                        "Visitor Interact",
-                        "Allows visitors to use doors, buttons & redstone",
-                        settings.visitorsMayInteract(),
-                        "Allowed",
-                        "Restricted"));
+                        messages, Material.LEVER, "interact", settings.visitorsMayInteract(), "Allowed", "Restricted"));
         inventory.setItem(
-                SLOT_MOB_GRIEFING,
-                toggleItem(
-                        Material.CREEPER_HEAD,
-                        "Mob Griefing",
-                        "Controls Creeper explosions and mob damage",
-                        settings.mobGriefing()));
+                SLOT_MOB_GRIEFING, toggleItem(messages, Material.CREEPER_HEAD, "mob-griefing", settings.mobGriefing()));
         inventory.setItem(
                 SLOT_KEEP_INVENTORY,
-                toggleItem(
-                        Material.TOTEM_OF_UNDYING,
-                        "Keep Inventory",
-                        "Players keep their items and XP on death",
-                        settings.keepInventory()));
+                toggleItem(messages, Material.TOTEM_OF_UNDYING, "keep-inventory", settings.keepInventory()));
         inventory.setItem(
-                SLOT_FALL_DAMAGE,
-                toggleItem(Material.FEATHER, "Fall Damage", "Whether players take fall damage", settings.fallDamage()));
+                SLOT_FALL_DAMAGE, toggleItem(messages, Material.FEATHER, "fall-damage", settings.fallDamage()));
         inventory.setItem(
-                SLOT_FIRE_DAMAGE,
-                toggleItem(
-                        Material.BLAZE_POWDER,
-                        "Fire Damage",
-                        "Whether players take fire damage",
-                        settings.fireDamage()));
+                SLOT_FIRE_DAMAGE, toggleItem(messages, Material.BLAZE_POWDER, "fire-damage", settings.fireDamage()));
         inventory.setItem(
                 SLOT_FREEZE_DAMAGE,
-                toggleItem(
-                        Material.POWDER_SNOW_BUCKET,
-                        "Freeze Damage",
-                        "Whether players take freeze damage",
-                        settings.freezeDamage()));
+                toggleItem(messages, Material.POWDER_SNOW_BUCKET, "freeze-damage", settings.freezeDamage()));
         inventory.setItem(
                 SLOT_DROWNING_DAMAGE,
-                toggleItem(
-                        Material.TRIDENT,
-                        "Drowning Damage",
-                        "Whether players take drowning damage",
-                        settings.drowningDamage()));
+                toggleItem(messages, Material.TRIDENT, "drowning-damage", settings.drowningDamage()));
         inventory.setItem(
-                SLOT_ADVANCE_TIME,
-                toggleItem(
-                        Material.CLOCK,
-                        "Daylight Cycle",
-                        "Whether the day/night cycle advances",
-                        settings.advanceTime()));
+                SLOT_ADVANCE_TIME, toggleItem(messages, Material.CLOCK, "daylight-cycle", settings.advanceTime()));
         inventory.setItem(
                 SLOT_ADVANCE_WEATHER,
-                toggleItem(
-                        Material.WATER_BUCKET,
-                        "Weather Cycle",
-                        "Whether the weather cycle advances",
-                        settings.advanceWeather()));
+                toggleItem(messages, Material.WATER_BUCKET, "weather-cycle", settings.advanceWeather()));
         inventory.setItem(
                 SLOT_SPAWN_PHANTOMS,
-                toggleItem(
-                        Material.PHANTOM_MEMBRANE,
-                        "Insomnia",
-                        "Whether phantoms can spawn from insomnia",
-                        settings.spawnPhantoms()));
+                toggleItem(messages, Material.PHANTOM_MEMBRANE, "insomnia", settings.spawnPhantoms()));
         inventory.setItem(
                 SLOT_IMMEDIATE_RESPAWN,
-                toggleItem(
-                        Material.RESPAWN_ANCHOR,
-                        "Immediate Respawn",
-                        "Whether players skip the death screen",
-                        settings.immediateRespawn()));
+                toggleItem(messages, Material.RESPAWN_ANCHOR, "immediate-respawn", settings.immediateRespawn()));
         inventory.setItem(
                 SLOT_NATURAL_REGENERATION,
                 toggleItem(
-                        Material.GOLDEN_APPLE,
-                        "Natural Regeneration",
-                        "Whether players regenerate health from hunger",
-                        settings.naturalHealthRegeneration()));
+                        messages, Material.GOLDEN_APPLE, "natural-regeneration", settings.naturalHealthRegeneration()));
 
         renderStepper(
+                messages,
                 inventory,
                 SLOT_SLEEP_PERCENTAGE_DOWN,
                 SLOT_SLEEP_PERCENTAGE_VALUE,
                 SLOT_SLEEP_PERCENTAGE_UP,
                 Material.RED_BED,
-                "Sleep Percentage",
-                "Percent of players who must sleep to skip the night",
+                "sleep-percentage",
                 settings.playersSleepingPercentage(),
                 "%",
                 SLEEP_STEP,
                 SLEEP_MIN,
                 SLEEP_MAX);
         renderStepper(
+                messages,
                 inventory,
                 SLOT_ENTITY_CRAMMING_DOWN,
                 SLOT_ENTITY_CRAMMING_VALUE,
                 SLOT_ENTITY_CRAMMING_UP,
                 Material.SLIME_BALL,
-                "Max Entity Cramming",
-                "Entities per block before cramming damage",
+                "entity-cramming",
                 settings.maxEntityCramming(),
                 "",
                 ENTITY_CRAMMING_STEP,
                 ENTITY_CRAMMING_MIN,
                 ENTITY_CRAMMING_MAX);
         renderStepper(
+                messages,
                 inventory,
                 SLOT_RESPAWN_RADIUS_DOWN,
                 SLOT_RESPAWN_RADIUS_VALUE,
                 SLOT_RESPAWN_RADIUS_UP,
                 Material.COMPASS,
-                "Respawn Radius",
-                "Radius around world spawn a respawn may land",
+                "respawn-radius",
                 settings.respawnRadius(),
                 "",
                 RESPAWN_RADIUS_STEP,
                 RESPAWN_RADIUS_MIN,
                 RESPAWN_RADIUS_MAX);
         renderStepper(
+                messages,
                 inventory,
                 SLOT_SNOW_HEIGHT_DOWN,
                 SLOT_SNOW_HEIGHT_VALUE,
                 SLOT_SNOW_HEIGHT_UP,
                 Material.SNOW,
-                "Max Snow Height",
-                "Max layers of snow that can accumulate",
+                "snow-height",
                 settings.maxSnowAccumulationHeight(),
                 "",
                 SNOW_HEIGHT_STEP,
@@ -266,65 +221,66 @@ public final class SettingsMenu implements GuiScreen {
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to World Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.settings-menu.item.back.name"),
+                        messages.renderLore("messages.gui.settings-menu.item.back.lore")));
 
         return inventory;
     }
 
-    private static ItemStack toggleItem(Material material, String label, String description, boolean enabled) {
-        return toggleItem(material, label, description, enabled, "Enabled", "Disabled");
+    private static ItemStack toggleItem(Messages messages, Material material, String settingId, boolean enabled) {
+        return toggleItem(messages, material, settingId, enabled, "Enabled", "Disabled");
     }
 
     private static ItemStack toggleItem(
-            Material material, String label, String description, boolean enabled, String onWord, String offWord) {
+            Messages messages, Material material, String settingId, boolean enabled, String onWord, String offWord) {
+        Component name = messages.render(
+                        "messages.gui.settings-menu.item." + settingId + ".name",
+                        Placeholders.raw("state", enabled ? onWord : offWord))
+                .colorIfAbsent(enabled ? NamedTextColor.GREEN : NamedTextColor.RED);
         return ItemUtil.create(
                 material,
-                Component.text(
-                        label + ": " + (enabled ? onWord : offWord),
-                        enabled ? NamedTextColor.GREEN : NamedTextColor.RED,
-                        TextDecoration.BOLD),
-                Component.text(description, NamedTextColor.GRAY),
+                name,
+                messages.render("messages.gui.settings-menu.item." + settingId + ".description"),
                 Component.empty(),
-                Component.text("▶ Click to toggle " + (enabled ? "OFF" : "ON"), NamedTextColor.YELLOW));
+                messages.render(
+                        "messages.gui.settings-menu.item.toggle.hint",
+                        Placeholders.raw("next-state", enabled ? "OFF" : "ON")));
     }
 
     private static void renderStepper(
+            Messages messages,
             Inventory inventory,
             int downSlot,
             int valueSlot,
             int upSlot,
             Material material,
-            String label,
-            String description,
+            String settingId,
             int currentValue,
             String unitSuffix,
             int step,
             int min,
             int max) {
-        inventory.setItem(downSlot, stepperArrow(currentValue > min, "◀ -" + step));
+        inventory.setItem(downSlot, stepperArrow(messages, currentValue > min, "◀ -" + step));
         inventory.setItem(
                 valueSlot,
                 ItemUtil.create(
                         material,
-                        Component.text(
-                                label + ": " + currentValue + unitSuffix, NamedTextColor.AQUA, TextDecoration.BOLD),
-                        Component.text(description, NamedTextColor.GRAY),
-                        Component.text("Adjusts by " + step + " per click", NamedTextColor.DARK_GRAY)));
-        inventory.setItem(upSlot, stepperArrow(currentValue < max, "+" + step + " ▶"));
+                        messages.render(
+                                "messages.gui.settings-menu.item." + settingId + ".name",
+                                Placeholders.raw("value", currentValue + unitSuffix)),
+                        messages.render("messages.gui.settings-menu.item." + settingId + ".description"),
+                        messages.render(
+                                "messages.gui.settings-menu.item.stepper.adjusts-hint",
+                                Placeholders.count("step", step))));
+        inventory.setItem(upSlot, stepperArrow(messages, currentValue < max, "+" + step + " ▶"));
     }
 
-    private static ItemStack stepperArrow(boolean enabled, String label) {
-        if (enabled) {
-            return ItemUtil.create(
-                    Material.ARROW,
-                    Component.text(label, NamedTextColor.YELLOW, TextDecoration.BOLD),
-                    Component.text("▶ Click to adjust", NamedTextColor.YELLOW));
-        }
+    private static ItemStack stepperArrow(Messages messages, boolean enabled, String label) {
+        String prefix = "messages.gui.settings-menu.item.stepper-arrow." + (enabled ? "enabled" : "disabled");
         return ItemUtil.create(
                 Material.ARROW,
-                Component.text(label, NamedTextColor.DARK_GRAY),
-                Component.text("Already at limit", NamedTextColor.DARK_GRAY));
+                messages.render(prefix + ".name", Placeholders.raw("label", label)),
+                messages.render(prefix + ".hint"));
     }
 
     @Override
@@ -441,8 +397,7 @@ public final class SettingsMenu implements GuiScreen {
                     .sendIntent(player, new MenuIntent.SetSetting(world.id(), settingKey, newValue))
                     .whenComplete((result, ex) -> {
                         if (result instanceof MenuResult.Failed failed) {
-                            player.sendMessage(Component.text(
-                                    "Could not update setting: " + failed.message(), NamedTextColor.RED));
+                            player.sendMessage(GsonComponentSerializer.gson().deserialize(failed.message()));
                         }
                         var _ = menuService.openSettingsMenu(player, world.id());
                     });

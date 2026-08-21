@@ -20,6 +20,7 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Messages;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -537,6 +538,7 @@ class CoreScreensTest {
         AtomicBoolean cancelled = new AtomicBoolean(false);
 
         ConfirmMenu menu = new ConfirmMenu(
+                new Messages(null),
                 Component.text("Action Title"),
                 Component.text("Action Description"),
                 () -> confirmed.set(true),

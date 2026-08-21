@@ -2,11 +2,10 @@ package nl.gzmn.playerworlds.backend.gui.screen;
 
 import java.util.Objects;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
+import nl.gzmn.playerworlds.backend.gui.Messages;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -33,12 +32,15 @@ public final class ConfirmMenu implements GuiScreen {
     public static final int SLOT_CONFIRM = 11;
     public static final int SLOT_CANCEL = 15;
 
+    private final Messages messages;
     private final Component title;
     private final Component description;
     private final Runnable onConfirm;
     private final Runnable onCancel;
 
-    public ConfirmMenu(Component title, Component description, Runnable onConfirm, Runnable onCancel) {
+    public ConfirmMenu(
+            Messages messages, Component title, Component description, Runnable onConfirm, Runnable onCancel) {
+        this.messages = Objects.requireNonNull(messages, "messages");
         this.title = Objects.requireNonNull(title, "title");
         this.description = Objects.requireNonNull(description, "description");
         this.onConfirm = Objects.requireNonNull(onConfirm, "onConfirm");
@@ -57,8 +59,7 @@ public final class ConfirmMenu implements GuiScreen {
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
         MenuHolder holder = new MenuHolder(this);
-        Inventory inventory =
-                Bukkit.createInventory(holder, 27, Component.text("Confirm Action", NamedTextColor.DARK_RED));
+        Inventory inventory = Bukkit.createInventory(holder, 27, messages.render("messages.gui.confirm-menu.title"));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 27; i++) {
@@ -73,16 +74,16 @@ public final class ConfirmMenu implements GuiScreen {
                 SLOT_CONFIRM,
                 ItemUtil.create(
                         Material.LIME_CONCRETE,
-                        Component.text("Confirm", NamedTextColor.GREEN, TextDecoration.BOLD),
-                        Component.text("Click to proceed with this action", NamedTextColor.GRAY)));
+                        messages.render("messages.gui.confirm-menu.item.confirm.name"),
+                        messages.renderLore("messages.gui.confirm-menu.item.confirm.lore")));
 
         // Slot 15: Cancel (Red)
         inventory.setItem(
                 SLOT_CANCEL,
                 ItemUtil.create(
                         Material.RED_CONCRETE,
-                        Component.text("Cancel", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("Click to return without making changes", NamedTextColor.GRAY)));
+                        messages.render("messages.gui.confirm-menu.item.cancel.name"),
+                        messages.renderLore("messages.gui.confirm-menu.item.cancel.lore")));
 
         return inventory;
     }

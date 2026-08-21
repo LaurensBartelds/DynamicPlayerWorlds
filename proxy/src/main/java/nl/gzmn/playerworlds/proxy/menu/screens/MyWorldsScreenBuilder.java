@@ -4,13 +4,19 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
+import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.command.Messages;
+import nl.gzmn.playerworlds.proxy.command.Placeholders;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -34,10 +40,13 @@ public final class MyWorldsScreenBuilder {
     public static final int SLOT_CREATE = 49;
     public static final int SLOT_NEXT_PAGE = 53;
 
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
+
     private MyWorldsScreenBuilder() {}
 
-    public static RenderMenuPayload build(long correlationId, List<PlayerWorld> worlds, int page, int maxWorlds) {
-        return build(correlationId, worlds, List.of(), Map.of(), page, maxWorlds);
+    public static RenderMenuPayload build(
+            Messages messages, long correlationId, List<PlayerWorld> worlds, int page, int maxWorlds) {
+        return build(messages, correlationId, worlds, List.of(), Map.of(), page, maxWorlds);
     }
 
     /**
@@ -49,12 +58,14 @@ public final class MyWorldsScreenBuilder {
      * @param sharedRoles the player's role in each shared world, for the lore line
      */
     public static RenderMenuPayload build(
+            Messages messages,
             long correlationId,
             List<PlayerWorld> owned,
             List<PlayerWorld> shared,
             Map<WorldId, Role> sharedRoles,
             int page,
             int maxWorlds) {
+        Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(owned, "owned");
         Objects.requireNonNull(shared, "shared");
         Objects.requireNonNull(sharedRoles, "sharedRoles");
@@ -65,7 +76,10 @@ public final class MyWorldsScreenBuilder {
 
         int validPage = Math.max(0, page);
         int totalPages = Math.max(1, (int) Math.ceil((double) all.size() / PAGE_SIZE));
-        String title = "§8My Worlds (Page " + (validPage + 1) + "/" + totalPages + ")";
+        String title = legacy(messages.render(
+                "messages.gui.my-worlds-menu.title",
+                Placeholders.count("page", validPage + 1),
+                Placeholders.count("pages", totalPages)));
 
         List<MenuItemDescriptor> items = new ArrayList<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -79,7 +93,10 @@ public final class MyWorldsScreenBuilder {
             int slot = i - startIndex;
             PlayerWorld world = all.get(i);
             boolean isOwned = i < owned.size();
-            items.set(slot, renderWorldItem(slot, world, isOwned, isOwned ? Role.OWNER : sharedRoles.get(world.id())));
+            items.set(
+                    slot,
+                    renderWorldItem(
+                            messages, slot, world, isOwned, isOwned ? Role.OWNER : sharedRoles.get(world.id())));
         }
 
         // Divider row
@@ -95,7 +112,7 @@ public final class MyWorldsScreenBuilder {
                             SLOT_PREVIOUS_PAGE,
                             "ARROW",
                             1,
-                            "§e§l◀ Previous Page",
+                            legacy(messages.render("messages.gui.my-worlds-menu.item.previous-page.name")),
                             List.of(),
                             null,
                             "NAV:MY_WORLDS:" + (validPage - 1)));
@@ -107,26 +124,30 @@ public final class MyWorldsScreenBuilder {
                         SLOT_BACK,
                         "OAK_DOOR",
                         1,
-                        "§c§lBack to Main Menu",
-                        List.of("§8▶ Click to return"),
+                        legacy(messages.render("messages.gui.my-worlds-menu.item.back.name")),
+                        legacyLore(messages.renderLore("messages.gui.my-worlds-menu.item.back.lore")),
                         null,
                         "NAV:MAIN"));
 
-        List<String> createLore = new ArrayList<>();
-        createLore.add("§7Owned: " + owned.size() + " / " + maxWorlds);
+        List<Component> createLore = new ArrayList<>();
+        createLore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.create.owned-line",
+                Placeholders.count("owned", owned.size()),
+                Placeholders.count("max", maxWorlds)));
         if (!shared.isEmpty()) {
-            createLore.add("§7Shared with you: " + shared.size());
+            createLore.add(messages.render(
+                    "messages.gui.my-worlds-menu.item.create.shared-line", Placeholders.count("count", shared.size())));
         }
-        createLore.add("");
-        createLore.add("§e▶ Click to create a world");
+        createLore.add(Component.empty());
+        createLore.add(messages.render("messages.gui.my-worlds-menu.item.create.hint"));
         items.set(
                 SLOT_CREATE,
                 new MenuItemDescriptor(
                         SLOT_CREATE,
                         "NETHER_STAR",
                         1,
-                        "§a§lCreate New World",
-                        List.copyOf(createLore),
+                        legacy(messages.render("messages.gui.my-worlds-menu.item.create.name")),
+                        legacyLore(createLore),
                         null,
                         "ACTION:CREATE"));
 
@@ -137,7 +158,7 @@ public final class MyWorldsScreenBuilder {
                             SLOT_NEXT_PAGE,
                             "ARROW",
                             1,
-                            "§e§lNext Page ▶",
+                            legacy(messages.render("messages.gui.my-worlds-menu.item.next-page.name")),
                             List.of(),
                             null,
                             "NAV:MY_WORLDS:" + (validPage + 1)));
@@ -146,7 +167,8 @@ public final class MyWorldsScreenBuilder {
         return new RenderMenuPayload(correlationId, SCREEN_TYPE, title, SIZE, items);
     }
 
-    private static MenuItemDescriptor renderWorldItem(int slot, PlayerWorld world, boolean owned, @Nullable Role role) {
+    private static MenuItemDescriptor renderWorldItem(
+            Messages messages, int slot, PlayerWorld world, boolean owned, @Nullable Role role) {
         String material =
                 switch (world.state()) {
                     case READY -> owned ? "GRASS_BLOCK" : "PLAYER_HEAD";
@@ -155,38 +177,66 @@ public final class MyWorldsScreenBuilder {
                     case ARCHIVING, RESTORING -> "CLOCK";
                 };
 
-        String stateColor =
-                switch (world.state()) {
-                    case READY -> "§a";
-                    case CREATING -> "§e";
-                    case ARCHIVED -> "§7";
-                    case ARCHIVING, RESTORING -> "§6";
-                };
+        Component nameValue = Component.text(
+                world.name(), owned ? NamedTextColor.AQUA : NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD);
+        Component name = messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.name", Placeholders.component("world", nameValue));
 
-        List<String> lore = new ArrayList<>();
-        lore.add(stateColor + "State: " + world.state().name());
+        List<Component> lore = new ArrayList<>();
+        Component stateValue = Component.text("State: " + world.state().name(), stateColor(world.state()));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.state-line",
+                Placeholders.component("state", stateValue)));
         if (!owned) {
-            lore.add("§d§oShared with you" + (role == null ? "" : " — " + role.name()));
+            lore.add(messages.render(
+                    "messages.gui.my-worlds-menu.item.world-entry.shared-note",
+                    Placeholders.raw("role-suffix", role == null ? "" : " — " + role.name())));
         }
-        lore.add("§7Visibility: " + world.visibility().name());
-        lore.add("§7Size: " + StorageQuotaResolver.formatBytes(world.storageBytes()));
-        lore.add("§8Border: ±" + world.borderRadius() + "m");
-        lore.add("");
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.visibility-line",
+                Placeholders.raw("visibility", world.visibility().name())));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.size-line",
+                Placeholders.bytes("size", world.storageBytes())));
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.border-line",
+                Placeholders.count("radius", world.borderRadius())));
+        lore.add(Component.empty());
+
         if (world.state() == WorldState.READY) {
-            lore.add("§a▶ Left-Click: Join World");
+            lore.add(messages.render("messages.gui.my-worlds-menu.item.world-entry.join-hint"));
         }
-        // The proxy is the authority on who may manage a world; a non-owner who
-        // opens the detail screen sees it read-only rather than being told the
-        // world does not exist, so the entry is offered either way.
-        lore.add(owned ? "§e▶ Right-Click: Manage World" : "§e▶ Right-Click: World Details");
+        // The proxy is the authority on who may manage a world (FR-31a); a
+        // non-owner opening the detail screen reads it rather than being told
+        // the world does not exist, so the entry is offered either way.
+        lore.add(messages.render(
+                "messages.gui.my-worlds-menu.item.world-entry.manage-hint",
+                Placeholders.raw("action", owned ? "Manage World" : "World Details")));
 
         return new MenuItemDescriptor(
                 slot,
                 material,
                 1,
-                (owned ? "§b§l" : "§d§l") + world.name(),
-                lore,
+                legacy(name),
+                legacyLore(lore),
                 null,
                 "NAV:WORLD:" + world.id().value());
+    }
+
+    private static TextColor stateColor(WorldState state) {
+        return switch (state) {
+            case READY -> NamedTextColor.GREEN;
+            case CREATING -> NamedTextColor.YELLOW;
+            case ARCHIVED -> NamedTextColor.GRAY;
+            case ARCHIVING, RESTORING -> NamedTextColor.GOLD;
+        };
+    }
+
+    private static String legacy(Component component) {
+        return LEGACY.serialize(component);
+    }
+
+    private static List<String> legacyLore(List<Component> lines) {
+        return lines.stream().map(MyWorldsScreenBuilder::legacy).toList();
     }
 }

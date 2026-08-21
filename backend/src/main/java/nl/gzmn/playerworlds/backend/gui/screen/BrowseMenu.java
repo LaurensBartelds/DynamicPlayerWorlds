@@ -4,13 +4,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.WorldId;
@@ -73,10 +73,16 @@ public final class BrowseMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        var messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
         int totalPages = Math.max(1, (int) Math.ceil((double) worlds.size() / PAGE_SIZE));
-        String titleText = "Public Worlds (Page " + (page + 1) + "/" + totalPages + ")";
-        Inventory inventory = Bukkit.createInventory(holder, 54, Component.text(titleText, NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(
+                holder,
+                54,
+                messages.render(
+                        "messages.gui.browse-menu.title",
+                        Placeholders.count("page", page + 1),
+                        Placeholders.count("pages", totalPages)));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 54; i++) {
@@ -88,8 +94,8 @@ public final class BrowseMenu implements GuiScreen {
                     22,
                     ItemUtil.create(
                             Material.COMPASS,
-                            Component.text("No Public Worlds", NamedTextColor.YELLOW, TextDecoration.BOLD),
-                            Component.text("There are no public worlds currently available.", NamedTextColor.GRAY)));
+                            messages.render("messages.gui.browse-menu.item.empty.name"),
+                            messages.renderLore("messages.gui.browse-menu.item.empty.lore")));
         } else {
             int startIndex = page * PAGE_SIZE;
             int endIndex = Math.min(worlds.size(), startIndex + PAGE_SIZE);
@@ -109,37 +115,41 @@ public final class BrowseMenu implements GuiScreen {
             inventory.setItem(
                     SLOT_PREVIOUS_PAGE,
                     ItemUtil.create(
-                            Material.ARROW,
-                            Component.text("◀ Previous Page", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                            Material.ARROW, messages.render("messages.gui.browse-menu.item.previous-page.name")));
         }
 
         inventory.setItem(
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to Main Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.browse-menu.item.back.name"),
+                        messages.renderLore("messages.gui.browse-menu.item.back.lore")));
 
         if ((page + 1) * PAGE_SIZE < worlds.size()) {
             inventory.setItem(
                     SLOT_NEXT_PAGE,
-                    ItemUtil.create(
-                            Material.ARROW, Component.text("Next Page ▶", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                    ItemUtil.create(Material.ARROW, messages.render("messages.gui.browse-menu.item.next-page.name")));
         }
 
         return inventory;
     }
 
     private org.bukkit.inventory.ItemStack renderWorldItem(PublicWorldEntry entry) {
-        Component name = Component.text(entry.worldName(), NamedTextColor.AQUA, TextDecoration.BOLD);
+        var messages = menuService.messages();
+        Component name = messages.render(
+                "messages.gui.browse-menu.item.world-entry.name", Placeholders.text("world", entry.worldName()));
 
-        List<Component> lore = new java.util.ArrayList<>();
-        lore.add(Component.text("Owner: " + entry.ownerName(), NamedTextColor.YELLOW));
+        List<Component> lore;
         if (entry.description() != null && !entry.description().isBlank()) {
-            lore.add(Component.text(entry.description(), NamedTextColor.GRAY));
+            lore = messages.renderLore(
+                    "messages.gui.browse-menu.item.world-entry.lore",
+                    Placeholders.text("owner", entry.ownerName()),
+                    Placeholders.text("description", entry.description()));
+        } else {
+            lore = messages.renderLore(
+                    "messages.gui.browse-menu.item.world-entry.lore-no-description",
+                    Placeholders.text("owner", entry.ownerName()));
         }
-        lore.add(Component.empty());
-        lore.add(Component.text("▶ Click to Join World", NamedTextColor.GREEN));
 
         return ItemUtil.create(Material.GRASS_BLOCK, name, lore);
     }
@@ -158,8 +168,8 @@ public final class BrowseMenu implements GuiScreen {
                             .sendIntent(player, new MenuIntent.JoinWorld(entry.worldId()))
                             .whenComplete((result, ex) -> {
                                 if (result instanceof MenuResult.Failed failed) {
-                                    player.sendMessage(Component.text(
-                                            "Could not join world: " + failed.message(), NamedTextColor.RED));
+                                    player.sendMessage(
+                                            GsonComponentSerializer.gson().deserialize(failed.message()));
                                     var _ = menuService.openBrowseMenu(player, page);
                                 }
                             });

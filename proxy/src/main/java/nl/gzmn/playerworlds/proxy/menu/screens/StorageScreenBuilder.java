@@ -4,12 +4,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.command.Messages;
+import nl.gzmn.playerworlds.proxy.command.Placeholders;
 
 /**
  * Builds the storage usage screen payload displaying quota limit, current usage,
@@ -25,12 +29,16 @@ public final class StorageScreenBuilder {
     public static final int WORLDS_END_SLOT = 26;
     public static final int SLOT_BACK = 31;
 
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
+
     private StorageScreenBuilder() {}
 
-    public static RenderMenuPayload build(long correlationId, StorageQuota quota, List<PlayerWorld> ownedWorlds) {
+    public static RenderMenuPayload build(
+            Messages messages, long correlationId, StorageQuota quota, List<PlayerWorld> ownedWorlds) {
+        Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(quota, "quota");
         Objects.requireNonNull(ownedWorlds, "ownedWorlds");
-        String title = "§8Storage Breakdown";
+        String title = legacy(messages.render("messages.gui.storage-menu.title"));
 
         List<MenuItemDescriptor> items = new ArrayList<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -44,18 +52,21 @@ public final class StorageScreenBuilder {
                         SLOT_OVERVIEW,
                         "ENDER_CHEST",
                         1,
-                        "§6§lStorage Allowance",
-                        List.of(
-                                "§7Used: " + StorageQuotaResolver.formatBytes(quota.usedBytes()),
-                                "§7Limit: "
-                                        + (quota.unlimited()
+                        legacy(messages.render("messages.gui.storage-menu.item.overview.name")),
+                        legacyLore(messages.renderLore(
+                                "messages.gui.storage-menu.item.overview.lore",
+                                Placeholders.bytes("used", quota.usedBytes()),
+                                Placeholders.raw(
+                                        "limit",
+                                        quota.unlimited()
                                                 ? "Unlimited"
                                                 : StorageQuotaResolver.formatBytes(quota.limitBytes())),
-                                "§bUsage: "
-                                        + (quota.unlimited()
+                                Placeholders.raw(
+                                        "usage",
+                                        quota.unlimited()
                                                 ? "Unlimited"
                                                 : String.format(Locale.ROOT, "%.1f%%", quota.percentage())),
-                                "§3" + renderProgressBar(quota.percentage())),
+                                Placeholders.raw("bar", renderProgressBar(quota.percentage())))),
                         null,
                         ""));
 
@@ -71,12 +82,13 @@ public final class StorageScreenBuilder {
                             slot,
                             mat,
                             1,
-                            "§e§l" + world.name(),
-                            List.of(
-                                    "§7Size: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
-                                    "§8State: " + world.state().name(),
-                                    "",
-                                    "§e▶ Click to manage"),
+                            legacy(messages.render(
+                                    "messages.gui.storage-menu.item.world-entry.name",
+                                    Placeholders.text("world", world.name()))),
+                            legacyLore(messages.renderLore(
+                                    "messages.gui.storage-menu.item.world-entry.lore",
+                                    Placeholders.bytes("size", world.storageBytes()),
+                                    Placeholders.raw("state", world.state().name()))),
                             null,
                             "NAV:WORLD:" + world.id().value()));
         }
@@ -88,8 +100,8 @@ public final class StorageScreenBuilder {
                         SLOT_BACK,
                         "OAK_DOOR",
                         1,
-                        "§c§lBack to Main Menu",
-                        List.of("§8▶ Click to return"),
+                        legacy(messages.render("messages.gui.storage-menu.item.back.name")),
+                        legacyLore(messages.renderLore("messages.gui.storage-menu.item.back.lore")),
                         null,
                         "NAV:MAIN"));
 
@@ -103,5 +115,13 @@ public final class StorageScreenBuilder {
             bar.append(i < filled ? '|' : '.');
         }
         return bar.append(']').toString();
+    }
+
+    private static String legacy(Component component) {
+        return LEGACY.serialize(component);
+    }
+
+    private static List<String> legacyLore(List<Component> lines) {
+        return lines.stream().map(StorageScreenBuilder::legacy).toList();
     }
 }

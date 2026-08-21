@@ -645,7 +645,7 @@ class WorldActionsTest {
         assertThat(messagesByPlayer.get(owner))
                 .anySatisfy(comp -> assertThat(
                                 PlainTextComponentSerializer.plainText().serialize(comp))
-                        .contains("Settings for 'myworld':"));
+                        .contains("Settings: myworld"));
     }
 
     @Test

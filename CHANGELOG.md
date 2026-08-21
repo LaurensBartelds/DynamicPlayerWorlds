@@ -178,6 +178,26 @@ the jar filename (`+mc<version>`), not part of the project version.
   wrong.
 - The node heartbeat reports TPS, which MN-15 excludes on and which was being
   published as NULL.
+- Admin-configurable, MiniMessage-formatted player-facing text (NFR-5).
+  `core.config.messages` declares every message/GUI-text key with its default
+  template, grouped one small file per command area or GUI screen;
+  `MessageCatalog` (mirroring `NetworkPolicy`'s existing `network_setting`
+  pattern) overlays admin overrides read through the same `NetworkSettings`
+  cache and `INVALIDATE_CACHE` propagation as network policy. Backend and
+  proxy each carry a small `Messages`/`Placeholders` MiniMessage-rendering
+  pair — `:core` stays free of Adventure classes, since it is shaded into
+  both plugins. Every hardcoded message in `WorldActions`/`WorldCommand`, all
+  ten backend GUI screens, and all ten proxy-rendered lobby-GUI screen
+  builders were migrated onto the catalog; a template that fails to parse
+  falls back to its coded default rather than breaking the surface it
+  renders into. New `/world admin message list|get|set|reset <key>`
+  subcommand, gated on `gzmn.worlds.admin`: `set` validates a candidate
+  MiniMessage template against the key's own declared placeholders before
+  ever writing it, so a typo is caught with the admin still at the keyboard.
+  The GUI-triggered action-result wire (proxy → backend over the menu
+  channel) now carries a serialized `Component` instead of plain text, so a
+  GUI-driven success/failure message keeps its styling instead of being
+  re-wrapped in a hardcoded backend prefix.
 
 ### Changed
 

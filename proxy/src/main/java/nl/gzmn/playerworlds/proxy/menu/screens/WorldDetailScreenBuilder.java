@@ -3,12 +3,15 @@ package nl.gzmn.playerworlds.proxy.menu.screens;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.command.Messages;
+import nl.gzmn.playerworlds.proxy.command.Placeholders;
 
 /**
  * Builds the management screen payload for a single world, allowing the owner to join/restore,
@@ -37,11 +40,13 @@ public final class WorldDetailScreenBuilder {
     public static final int SLOT_ARCHIVE = 16;
     public static final int SLOT_BACK = 18;
 
+    private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
+
     private WorldDetailScreenBuilder() {}
 
     /** The owner's view, with every control. */
-    public static RenderMenuPayload build(long correlationId, PlayerWorld world) {
-        return build(correlationId, world, true);
+    public static RenderMenuPayload build(Messages messages, long correlationId, PlayerWorld world) {
+        return build(messages, correlationId, world, true);
     }
 
     /**
@@ -50,9 +55,13 @@ public final class WorldDetailScreenBuilder {
      * @param manage whether the viewer is the world's owner (FR-31a). False draws
      *     the same screen without the controls only an owner may use.
      */
-    public static RenderMenuPayload build(long correlationId, PlayerWorld world, boolean manage) {
+    public static RenderMenuPayload build(Messages messages, long correlationId, PlayerWorld world, boolean manage) {
+        Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(world, "world");
-        String title = (manage ? "§8Manage: " : "§8World: ") + world.name();
+        String title = legacy(messages.render(
+                "messages.gui.world-menu.title",
+                Placeholders.raw("prefix", manage ? "Manage" : "World"),
+                Placeholders.text("world", world.name())));
 
         List<MenuItemDescriptor> items = new ArrayList<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -66,13 +75,16 @@ public final class WorldDetailScreenBuilder {
                         SLOT_INFO,
                         "BEACON",
                         1,
-                        "§6§l" + world.name(),
-                        List.of(
-                                "§7State: " + world.state().name(),
-                                "§7Visibility: " + world.visibility().name(),
-                                "§7Border: ±" + world.borderRadius() + "m",
-                                "§8Seed: " + world.seed(),
-                                "§7Storage: " + StorageQuotaResolver.formatBytes(world.storageBytes())),
+                        legacy(messages.render(
+                                "messages.gui.world-menu.item.info.name", Placeholders.text("world", world.name()))),
+                        legacyLore(messages.renderLore(
+                                "messages.gui.world-menu.item.info.lore",
+                                Placeholders.raw("state", world.state().name()),
+                                Placeholders.raw(
+                                        "visibility", world.visibility().name()),
+                                Placeholders.count("radius", world.borderRadius()),
+                                Placeholders.count("seed", world.seed()),
+                                Placeholders.bytes("size", world.storageBytes()))),
                         null,
                         ""));
 
@@ -85,16 +97,17 @@ public final class WorldDetailScreenBuilder {
                                     SLOT_JOIN,
                                     "ANVIL",
                                     1,
-                                    "§a§lRestore World",
-                                    List.of("§7Restore this world from cold storage", "", "§e▶ Click to restore"),
+                                    legacy(messages.render("messages.gui.world-menu.item.restore.name")),
+                                    legacyLore(messages.renderLore("messages.gui.world-menu.item.restore.lore")),
                                     null,
                                     "ACTION:RESTORE:" + world.name())
                             : new MenuItemDescriptor(
                                     SLOT_JOIN,
                                     "ANVIL",
                                     1,
-                                    "§7§lArchived",
-                                    List.of("§8Only its owner can bring this world back"),
+                                    legacy(messages.render("messages.gui.world-menu.item.archived-locked.name")),
+                                    legacyLore(
+                                            messages.renderLore("messages.gui.world-menu.item.archived-locked.lore")),
                                     null,
                                     ""));
         } else {
@@ -104,14 +117,14 @@ public final class WorldDetailScreenBuilder {
                             SLOT_JOIN,
                             "ENDER_PEARL",
                             1,
-                            "§a§lJoin World",
-                            List.of("§7Teleport directly to this world", "", "§e▶ Click to join"),
+                            legacy(messages.render("messages.gui.world-menu.item.join.name")),
+                            legacyLore(messages.renderLore("messages.gui.world-menu.item.join.lore")),
                             null,
                             "ACTION:JOIN:" + world.id().value()));
         }
 
         if (manage) {
-            addManagementControls(items, world);
+            addManagementControls(messages, items, world);
         }
 
         // Slot 18: Back
@@ -121,8 +134,8 @@ public final class WorldDetailScreenBuilder {
                         SLOT_BACK,
                         "OAK_DOOR",
                         1,
-                        "§c§lBack to My Worlds",
-                        List.of("§8▶ Click to return"),
+                        legacy(messages.render("messages.gui.world-menu.item.back.name")),
+                        legacyLore(messages.renderLore("messages.gui.world-menu.item.back.lore")),
                         null,
                         "NAV:MY_WORLDS"));
 
@@ -130,7 +143,7 @@ public final class WorldDetailScreenBuilder {
     }
 
     /** The half of the screen only {@code owner_uuid} may act on (FR-31a). */
-    private static void addManagementControls(List<MenuItemDescriptor> items, PlayerWorld world) {
+    private static void addManagementControls(Messages messages, List<MenuItemDescriptor> items, PlayerWorld world) {
         // Slot 11: Members
         items.set(
                 SLOT_MEMBERS,
@@ -138,11 +151,8 @@ public final class WorldDetailScreenBuilder {
                         SLOT_MEMBERS,
                         "PLAYER_HEAD",
                         1,
-                        "§b§lMembers & Permissions",
-                        List.of(
-                                "§7View members, invite players, or promote builders",
-                                "",
-                                "§e▶ Click to manage members"),
+                        legacy(messages.render("messages.gui.world-menu.item.members.name")),
+                        legacyLore(messages.renderLore("messages.gui.world-menu.item.members.lore")),
                         null,
                         "NAV:MEMBERS:" + world.id().value()));
 
@@ -153,27 +163,29 @@ public final class WorldDetailScreenBuilder {
                         SLOT_SETTINGS,
                         "COMPARATOR",
                         1,
-                        "§e§lWorld Settings",
-                        List.of("§7Configure PvP, container access, and mob griefing", "", "§e▶ Click to configure"),
+                        legacy(messages.render("messages.gui.world-menu.item.settings.name")),
+                        legacyLore(messages.renderLore("messages.gui.world-menu.item.settings.lore")),
                         null,
                         "NAV:SETTINGS:" + world.id().value()));
 
         // Slot 13: Visibility
         Visibility nextVis = (world.visibility() == Visibility.PUBLIC) ? Visibility.PRIVATE : Visibility.PUBLIC;
+        String visibilityDescription = world.visibility() == Visibility.PUBLIC
+                ? "Public (anyone can browse and join)"
+                : "Private (invite-only)";
         items.set(
                 SLOT_VISIBILITY,
                 new MenuItemDescriptor(
                         SLOT_VISIBILITY,
                         "ENDER_EYE",
                         1,
-                        "§d§lVisibility: " + world.visibility().name(),
-                        List.of(
-                                "§7Current: "
-                                        + (world.visibility() == Visibility.PUBLIC
-                                                ? "Public (anyone can browse and join)"
-                                                : "Private (invite-only)"),
-                                "",
-                                "§e▶ Click to toggle Public / Private"),
+                        legacy(messages.render(
+                                "messages.gui.world-menu.item.visibility.name",
+                                Placeholders.raw(
+                                        "visibility", world.visibility().name()))),
+                        legacyLore(messages.renderLore(
+                                "messages.gui.world-menu.item.visibility.lore",
+                                Placeholders.raw("description", visibilityDescription))),
                         null,
                         "ACTION:SET_VISIBILITY:" + world.id().value() + ":" + nextVis.name()));
 
@@ -184,8 +196,8 @@ public final class WorldDetailScreenBuilder {
                         SLOT_BANS,
                         "IRON_BARS",
                         1,
-                        "§c§lBanned Players",
-                        List.of("§7View and revoke bans from this world", "", "§e▶ Click to manage bans"),
+                        legacy(messages.render("messages.gui.world-menu.item.bans.name")),
+                        legacyLore(messages.renderLore("messages.gui.world-menu.item.bans.lore")),
                         null,
                         "NAV:BANS:" + world.id().value()));
 
@@ -196,11 +208,10 @@ public final class WorldDetailScreenBuilder {
                         SLOT_STORAGE,
                         "CHEST",
                         1,
-                        "§9§lStorage Usage",
-                        List.of(
-                                "§7World size: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
-                                "",
-                                "§e▶ Click to view storage breakdown"),
+                        legacy(messages.render("messages.gui.world-menu.item.storage.name")),
+                        legacyLore(messages.renderLore(
+                                "messages.gui.world-menu.item.storage.lore",
+                                Placeholders.bytes("size", world.storageBytes()))),
                         null,
                         "NAV:STORAGE"));
 
@@ -212,12 +223,8 @@ public final class WorldDetailScreenBuilder {
                             SLOT_ARCHIVE,
                             "LAVA_BUCKET",
                             1,
-                            "§4§lPermanently Delete World",
-                            List.of(
-                                    "§c§l⚠ Irreversible Action",
-                                    "§7Permanently destroys all chunks and backup archives.",
-                                    "",
-                                    "§4▶ Click to delete permanently (requires confirm)"),
+                            legacy(messages.render("messages.gui.world-menu.item.delete-permanently.name")),
+                            legacyLore(messages.renderLore("messages.gui.world-menu.item.delete-permanently.lore")),
                             null,
                             "ACTION:ARCHIVE:" + world.name()));
         } else {
@@ -227,13 +234,18 @@ public final class WorldDetailScreenBuilder {
                             SLOT_ARCHIVE,
                             "TNT",
                             1,
-                            "§4§lArchive World",
-                            List.of(
-                                    "§7Pack this world into cold storage and free a slot",
-                                    "",
-                                    "§c▶ Click to archive (requires confirm)"),
+                            legacy(messages.render("messages.gui.world-menu.item.archive.name")),
+                            legacyLore(messages.renderLore("messages.gui.world-menu.item.archive.lore")),
                             null,
                             "ACTION:ARCHIVE:" + world.name()));
         }
+    }
+
+    private static String legacy(Component component) {
+        return LEGACY.serialize(component);
+    }
+
+    private static List<String> legacyLore(List<Component> lines) {
+        return lines.stream().map(WorldDetailScreenBuilder::legacy).toList();
     }
 }

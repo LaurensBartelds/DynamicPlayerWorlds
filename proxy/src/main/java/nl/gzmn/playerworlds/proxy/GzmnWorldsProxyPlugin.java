@@ -27,6 +27,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.ProxyConfig;
 import nl.gzmn.playerworlds.core.control.CommandKind;
@@ -109,6 +110,9 @@ public final class GzmnWorldsProxyPlugin {
      * record.
      */
     private volatile NetworkPolicy policy = NetworkPolicy.defaults();
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    private volatile MessageCatalog messages = MessageCatalog.defaults();
 
     @Inject
     public GzmnWorldsProxyPlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -204,6 +208,8 @@ public final class GzmnWorldsProxyPlugin {
         MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
         WorldBanRepository banRepository = new WorldBanRepository(openedDatabase);
 
+        NetworkSettings networkSettings = new NetworkSettings(openedDatabase);
+
         WorldActions worldActions = new WorldActions(
                 proxy,
                 pools,
@@ -217,7 +223,9 @@ public final class GzmnWorldsProxyPlugin {
                 placementService,
                 nodeCommands,
                 openedDatabase,
-                this::policy);
+                this::policy,
+                new nl.gzmn.playerworlds.proxy.permission.StorageTiers(),
+                this::messages);
 
         this.worldActions = worldActions;
 
@@ -228,10 +236,18 @@ public final class GzmnWorldsProxyPlugin {
                 banRepository,
                 this.playerNames,
                 this::policy,
-                pools);
+                pools,
+                this::messages);
 
         WorldCommand command = new WorldCommand(
-                worldActions, proxy, pools, worldRepository, placementService, nodeCommands, this::policy);
+                worldActions,
+                proxy,
+                pools,
+                worldRepository,
+                placementService,
+                nodeCommands,
+                this::policy,
+                networkSettings);
         // metaBuilder rather than register(BrigadierCommand): the single-argument
         // form is deprecated, and naming the owning plugin is what lets Velocity
         // attribute the command in /velocity dump and unregister it cleanly.
@@ -338,6 +354,7 @@ public final class GzmnWorldsProxyPlugin {
                             try {
                                 settings.reload();
                                 this.policy = settings.policy();
+                                this.messages = settings.messages();
                             } catch (SQLException e) {
                                 // Keep the last good policy: a database blip must not
                                 // reset every cap to its default mid-session.
@@ -415,6 +432,11 @@ public final class GzmnWorldsProxyPlugin {
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
+    }
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    public MessageCatalog messages() {
+        return messages;
     }
 
     public @Nullable ControlPlane controlPlane() {
