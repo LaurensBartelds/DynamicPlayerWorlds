@@ -8,7 +8,7 @@ import org.jspecify.annotations.Nullable;
  * <p>Persisted in {@code player_world.settings} as JSONB. Applied to all three
  * dimensions on world load, and re-asserted on restore and cache invalidation.
  *
- * @param pvp whether PVP combat is enabled (default false)
+ * @param pvp whether PVP combat is enabled (default true)
  * @param visitorsMayOpenContainers whether visitors may open chests, barrels, etc. (default false)
  * @param visitorsMayInteract whether visitors may use doors, levers, buttons, etc. (default true)
  * @param mobGriefing whether mob griefing is enabled (default true)
@@ -16,7 +16,21 @@ import org.jspecify.annotations.Nullable;
 public record WorldSettings(
         boolean pvp, boolean visitorsMayOpenContainers, boolean visitorsMayInteract, boolean mobGriefing) {
 
-    public static final WorldSettings DEFAULTS = new WorldSettings(false, false, true, true);
+    /**
+     * PVP starts on; every other default is the conservative one.
+     *
+     * <p>FR-9e originally said PVP off. It is on because the worlds people
+     * actually invite each other into are ones where they expect to be able to
+     * fight, and a setting nobody knows to look for reads as a broken world
+     * rather than as a safe one. The container and interact defaults are
+     * unchanged: those protect blocks a visitor could take or break, which is
+     * loss rather than surprise, and the asymmetry is the point.
+     *
+     * <p>A world stores {@code '{}'} until its owner touches a setting, so this
+     * value is what every existing world reads back as -- changing it changes
+     * them all, which is intended.
+     */
+    public static final WorldSettings DEFAULTS = new WorldSettings(true, false, true, true);
 
     public static WorldSettings defaults() {
         return DEFAULTS;

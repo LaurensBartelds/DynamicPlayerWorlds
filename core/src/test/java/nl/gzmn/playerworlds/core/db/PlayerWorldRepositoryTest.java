@@ -230,6 +230,41 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("listSharedWith returns the worlds an invite made reachable, never the player's own")
+    void listSharedWithReturnsAcceptedInvitesOnly() throws Exception {
+        // FR-7: the invitee's route back to a world is the menu, and the menu can
+        // only show what a query returns. listOwnedBy answers a different
+        // question and answered it alone until this existed.
+        MembershipRepository membership = new MembershipRepository(database);
+        UUID owner = UUID.randomUUID();
+        UUID guest = UUID.randomUUID();
+        UUID stranger = UUID.randomUUID();
+
+        PlayerWorld theirs = create(WorldId.random(), owner, "theirs", 1L);
+        PlayerWorld alsoTheirs = create(WorldId.random(), owner, "also-theirs", 2L);
+        PlayerWorld guestsOwn = create(WorldId.random(), guest, "guests-own", 3L);
+
+        membership.invite(theirs.id(), guest, owner, Duration.ofMinutes(10));
+        assertThat(membership.acceptInvite(theirs.id(), guest))
+                .isInstanceOf(MembershipRepository.AcceptOutcome.Accepted.class);
+        // The guest also owns a world, and owning it makes them a member of it.
+        database.inTransaction(
+                connection -> membership.insertMember(connection, guestsOwn.id(), guest, Role.OWNER, null));
+
+        List<PlayerWorld> shared = worlds.listSharedWith(guest);
+
+        assertThat(shared).extracting(PlayerWorld::name).containsExactly("theirs");
+        assertThat(shared)
+                .as("a world the player owns is theirs, not shared with them (FR-31a)")
+                .noneMatch(world -> world.id().equals(guestsOwn.id()));
+        assertThat(shared)
+                .as("an invite that was never accepted is not membership (FR-7)")
+                .noneMatch(world -> world.id().equals(alsoTheirs.id()));
+        assertThat(worlds.listSharedWith(stranger)).isEmpty();
+        assertThat(worlds.listSharedWith(owner)).isEmpty();
+    }
+
+    @Test
     @DisplayName("a world newer than this node is refused, an unversioned one is not (MN-26)")
     void versionGateRefusesNewerWorlds() throws Exception {
         WorldId id = WorldId.random();

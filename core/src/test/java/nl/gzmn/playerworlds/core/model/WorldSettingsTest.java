@@ -8,10 +8,10 @@ import org.junit.jupiter.api.Test;
 class WorldSettingsTest {
 
     @Test
-    @DisplayName("defaults match the specification safe defaults (FR-9e)")
+    @DisplayName("PVP is on by default and the visitor limits stay closed (FR-9e)")
     void defaultsMatchSpec() {
         WorldSettings settings = WorldSettings.defaults();
-        assertThat(settings.pvp()).isFalse();
+        assertThat(settings.pvp()).isTrue();
         assertThat(settings.visitorsMayOpenContainers()).isFalse();
         assertThat(settings.visitorsMayInteract()).isTrue();
         assertThat(settings.mobGriefing()).isTrue();
@@ -33,6 +33,11 @@ class WorldSettingsTest {
         assertThat(WorldSettings.fromJson(null)).isEqualTo(WorldSettings.defaults());
         assertThat(WorldSettings.fromJson("")).isEqualTo(WorldSettings.defaults());
         assertThat(WorldSettings.fromJson("{}")).isEqualTo(WorldSettings.defaults());
+
+        WorldSettings offExplicitly = WorldSettings.fromJson("{\"pvp\": false}");
+        assertThat(offExplicitly.pvp())
+                .as("an owner who turned PVP off keeps it off (FR-9e)")
+                .isFalse();
 
         WorldSettings partial = WorldSettings.fromJson("{\"pvp\": true}");
         assertThat(partial.pvp()).isTrue();

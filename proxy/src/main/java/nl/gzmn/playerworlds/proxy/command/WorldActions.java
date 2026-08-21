@@ -14,7 +14,10 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
@@ -693,10 +696,8 @@ public final class WorldActions {
                                         + current.inviteExpiry().toMinutes() + " minutes");
 
                         proxy.getPlayer(target.get())
-                                .ifPresent(online -> online.sendMessage(Component.text(
-                                        caller.getUsername() + " invited you to their world '" + world.name()
-                                                + "'. Use /world accept " + caller.getUsername(),
-                                        NamedTextColor.GREEN)));
+                                .ifPresent(
+                                        online -> online.sendMessage(inviteNotice(caller.getUsername(), world.name())));
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world invite failed for {}", caller.getUsername(), e);
@@ -718,6 +719,7 @@ public final class WorldActions {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
+                        NetworkPolicy current = policy.get();
                         Optional<ActionResult> denied = requirePermission(caller, WorldPermissions.JOIN);
                         if (denied.isPresent()) {
                             return denied.get();
@@ -732,12 +734,18 @@ public final class WorldActions {
                         for (PlayerWorld world : owned) {
                             switch (membership.acceptInvite(world.id(), caller.getUniqueId())) {
                                 case MembershipRepository.AcceptOutcome.Accepted accepted -> {
+                                    // FR-9 / FR-31a: role enforcement on the node answers from
+                                    // MembershipCache, which is filled at world load and only
+                                    // refreshed when something says membership moved. Without
+                                    // this the brand-new BUILDER is a VISITOR in a world that
+                                    // is already loaded -- they can walk in and not build --
+                                    // until it next unloads. Kick, promote and demote have
+                                    // always sent it; accept was the one path that did not.
+                                    enqueueToWorldOrAliveNodes(
+                                            world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
                                     Component msg = success(
                                             "you are now a " + accepted.member().role() + " of '" + world.name() + "'");
-                                    tell(
-                                            caller,
-                                            info("joining a world from here arrives with the transfer path; "
-                                                    + "use /pworld on the node until then"));
+                                    tell(caller, info("open /worlds and pick '" + world.name() + "' to go there"));
                                     return ActionResult.success(msg);
                                 }
                                 case MembershipRepository.AcceptOutcome.AlreadyMember already -> {
@@ -1955,6 +1963,26 @@ public final class WorldActions {
         } catch (NumberFormatException e) {
             return seedText.hashCode();
         }
+    }
+
+    /**
+     * FR-6's notification, with the accept as a click rather than as something to
+     * retype.
+     *
+     * <p>The command text stays visible next to the button on purpose: a click
+     * event is invisible to anyone reading a screenshot or a log, and it does not
+     * survive a client that has chat links disabled.
+     */
+    static Component inviteNotice(String ownerName, String worldName) {
+        Objects.requireNonNull(ownerName, "ownerName");
+        Objects.requireNonNull(worldName, "worldName");
+        String command = "/world accept " + ownerName;
+        return Component.text(ownerName + " invited you to their world '" + worldName + "'.", NamedTextColor.GREEN)
+                .append(Component.newline())
+                .append(Component.text("[Click here to accept]", NamedTextColor.GOLD, TextDecoration.BOLD)
+                        .clickEvent(ClickEvent.runCommand(command))
+                        .hoverEvent(HoverEvent.showText(Component.text("Runs " + command, NamedTextColor.GRAY))))
+                .append(Component.text(" or type " + command, NamedTextColor.GRAY));
     }
 
     /**

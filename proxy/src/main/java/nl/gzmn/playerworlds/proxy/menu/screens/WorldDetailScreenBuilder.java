@@ -13,6 +13,14 @@ import nl.gzmn.playerworlds.core.model.WorldState;
 /**
  * Builds the management screen payload for a single world, allowing the owner to join/restore,
  * manage members/bans, toggle visibility, configure settings, view storage, or archive/delete.
+ *
+ * <p>A member who is not the owner gets the same screen without the management
+ * half. That is not decoration: {@code ACTION:ARCHIVE} carries a world
+ * <em>name</em>, which the proxy resolves against the caller's own worlds — so a
+ * visitor pressing Archive on a world called "home" would have archived their
+ * own world of that name. Everything else here is refused for a non-owner
+ * (FR-31a), but a control that cannot succeed should not be drawn, and this one
+ * could succeed against the wrong world.
  */
 public final class WorldDetailScreenBuilder {
 
@@ -31,9 +39,20 @@ public final class WorldDetailScreenBuilder {
 
     private WorldDetailScreenBuilder() {}
 
+    /** The owner's view, with every control. */
     public static RenderMenuPayload build(long correlationId, PlayerWorld world) {
+        return build(correlationId, world, true);
+    }
+
+    /**
+     * Builds the screen as one viewer sees it.
+     *
+     * @param manage whether the viewer is the world's owner (FR-31a). False draws
+     *     the same screen without the controls only an owner may use.
+     */
+    public static RenderMenuPayload build(long correlationId, PlayerWorld world, boolean manage) {
         Objects.requireNonNull(world, "world");
-        String title = "§8Manage: " + world.name();
+        String title = (manage ? "§8Manage: " : "§8World: ") + world.name();
 
         List<MenuItemDescriptor> items = new ArrayList<>(SIZE);
         for (int i = 0; i < SIZE; i++) {
@@ -61,14 +80,23 @@ public final class WorldDetailScreenBuilder {
         if (world.state() == WorldState.ARCHIVED) {
             items.set(
                     SLOT_JOIN,
-                    new MenuItemDescriptor(
-                            SLOT_JOIN,
-                            "ANVIL",
-                            1,
-                            "§a§lRestore World",
-                            List.of("§7Restore this world from cold storage", "", "§e▶ Click to restore"),
-                            null,
-                            "ACTION:RESTORE:" + world.name()));
+                    manage
+                            ? new MenuItemDescriptor(
+                                    SLOT_JOIN,
+                                    "ANVIL",
+                                    1,
+                                    "§a§lRestore World",
+                                    List.of("§7Restore this world from cold storage", "", "§e▶ Click to restore"),
+                                    null,
+                                    "ACTION:RESTORE:" + world.name())
+                            : new MenuItemDescriptor(
+                                    SLOT_JOIN,
+                                    "ANVIL",
+                                    1,
+                                    "§7§lArchived",
+                                    List.of("§8Only its owner can bring this world back"),
+                                    null,
+                                    ""));
         } else {
             items.set(
                     SLOT_JOIN,
@@ -82,6 +110,27 @@ public final class WorldDetailScreenBuilder {
                             "ACTION:JOIN:" + world.id().value()));
         }
 
+        if (manage) {
+            addManagementControls(items, world);
+        }
+
+        // Slot 18: Back
+        items.set(
+                SLOT_BACK,
+                new MenuItemDescriptor(
+                        SLOT_BACK,
+                        "OAK_DOOR",
+                        1,
+                        "§c§lBack to My Worlds",
+                        List.of("§8▶ Click to return"),
+                        null,
+                        "NAV:MY_WORLDS"));
+
+        return new RenderMenuPayload(correlationId, SCREEN_TYPE, title, SIZE, items);
+    }
+
+    /** The half of the screen only {@code owner_uuid} may act on (FR-31a). */
+    private static void addManagementControls(List<MenuItemDescriptor> items, PlayerWorld world) {
         // Slot 11: Members
         items.set(
                 SLOT_MEMBERS,
@@ -186,19 +235,5 @@ public final class WorldDetailScreenBuilder {
                             null,
                             "ACTION:ARCHIVE:" + world.name()));
         }
-
-        // Slot 18: Back
-        items.set(
-                SLOT_BACK,
-                new MenuItemDescriptor(
-                        SLOT_BACK,
-                        "OAK_DOOR",
-                        1,
-                        "§c§lBack to My Worlds",
-                        List.of("§8▶ Click to return"),
-                        null,
-                        "NAV:MY_WORLDS"));
-
-        return new RenderMenuPayload(correlationId, SCREEN_TYPE, title, SIZE, items);
     }
 }

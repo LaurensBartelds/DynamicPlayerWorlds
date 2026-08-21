@@ -20,6 +20,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -40,6 +41,7 @@ import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
@@ -682,6 +684,94 @@ class WorldActionsTest {
         assertThat(result).isInstanceOf(ActionResult.Failed.class);
         assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
                 .contains("you own 2 worlds");
+    }
+
+    @Test
+    @DisplayName("the invite notification carries the accept as a click (FR-6)")
+    void inviteNotificationIsClickable_FR6() throws Exception {
+        UUID owner = UUID.randomUUID();
+        UUID guest = UUID.randomUUID();
+        Player alice = mockPlayer(owner, "Alice");
+        Player bob = mockPlayer(guest, "Bob");
+        playersByUuid.put(owner, alice);
+        playersByUuid.put(guest, bob);
+        playersByName.put("Bob", bob);
+
+        worlds.create(WorldId.random(), owner, "hideout", 1L, 5000, Visibility.PRIVATE);
+
+        ActionResult result = actions.invite(alice, "Bob").get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+
+        List<Component> received = messagesByPlayer.getOrDefault(guest, List.of());
+        assertThat(received).hasSize(1);
+        Component notice = received.getFirst();
+
+        assertThat(PlainTextComponentSerializer.plainText().serialize(notice))
+                .as("the command stays readable: a click event is invisible in a screenshot or a log")
+                .contains("/world accept Alice");
+        assertThat(clickCommands(notice))
+                .as("the invitee should not have to retype what the invite already knows")
+                .contains("/world accept Alice");
+    }
+
+    @Test
+    @DisplayName("accepting an invite refreshes the node's membership cache (FR-7, FR-9)")
+    void acceptRefreshesTheNodeMembershipCache_FR9() throws Exception {
+        // The node answers "may this player break a block" from MembershipCache,
+        // which is filled at world load. A world that is already loaded when the
+        // invite is accepted kept the new BUILDER as a VISITOR until it unloaded:
+        // they could walk in and not build.
+        UUID owner = UUID.randomUUID();
+        UUID guest = UUID.randomUUID();
+        Player alice = mockPlayer(owner, "Alice");
+        Player bob = mockPlayer(guest, "Bob");
+        playersByUuid.put(owner, alice);
+        playersByUuid.put(guest, bob);
+        playersByName.put("Alice", alice);
+        playersByName.put("Bob", bob);
+
+        WorldId worldId = WorldId.random();
+        PlayerWorld created = worlds.create(worldId, owner, "hideout", 1L, 5000, Visibility.PRIVATE);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+
+        assertThat(actions.invite(alice, "Bob").get()).isInstanceOf(ActionResult.Ok.class);
+
+        ActionResult accepted = actions.accept(bob, "Alice").get();
+        assertThat(accepted).isInstanceOf(ActionResult.Ok.class);
+        assertThat(membership.findMember(worldId, guest).orElseThrow().role()).isEqualTo(Role.BUILDER);
+
+        List<Long> ids = nodeCommands.findClaimableIds("node-1", policy.controlClaimTimeout(), 10);
+        assertThat(ids).isNotEmpty();
+        var command = nodeCommands.findById(ids.getFirst()).orElseThrow();
+        assertThat(command.command()).isEqualTo(CommandKind.INVALIDATE_CACHE.name());
+        assertThat(command.worldId()).isEqualTo(worldId);
+        assertThat(command.generation()).isEqualTo(created.generation());
+    }
+
+    /** Every {@code runCommand} click event anywhere in a component tree. */
+    private static List<String> clickCommands(Component component) {
+        List<String> commands = new java.util.ArrayList<>();
+        collectClickCommands(component, commands);
+        return commands;
+    }
+
+    private static void collectClickCommands(Component component, List<String> into) {
+        ClickEvent<?> click = component.clickEvent();
+        if (click != null
+                && click.action().equals(ClickEvent.Action.RUN_COMMAND)
+                && click.payload() instanceof ClickEvent.Payload.Text text) {
+            into.add(text.value());
+        }
+        for (Component child : component.children()) {
+            collectClickCommands(child, into);
+        }
     }
 
     private Player mockPlayer(UUID uuid, String name) {

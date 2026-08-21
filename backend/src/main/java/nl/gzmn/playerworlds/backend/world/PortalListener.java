@@ -177,7 +177,9 @@ public final class PortalListener implements Listener {
             return;
         }
 
-        Location target = overworld.getSpawnLocation();
+        // A respawn is an arrival like any other, and the stored spawn point
+        // is not a promise that there is ground under it (FR-3a).
+        Location target = SafeSpawn.resolve(overworld);
         event.setRespawnLocation(target);
         log.debug(
                 "routed respawn for {} from {} to {} spawn",

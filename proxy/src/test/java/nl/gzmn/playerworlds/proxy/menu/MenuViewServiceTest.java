@@ -22,6 +22,7 @@ import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.menu.screens.WorldDetailScreenBuilder;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -235,6 +236,71 @@ class MenuViewServiceTest {
             assertThat(page1.items().get(45).actionTag()).isEqualTo("NAV:MY_WORLDS:0");
             assertThat(page1.items().get(53).materialName()).isEqualTo("GRAY_STAINED_GLASS_PANE");
         }
+
+        @Test
+        @DisplayName("lists worlds an accepted invite made reachable, after the owned ones (FR-7)")
+        void listsWorldsSharedByInvite() throws Exception {
+            PlayerWorld mine = worldRepo.create(
+                    WorldId.random(),
+                    playerUuid,
+                    "mine",
+                    100L,
+                    500,
+                    Visibility.PRIVATE,
+                    "node-1",
+                    Duration.ofMinutes(10));
+            worldRepo.transitionState(mine.id(), WorldState.CREATING, WorldState.READY);
+
+            UUID hostUuid = UUID.randomUUID();
+            nameRepo.remember(hostUuid, "Host");
+            PlayerWorld theirs = worldRepo.create(
+                    WorldId.random(),
+                    hostUuid,
+                    "theirs",
+                    200L,
+                    500,
+                    Visibility.PRIVATE,
+                    "node-1",
+                    Duration.ofMinutes(10));
+            worldRepo.transitionState(theirs.id(), WorldState.CREATING, WorldState.READY);
+            memberRepo.invite(theirs.id(), playerUuid, hostUuid, Duration.ofMinutes(10));
+            assertThat(memberRepo.acceptInvite(theirs.id(), playerUuid))
+                    .isInstanceOf(MembershipRepository.AcceptOutcome.Accepted.class);
+
+            // A world they were invited to but never accepted stays invisible.
+            PlayerWorld unaccepted = worldRepo.create(
+                    WorldId.random(),
+                    hostUuid,
+                    "unaccepted",
+                    300L,
+                    500,
+                    Visibility.PRIVATE,
+                    "node-1",
+                    Duration.ofMinutes(10));
+            memberRepo.invite(unaccepted.id(), playerUuid, hostUuid, Duration.ofMinutes(10));
+
+            RenderMenuPayload payload =
+                    service.buildMyWorldsMenu(playerUuid, 0, 1010L).get();
+
+            MenuItemDescriptor owned = payload.items().get(0);
+            assertThat(owned.displayName()).contains("mine");
+            assertThat(owned.materialName()).isEqualTo("GRASS_BLOCK");
+
+            MenuItemDescriptor invited = payload.items().get(1);
+            assertThat(invited.displayName()).contains("theirs");
+            assertThat(invited.actionTag()).isEqualTo("NAV:WORLD:" + theirs.id().value());
+            assertThat(invited.lore())
+                    .as("the member has to be able to tell whose world it is and what they may do there")
+                    .anyMatch(line -> line.contains("Shared with you") && line.contains(Role.BUILDER.name()));
+
+            assertThat(payload.items().get(2).materialName())
+                    .as("an invite nobody accepted is not membership")
+                    .isEqualTo("GRAY_STAINED_GLASS_PANE");
+
+            assertThat(payload.items().get(49).lore())
+                    .as("FR-1's cap counts owned worlds, not shared ones")
+                    .contains("§7Owned: 1 / 2", "§7Shared with you: 1");
+        }
     }
 
     @Nested
@@ -331,6 +397,57 @@ class MenuViewServiceTest {
     }
 
     @Nested
+    @DisplayName("World Detail screen for a member who is not the owner")
+    class WorldDetailForMemberTests {
+
+        @Test
+        @DisplayName("a non-owner sees the world without the controls only its owner may use (FR-31a)")
+        void memberSeesNoManagementControls() throws Exception {
+            UUID hostUuid = UUID.randomUUID();
+            PlayerWorld world = worldRepo.create(
+                    WorldId.random(),
+                    hostUuid,
+                    "theirs",
+                    12345L,
+                    500,
+                    Visibility.PRIVATE,
+                    "node-1",
+                    Duration.ofMinutes(10));
+            worldRepo.transitionState(world.id(), WorldState.CREATING, WorldState.READY);
+
+            RenderMenuPayload asMember =
+                    service.buildWorldMenu(world.id(), playerUuid, 1020L).get();
+
+            assertThat(asMember.title()).isEqualTo("§8World: theirs");
+            assertThat(asMember.items().get(WorldDetailScreenBuilder.SLOT_JOIN).actionTag())
+                    .as("a member is here to go there")
+                    .isEqualTo("ACTION:JOIN:" + world.id().value());
+            assertThat(asMember.items().stream()
+                            .map(MenuItemDescriptor::actionTag)
+                            .filter(tag -> tag.startsWith("ACTION:ARCHIVE:")))
+                    .as("ACTION:ARCHIVE names a world by name and resolves it against the caller's own worlds; "
+                            + "offering it to a visitor offers a button that hits the wrong world")
+                    .isEmpty();
+            assertThat(asMember.items()
+                            .get(WorldDetailScreenBuilder.SLOT_SETTINGS)
+                            .actionTag())
+                    .isEmpty();
+            assertThat(asMember.items()
+                            .get(WorldDetailScreenBuilder.SLOT_VISIBILITY)
+                            .actionTag())
+                    .isEmpty();
+
+            RenderMenuPayload asOwner =
+                    service.buildWorldMenu(world.id(), hostUuid, 1021L).get();
+            assertThat(asOwner.title()).isEqualTo("§8Manage: theirs");
+            assertThat(asOwner.items()
+                            .get(WorldDetailScreenBuilder.SLOT_ARCHIVE)
+                            .actionTag())
+                    .isEqualTo("ACTION:ARCHIVE:theirs");
+        }
+    }
+
+    @Nested
     @DisplayName("Settings screen")
     class SettingsScreenTests {
 
@@ -357,8 +474,10 @@ class MenuViewServiceTest {
 
             MenuItemDescriptor pvp = payload.items().get(10);
             assertThat(pvp.materialName()).isEqualTo("DIAMOND_SWORD");
+            assertThat(pvp.displayName()).contains("Enabled");
             assertThat(pvp.actionTag())
-                    .isEqualTo("ACTION:SET_SETTING:" + world.id().value() + ":pvp:true");
+                    .as("PVP defaults on (FR-9e), so the toggle a fresh world offers is the one that turns it off")
+                    .isEqualTo("ACTION:SET_SETTING:" + world.id().value() + ":pvp:false");
 
             MenuItemDescriptor containers = payload.items().get(12);
             assertThat(containers.materialName()).isEqualTo("CHEST");

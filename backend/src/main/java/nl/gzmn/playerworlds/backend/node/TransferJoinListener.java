@@ -16,6 +16,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.world.LoadOutcome;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
+import nl.gzmn.playerworlds.backend.world.SafeSpawn;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLoader;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
@@ -377,11 +378,16 @@ public final class TransferJoinListener implements Listener {
     }
 
     /**
-     * Puts the player in the world's overworld spawn.
+     * Puts the player on the ground at the world's overworld spawn.
      *
      * <p>The profile arrives separately: {@code ProfileListener} sees the world
-     * change this teleport causes and restores it (FR-15b). Keeping the two apart
+     * change this teleport causes and restores it, and puts them back where they
+     * were if they have been here before (FR-14, FR-15b). Keeping the two apart
      * is deliberate — the teleport is the only part that has to be on this tick.
+     * This one is therefore the arrival of somebody with no stored position:
+     * a first visit, usually an invited player. {@link SafeSpawn} is what stops
+     * that first visit starting with a fall, because the stored spawn point is a
+     * coordinate rather than a promise that anything is under it.
      */
     private void sendIn(Player player, LoadedWorld world) {
         String bukkitName = folders.bukkitWorldName(world.id(), DimensionKind.OVERWORLD);
@@ -391,7 +397,7 @@ public final class TransferJoinListener implements Listener {
             refuse(player, world.id(), "that world loaded but could not be entered", "Overworld not available");
             return;
         }
-        player.teleport(overworld.getSpawnLocation());
+        player.teleport(SafeSpawn.resolve(overworld));
     }
 
     /** Informs the player and enqueues an EJECT_PLAYER command to route them to the lobby (FR-11). */

@@ -401,12 +401,12 @@ class BackendControlHandlersTest {
 
         UUID owner = UUID.randomUUID();
         WorldId worldId = WorldId.random();
-        // Defaults: pvp=false, mobGriefing=true.
         var row = offMain(() -> worlds.create(worldId, owner, "r9-pvp", 1L, 5000, Visibility.PRIVATE));
 
         WorldCacheLoader caches = new WorldCacheLoader(worlds, members, membershipCache, settingsCache);
-        // Stale cache as if the world loaded before the owner flipped PVP.
-        settingsCache.put(worldId, WorldSettings.defaults());
+        // Stale cache as if the world loaded while the owner had PVP switched off
+        // (FR-9e defaults it on, so turning it off is the change worth testing).
+        settingsCache.put(worldId, WorldSettings.defaults().withPvp(false));
         assertThat(settingsCache.get(worldId).pvp()).isFalse();
 
         WorldRegistry registry = new WorldRegistry();
@@ -416,7 +416,7 @@ class BackendControlHandlersTest {
 
         String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
         WorldMock overworld = server.addSimpleWorld(overworldName);
-        // Load-time gamerules (FR-9e defaults).
+        // Load-time gamerules, matching the stale cache above.
         platform.worldRuntime().setPvp(overworld, false);
         platform.worldRuntime().setMobGriefing(overworld, true);
         assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PVP)).isFalse();

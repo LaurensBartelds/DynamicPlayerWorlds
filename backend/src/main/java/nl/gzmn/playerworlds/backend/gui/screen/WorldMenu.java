@@ -25,6 +25,14 @@ import org.jspecify.annotations.Nullable;
 /**
  * Management screen for a single world, allowing the owner to join, manage members/bans,
  * toggle visibility, configure settings, view storage, or archive the world.
+ *
+ * <p>A member who is not the owner gets the same screen without the management
+ * half. That is not decoration: the proxy resolves {@code /world archive} by
+ * <em>name against the caller's own worlds</em>, so a visitor pressing Archive on
+ * a world called "home" would have archived their own world of that name. The
+ * proxy refuses everything here for a non-owner (FR-31a), but a control that
+ * cannot succeed should not be drawn, and this one could succeed against the
+ * wrong world.
  */
 public final class WorldMenu implements GuiScreen {
 
@@ -52,12 +60,23 @@ public final class WorldMenu implements GuiScreen {
         return world;
     }
 
+    /**
+     * Whether this viewer may manage the world.
+     *
+     * <p>{@code owner_uuid} is the authority, never the {@code OWNER} role value
+     * (FR-31a).
+     */
+    private boolean manageable(Player viewer) {
+        return world.ownerUuid().equals(viewer.getUniqueId());
+    }
+
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        boolean manage = manageable(player);
         MenuHolder holder = new MenuHolder(this);
-        Inventory inventory =
-                Bukkit.createInventory(holder, 27, Component.text("Manage: " + world.name(), NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(
+                holder, 27, Component.text((manage ? "Manage: " : "World: ") + world.name(), NamedTextColor.DARK_GRAY));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 27; i++) {
@@ -81,12 +100,18 @@ public final class WorldMenu implements GuiScreen {
         if (world.state() == WorldState.ARCHIVED) {
             inventory.setItem(
                     SLOT_JOIN,
-                    ItemUtil.create(
-                            Material.ANVIL,
-                            Component.text("Restore World", NamedTextColor.GREEN, TextDecoration.BOLD),
-                            Component.text("Restore this world from cold storage", NamedTextColor.GRAY),
-                            Component.empty(),
-                            Component.text("▶ Click to restore", NamedTextColor.YELLOW)));
+                    manage
+                            ? ItemUtil.create(
+                                    Material.ANVIL,
+                                    Component.text("Restore World", NamedTextColor.GREEN, TextDecoration.BOLD),
+                                    Component.text("Restore this world from cold storage", NamedTextColor.GRAY),
+                                    Component.empty(),
+                                    Component.text("▶ Click to restore", NamedTextColor.YELLOW))
+                            : ItemUtil.create(
+                                    Material.ANVIL,
+                                    Component.text("Archived", NamedTextColor.GRAY, TextDecoration.BOLD),
+                                    Component.text(
+                                            "Only its owner can bring this world back", NamedTextColor.DARK_GRAY)));
         } else {
             inventory.setItem(
                     SLOT_JOIN,
@@ -98,6 +123,23 @@ public final class WorldMenu implements GuiScreen {
                             Component.text("▶ Click to join", NamedTextColor.YELLOW)));
         }
 
+        if (manage) {
+            renderManagementControls(inventory);
+        }
+
+        // Slot 18: Back
+        inventory.setItem(
+                SLOT_BACK,
+                ItemUtil.create(
+                        Material.OAK_DOOR,
+                        Component.text("Back to My Worlds", NamedTextColor.RED, TextDecoration.BOLD),
+                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+
+        return inventory;
+    }
+
+    /** The half of the screen only {@code owner_uuid} may act on (FR-31a). */
+    private void renderManagementControls(Inventory inventory) {
         // Slot 11: Members
         inventory.setItem(
                 SLOT_MEMBERS,
@@ -180,16 +222,6 @@ public final class WorldMenu implements GuiScreen {
                             Component.empty(),
                             Component.text("▶ Click to archive (requires confirm)", NamedTextColor.RED)));
         }
-
-        // Slot 18: Back
-        inventory.setItem(
-                SLOT_BACK,
-                ItemUtil.create(
-                        Material.OAK_DOOR,
-                        Component.text("Back to My Worlds", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
-
-        return inventory;
     }
 
     @Override
@@ -197,9 +229,20 @@ public final class WorldMenu implements GuiScreen {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(clickType, "clickType");
 
+        if (!manageable(player) && slot != SLOT_JOIN && slot != SLOT_STORAGE && slot != SLOT_BACK) {
+            // Nothing was drawn there for them, and a click on a filler slot is
+            // not a request for anything.
+            return;
+        }
+
         switch (slot) {
             case SLOT_JOIN -> {
                 if (world.state() == WorldState.ARCHIVED) {
+                    if (!manageable(player)) {
+                        // Restore resolves by name against the caller's own
+                        // worlds, so it is the owner's to press.
+                        return;
+                    }
                     if (menuChannel != null) {
                         var _ = menuChannel
                                 .sendIntent(player, new MenuIntent.RestoreWorld(world.name()))

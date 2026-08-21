@@ -153,7 +153,9 @@ public final class MenuChannelListener {
                     case "WORLD" -> {
                         if (parts.size() < 3) yield null;
                         WorldId worldId = parseWorldId(parts.get(2));
-                        yield worldId != null ? viewService.buildWorldMenu(worldId, correlationId) : null;
+                        yield worldId != null
+                                ? viewService.buildWorldMenu(worldId, player.getUniqueId(), correlationId)
+                                : null;
                     }
                     case "SETTINGS" -> {
                         if (parts.size() < 3) yield null;
@@ -253,7 +255,7 @@ public final class MenuChannelListener {
                                 connection,
                                 player,
                                 actions.setPublic(player, isPublic, null, worldId),
-                                () -> viewService.buildWorldMenu(worldId, correlationId));
+                                () -> viewService.buildWorldMenu(worldId, player.getUniqueId(), correlationId));
                     }
                 }
             }

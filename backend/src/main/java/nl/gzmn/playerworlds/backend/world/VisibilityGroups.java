@@ -89,6 +89,32 @@ public final class VisibilityGroups {
         return List.copyOf(visible);
     }
 
+    /**
+     * Everyone standing in {@code group} right now, except {@code exclude}.
+     *
+     * <p>{@link #visibleTo} answers "who can this player see", which is the wrong
+     * question for a player who has just left a group: by the time the world
+     * change has been observed they are no longer in it, so the people who should
+     * be told they left are exactly the ones they can no longer see. This asks
+     * about the group instead of about the mover, so both halves of a transition
+     * reach the right room.
+     */
+    public List<Player> inGroup(WorldId group, Iterable<? extends Player> candidates, Player exclude) {
+        Objects.requireNonNull(group, "group");
+        Objects.requireNonNull(candidates, "candidates");
+        Objects.requireNonNull(exclude, "exclude");
+        List<Player> members = new ArrayList<>();
+        for (Player candidate : candidates) {
+            if (candidate.getUniqueId().equals(exclude.getUniqueId())) {
+                continue;
+            }
+            if (groupOf(candidate).filter(group::equals).isPresent()) {
+                members.add(candidate);
+            }
+        }
+        return List.copyOf(members);
+    }
+
     /** The group's online population, counting the viewer (FR-23). */
     public int groupCount(Player viewer, Iterable<? extends Player> candidates) {
         return visibleTo(viewer, candidates).size() + 1;

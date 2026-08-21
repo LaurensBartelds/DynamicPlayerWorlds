@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.proxy.menu;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -22,6 +23,7 @@ import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.core.model.WorldBan;
@@ -39,6 +41,7 @@ import nl.gzmn.playerworlds.proxy.menu.screens.MyWorldsScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.SettingsScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.StorageScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.WorldDetailScreenBuilder;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Proxy-side service coordinating asynchronous database queries and view construction
@@ -143,9 +146,12 @@ public final class MenuViewService {
         return CompletableFuture.supplyAsync(
                 () -> {
                     try {
-                        List<PlayerWorld> worlds = worldRepository.listOwnedBy(playerUuid);
+                        List<PlayerWorld> owned = worldRepository.listOwnedBy(playerUuid);
+                        List<PlayerWorld> shared = worldRepository.listSharedWith(playerUuid);
+                        Map<WorldId, Role> roles = sharedRoles(playerUuid, shared);
                         NetworkPolicy pol = policySupplier.get();
-                        return MyWorldsScreenBuilder.build(correlationId, worlds, page, pol.maxWorldsPerPlayer());
+                        return MyWorldsScreenBuilder.build(
+                                correlationId, owned, shared, roles, page, pol.maxWorldsPerPlayer());
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -154,9 +160,43 @@ public final class MenuViewService {
     }
 
     /**
-     * Builds the single world management screen for a world.
+     * The viewer's role in each world they were invited into (FR-7, FR-9c).
+     *
+     * <p>One query for every shared world rather than one per world: the list is
+     * already bounded by how many invites a player has accepted, and the menu is
+     * rendered on a database thread that other menus are queueing behind.
+     */
+    private Map<WorldId, Role> sharedRoles(UUID playerUuid, List<PlayerWorld> shared) throws SQLException {
+        if (shared.isEmpty()) {
+            return Map.of();
+        }
+        Map<WorldId, Role> roles = new HashMap<>();
+        for (WorldMember membership : membershipRepository.membershipsOf(playerUuid)) {
+            roles.put(membership.worldId(), membership.role());
+        }
+        return Map.copyOf(roles);
+    }
+
+    /**
+     * Builds the single world management screen for a world, as its owner sees it.
      */
     public CompletableFuture<RenderMenuPayload> buildWorldMenu(WorldId worldId, long correlationId) {
+        return buildWorldMenu(worldId, null, correlationId);
+    }
+
+    /**
+     * Builds the single world screen as {@code viewerUuid} sees it.
+     *
+     * <p>A member who does not own the world gets it without the management half.
+     * The proxy refuses those actions from a non-owner anyway (FR-31a), but
+     * {@code ACTION:ARCHIVE} names a world by <em>name</em> and resolves it
+     * against the caller's own worlds — so drawing it for a visitor offers them a
+     * button that succeeds against the wrong world.
+     *
+     * @param viewerUuid the player looking at it, or null for the owner's view
+     */
+    public CompletableFuture<RenderMenuPayload> buildWorldMenu(
+            WorldId worldId, @Nullable UUID viewerUuid, long correlationId) {
         Objects.requireNonNull(worldId, "worldId");
 
         return CompletableFuture.supplyAsync(
@@ -166,7 +206,9 @@ public final class MenuViewService {
                         if (worldOpt.isEmpty()) {
                             throw new IllegalArgumentException("World not found: " + worldId);
                         }
-                        return WorldDetailScreenBuilder.build(correlationId, worldOpt.get());
+                        PlayerWorld world = worldOpt.get();
+                        boolean manage = viewerUuid == null || world.ownerUuid().equals(viewerUuid);
+                        return WorldDetailScreenBuilder.build(correlationId, world, manage);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }

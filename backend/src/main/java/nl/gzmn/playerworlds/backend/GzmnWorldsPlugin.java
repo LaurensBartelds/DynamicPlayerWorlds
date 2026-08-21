@@ -31,6 +31,7 @@ import nl.gzmn.playerworlds.backend.gui.MenuListener;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
 import nl.gzmn.playerworlds.backend.lease.LeaseCoordinator;
 import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
+import nl.gzmn.playerworlds.backend.node.HoldingAreaLoginListener;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.node.TransferJoinListener;
 import nl.gzmn.playerworlds.backend.platform.Platform;
@@ -47,6 +48,7 @@ import nl.gzmn.playerworlds.backend.storage.WorldEraser;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
+import nl.gzmn.playerworlds.backend.world.HoldingArea;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
@@ -645,6 +647,12 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // registration the class is dead code and vanilla /list and /tell leak
         // presence between two worlds on one node, which is the whole of §5.5.
         getServer().getPluginManager().registerEvents(new CommandGuardListener(visibilityGroups, this::policy), this);
+        // FR-11: a login lands in the holding area, never inside the world the
+        // player logged out of. Registered before the routed join listener
+        // because everything below assumes the arrival is a world change.
+        getServer()
+                .getPluginManager()
+                .registerEvents(new HoldingAreaLoginListener(worldFolders, new HoldingArea(worldFolders)), this);
         // FR-11: routed join listener. R13: worldsMetrics so the holding-area
         // deadline moves holding_timeouts_total when it fires.
         TransferJoinListener transferListener = new TransferJoinListener(

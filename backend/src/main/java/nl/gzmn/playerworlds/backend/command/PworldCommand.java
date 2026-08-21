@@ -14,6 +14,7 @@ import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.world.CreateOutcome;
 import nl.gzmn.playerworlds.backend.world.LoadOutcome;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
+import nl.gzmn.playerworlds.backend.world.SafeSpawn;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
@@ -466,7 +467,10 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
     // Helpers
     // -----------------------------------------------------------------------
 
-    /** FR-5's teleport half: the world spawn of the overworld. */
+    /**
+     * FR-5's teleport half: the world spawn of the overworld, resolved to
+     * somewhere the player can stand.
+     */
     private void teleportToSpawn(Player player, LoadedWorld world) {
         String bukkitName = folders.bukkitWorldName(world.id(), DimensionKind.OVERWORLD);
         World overworld = Bukkit.getWorld(bukkitName);
@@ -474,7 +478,7 @@ public final class PworldCommand implements CommandExecutor, TabCompleter {
             error(player, "the world loaded but its overworld is not available");
             return;
         }
-        player.teleport(overworld.getSpawnLocation());
+        player.teleport(SafeSpawn.resolve(overworld));
     }
 
     private @Nullable Player asPlayer(CommandSender sender) {

@@ -498,6 +498,34 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
+     * Every world this player is a member of but does not own, newest first.
+     *
+     * <p>The menu's "My Worlds" list is the only place a player who accepted an
+     * invite (FR-7) can find the world again, so it has to show more than
+     * {@link #listOwnedBy}. Ownership is filtered on {@code owner_uuid} rather
+     * than on {@code player_world_member.role}, because the role column is a
+     * denormalised convenience and loses every disagreement (FR-31a) — filtering
+     * on it would drop an owner's own world out of both lists the moment the two
+     * fell out of step.
+     */
+    public List<PlayerWorld> listSharedWith(UUID uuid) throws SQLException {
+        Objects.requireNonNull(uuid, "uuid");
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                         FROM player_world
+                         WHERE owner_uuid <> ?
+                           AND id IN (SELECT world_id FROM player_world_member WHERE uuid = ?)
+                         ORDER BY created_at DESC
+                        """,
+                statement -> {
+                    statement.setObject(1, uuid);
+                    statement.setObject(2, uuid);
+                },
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
      * Lists all PUBLIC worlds in READY state for {@code /world browse} (FR-9b).
      *
      * <p>Ordered by {@code last_played DESC NULLS LAST}, using the {@code player_world_public_idx} index.
