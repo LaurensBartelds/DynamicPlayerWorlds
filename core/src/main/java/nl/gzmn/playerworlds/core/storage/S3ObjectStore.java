@@ -5,6 +5,8 @@ import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -28,6 +30,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
  * S3-compatible implementation of {@link ObjectStore} using AWS SDK v2 with
@@ -64,11 +67,21 @@ public final class S3ObjectStore implements ObjectStore {
 
     @Override
     public void putObject(String key, Path sourceFile) {
+        putObject(key, sourceFile, null);
+    }
+
+    @Override
+    public void putObject(String key, Path sourceFile, @Nullable String expectedMd5Base64) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(sourceFile, "sourceFile");
         try {
             client.putObject(
-                    PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromFile(sourceFile));
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentMD5(expectedMd5Base64)
+                            .build(),
+                    RequestBody.fromFile(sourceFile));
         } catch (Exception e) {
             throw new StorageException("Failed to upload object: " + key, e);
         }
@@ -76,6 +89,11 @@ public final class S3ObjectStore implements ObjectStore {
 
     @Override
     public void putBytes(String key, byte[] bytes, @Nullable String contentType) {
+        putBytes(key, bytes, contentType, null);
+    }
+
+    @Override
+    public void putBytes(String key, byte[] bytes, @Nullable String contentType, @Nullable String expectedMd5Base64) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(bytes, "bytes");
         try {
@@ -84,6 +102,7 @@ public final class S3ObjectStore implements ObjectStore {
                             .bucket(bucket)
                             .key(key)
                             .contentType(contentType != null ? contentType : "application/octet-stream")
+                            .contentMD5(expectedMd5Base64)
                             .build(),
                     RequestBody.fromBytes(bytes));
         } catch (Exception e) {
@@ -157,6 +176,31 @@ public final class S3ObjectStore implements ObjectStore {
                     DeleteObjectRequest.builder().bucket(bucket).key(key).build());
         } catch (Exception e) {
             throw new StorageException("Failed to delete object: " + key, e);
+        }
+    }
+
+    @Override
+    public List<String> listKeys(String prefix) {
+        Objects.requireNonNull(prefix, "prefix");
+        try {
+            List<String> keys = new ArrayList<>();
+            String continuationToken = null;
+            do {
+                ListObjectsV2Request.Builder request =
+                        ListObjectsV2Request.builder().bucket(bucket).prefix(prefix);
+                if (continuationToken != null) {
+                    request.continuationToken(continuationToken);
+                }
+                ListObjectsV2Response response = client.listObjectsV2(request.build());
+                for (S3Object object : response.contents()) {
+                    keys.add(object.key());
+                }
+                continuationToken = response.isTruncated() ? response.nextContinuationToken() : null;
+            } while (continuationToken != null);
+            keys.sort(Comparator.naturalOrder());
+            return List.copyOf(keys);
+        } catch (Exception e) {
+            throw new StorageException("Failed to list prefix: " + prefix, e);
         }
     }
 

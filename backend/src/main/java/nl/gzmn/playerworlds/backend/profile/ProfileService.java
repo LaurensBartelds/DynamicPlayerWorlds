@@ -89,7 +89,10 @@ public final class ProfileService {
      *
      * <p>Does not teleport: the caller owns where the player ends up, because the
      * stored location may name a dimension that is not materialised, or the
-     * player may be arriving somewhere else entirely.
+     * player may be arriving somewhere else entirely. {@code ProfileListener}
+     * is that caller, and it does put them back where they were (FR-14, R28) —
+     * the two halves used to describe opposite intentions, and the half that
+     * teleported did not exist.
      */
     public void restore(Player player, ProfileEnvelope profile) {
         MainThread.assertOn();

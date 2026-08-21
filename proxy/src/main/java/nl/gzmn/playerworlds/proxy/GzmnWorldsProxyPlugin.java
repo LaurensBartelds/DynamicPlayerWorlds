@@ -2,11 +2,13 @@ package nl.gzmn.playerworlds.proxy;
 
 import com.google.inject.Inject;
 import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.connection.PostLoginEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
+import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.nio.file.Path;
 import java.sql.SQLException;
@@ -25,6 +27,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.ProxyConfig;
 import nl.gzmn.playerworlds.core.control.CommandKind;
@@ -34,6 +37,7 @@ import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -46,6 +50,7 @@ import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import nl.gzmn.playerworlds.proxy.config.ProxyConfigLoader;
 import nl.gzmn.playerworlds.proxy.control.ProxyEjectHandler;
 import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
+import nl.gzmn.playerworlds.proxy.menu.MenuViewService;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import org.jspecify.annotations.Nullable;
@@ -90,7 +95,9 @@ public final class GzmnWorldsProxyPlugin {
     private @Nullable PluginExecutors executors;
     private @Nullable PlayerNameRepository playerNames;
     private @Nullable TransferRequestRepository transferRequests;
+    private @Nullable NoticeRepository notices;
     private @Nullable NodeRegistry nodeRegistry;
+    private @Nullable WorldActions worldActions;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
 
@@ -103,6 +110,9 @@ public final class GzmnWorldsProxyPlugin {
      * record.
      */
     private volatile NetworkPolicy policy = NetworkPolicy.defaults();
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    private volatile MessageCatalog messages = MessageCatalog.defaults();
 
     @Inject
     public GzmnWorldsProxyPlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -191,23 +201,53 @@ public final class GzmnWorldsProxyPlugin {
 
         TransferRequestRepository transferRequests = new TransferRequestRepository(openedDatabase);
         this.transferRequests = transferRequests;
+        // FR-34: the proxy is the only component that sees every login, which is
+        // what makes it the one that can deliver a message to an owner who was
+        // offline when there was something to say.
+        this.notices = new NoticeRepository(openedDatabase);
+        MembershipRepository membershipRepository = new MembershipRepository(openedDatabase);
+        WorldBanRepository banRepository = new WorldBanRepository(openedDatabase);
+
+        NetworkSettings networkSettings = new NetworkSettings(openedDatabase);
 
         WorldActions worldActions = new WorldActions(
                 proxy,
                 pools,
                 worldRepository,
-                new MembershipRepository(openedDatabase),
+                membershipRepository,
                 transferRequests,
-                new WorldBanRepository(openedDatabase),
+                banRepository,
                 this.playerNames,
                 new PendingTransferRepository(openedDatabase),
                 registry,
                 placementService,
                 nodeCommands,
-                this::policy);
+                openedDatabase,
+                this::policy,
+                new nl.gzmn.playerworlds.proxy.permission.StorageTiers(),
+                this::messages);
+
+        this.worldActions = worldActions;
+
+        MenuViewService viewService = new MenuViewService(
+                worldRepository,
+                membershipRepository,
+                transferRequests,
+                banRepository,
+                this.playerNames,
+                this::policy,
+                pools,
+                this::messages);
 
         WorldCommand command = new WorldCommand(
-                worldActions, proxy, pools, worldRepository, placementService, nodeCommands, this::policy);
+                worldActions,
+                proxy,
+                pools,
+                worldRepository,
+                placementService,
+                nodeCommands,
+                this::policy,
+                networkSettings);
         // metaBuilder rather than register(BrigadierCommand): the single-argument
         // form is deprecated, and naming the owning plugin is what lets Velocity
         // attribute the command in /velocity dump and unregister it cleanly.
@@ -231,7 +271,7 @@ public final class GzmnWorldsProxyPlugin {
 
         // Register menu channel and channel listener for GUI menu interaction
         proxy.getChannelRegistrar().register(MenuChannelListener.CHANNEL_IDENTIFIER);
-        proxy.getEventManager().register(this, new MenuChannelListener(worldActions));
+        proxy.getEventManager().register(this, new MenuChannelListener(worldActions, viewService));
 
         logger.info(
                 "enabled: lobby '{}', /world and /worlds registered ({} subcommands), db threads {}",
@@ -314,6 +354,7 @@ public final class GzmnWorldsProxyPlugin {
                             try {
                                 settings.reload();
                                 this.policy = settings.policy();
+                                this.messages = settings.messages();
                             } catch (SQLException e) {
                                 // Keep the last good policy: a database blip must not
                                 // reset every cap to its default mid-session.
@@ -329,17 +370,21 @@ public final class GzmnWorldsProxyPlugin {
     }
 
     /**
-     * Fills the {@code player_name} cache (V2) and sends transfer request reminders.
+     * Fills the {@code player_name} cache (V2), sends transfer request reminders,
+     * and hands over anything that was waiting for this player (FR-34).
      *
      * <p>The proxy is the only component that sees every login on the network,
      * which is what makes it the right place to learn the name-to-UUID mapping
-     * every section 6 command needs for its first argument, and to notify players
-     * of pending ownership transfers when they connect.
+     * every section 6 command needs for its first argument, to notify players of
+     * pending ownership transfers, and to deliver an archival warning to an owner
+     * who was — by definition, since inactivity is what earned the warning —
+     * offline when it was written.
      */
     @Subscribe
     public void onPostLogin(PostLoginEvent event) {
         PlayerNameRepository repository = this.playerNames;
         TransferRequestRepository transferRequests = this.transferRequests;
+        NoticeRepository pendingNotices = this.notices;
         PluginExecutors pools = this.executors;
         if (repository == null || pools == null) {
             return;
@@ -359,6 +404,9 @@ public final class GzmnWorldsProxyPlugin {
                                         NamedTextColor.GOLD));
                     }
                 }
+                if (pendingNotices != null) {
+                    deliverNotices(pendingNotices, event.getPlayer());
+                }
             } catch (SQLException e) {
                 // A cache miss degrades a display name to a UUID or skips a reminder;
                 // it never fails an operation, so this is a warning and not a disconnect.
@@ -368,9 +416,27 @@ public final class GzmnWorldsProxyPlugin {
         });
     }
 
+    /**
+     * Hands a player the messages queued for them while they were away (FR-34).
+     *
+     * <p>Marked delivered by the same statement that reads them, so a player who
+     * connects to two proxies at once — or reconnects while the first send is in
+     * flight — is not told twice.
+     */
+    private void deliverNotices(NoticeRepository pendingNotices, Player player) throws SQLException {
+        for (NoticeRepository.Notice notice : pendingNotices.takeUndelivered(player.getUniqueId())) {
+            player.sendMessage(Component.text(notice.message(), NamedTextColor.GOLD));
+        }
+    }
+
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
+    }
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    public MessageCatalog messages() {
+        return messages;
     }
 
     public @Nullable ControlPlane controlPlane() {
@@ -379,6 +445,21 @@ public final class GzmnWorldsProxyPlugin {
 
     public @Nullable TransferRequestRepository transferRequests() {
         return transferRequests;
+    }
+
+    /**
+     * Forgets where a player was (FR-6).
+     *
+     * <p>{@link nl.gzmn.playerworlds.proxy.world.WorldPresence} ignores a report
+     * from a node the player has since left, so a stale entry is already
+     * harmless; this keeps it from also being unbounded.
+     */
+    @Subscribe
+    public void onDisconnect(DisconnectEvent event) {
+        WorldActions actions = this.worldActions;
+        if (actions != null) {
+            actions.presence().forget(event.getPlayer().getUniqueId());
+        }
     }
 
     @Subscribe
@@ -401,6 +482,7 @@ public final class GzmnWorldsProxyPlugin {
         proxy.getChannelRegistrar().unregister(MenuChannelListener.CHANNEL_IDENTIFIER);
         this.playerNames = null;
         this.transferRequests = null;
+        this.notices = null;
         PluginExecutors pools = this.executors;
         this.executors = null;
         if (pools != null) {

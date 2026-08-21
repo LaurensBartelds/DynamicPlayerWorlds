@@ -2,7 +2,6 @@ package nl.gzmn.playerworlds.backend.world;
 
 import java.time.Duration;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -227,35 +226,5 @@ public final class IdleUnloadTask implements Runnable {
         long interval = SWEEP_INTERVAL.toMillis();
         long sweeps = (duration.toMillis() + interval - 1) / interval;
         return (int) Math.max(1L, Math.min(sweeps, Integer.MAX_VALUE));
-    }
-
-    /**
-     * Unloads every registered world now, for the FR-28 shutdown path.
-     *
-     * <p>Ignores the grace period and the retry wait: the server is going down
-     * and the alternative to unloading is leaving the folders as the crash path
-     * would. Reports what would not come down so an operator has it in the log
-     * before the process exits.
-     */
-    public void unloadAllForShutdown() {
-        MainThread.assertOn();
-        for (LoadedWorld world : registry.all()) {
-            try {
-                UnloadOutcome outcome = lifecycle.unloadOnMain(world);
-                if (outcome instanceof UnloadOutcome.Blocked blocked) {
-                    List<String> blockers = blocked.blockers();
-                    log.warn(
-                            "world {} would not unload at dimension {} during shutdown: {}",
-                            world.id(),
-                            blocked.dimension(),
-                            blockers.isEmpty() ? "no determinable cause" : String.join("; ", blockers));
-                } else {
-                    log.info("unloaded world {} for shutdown (FR-28)", world.id());
-                }
-            } catch (RuntimeException e) {
-                log.error("failed to unload world {} during shutdown", world.id(), e);
-            }
-        }
-        registry.clear();
     }
 }

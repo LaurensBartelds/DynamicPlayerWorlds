@@ -34,6 +34,7 @@ import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.EventLogger;
 import nl.gzmn.playerworlds.core.obs.LogEvent;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
+import nl.gzmn.playerworlds.core.storage.CleanUnloadMarker;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.Manifest;
 import nl.gzmn.playerworlds.core.storage.ManifestCodec;
@@ -59,7 +60,7 @@ import org.slf4j.LoggerFactory;
  * before creation (FR-1a, milestone 7), the initial and pre-unload snapshot
  * commits (MN-6a, milestone 6), and per-world profiles (FR-14, milestone 4).
  */
-public final class WorldLifecycleService {
+public final class WorldLifecycleService implements WorldLoader {
 
     private static final Logger log = LoggerFactory.getLogger(WorldLifecycleService.class);
     private static final EventLogger events = EventLogger.create(WorldLifecycleService.class);
@@ -343,6 +344,8 @@ public final class WorldLifecycleService {
                             .thenCompose(ignored -> promoteToReady(row, loaded))
                             .thenApply(outcome -> {
                                 if (commitService != null && outcome instanceof CreateOutcome.Created) {
+                                    // R7: a prior fence on this id (if any) no longer applies.
+                                    commitService.allowCommits(row.id());
                                     var _ = commitService.requestCommit(row.id());
                                 }
                                 return outcome;
@@ -445,7 +448,14 @@ public final class WorldLifecycleService {
      * <p>Never all three: a world created but never entered through a portal has
      * one folder, and generating the other two here would undo FR-4 in the other
      * direction — the stall would simply move from first transit to first join.
+     *
+     * <p>R12 / MN-12: any terminal non-{@link LoadOutcome.Loaded} outcome (and any
+     * exceptional failure) releases a live lease this node still holds on a
+     * READY/CREATING world that did not enter the registry. The proxy may have
+     * acquired the lease before routing; without this release the world stays
+     * pinned to a node that never loaded it for the full {@code nodes.lease-seconds}.
      */
+    @Override
     public CompletableFuture<LoadOutcome> load(WorldId id) {
         Objects.requireNonNull(id, "id");
         Optional<LoadedWorld> already = registry.find(id);
@@ -463,7 +473,61 @@ public final class WorldLifecycleService {
                             }
                             return materialiseExisting(row, current);
                         },
-                        executors.io());
+                        executors.io())
+                .handleAsync(
+                        (outcome, failure) -> {
+                            if (failure != null) {
+                                releaseLeaseAfterFailedLoad(id);
+                                if (failure instanceof RuntimeException runtime) {
+                                    throw runtime;
+                                }
+                                if (failure instanceof Error error) {
+                                    throw error;
+                                }
+                                throw new CompletionException(failure);
+                            }
+                            if (!(outcome instanceof LoadOutcome.Loaded)) {
+                                releaseLeaseAfterFailedLoad(id);
+                            }
+                            return outcome;
+                        },
+                        executors.db());
+    }
+
+    /**
+     * R12: drop a lease that did not result in a loaded world (MN-8, MN-12).
+     *
+     * <p>{@link PlayerWorldRepository#releaseLease} is conditional on
+     * {@code (node, generation)}, so a release racing a takeover is a no-op.
+     * Worlds in archival/restore states are left alone — those paths own the
+     * lease deliberately.
+     */
+    private void releaseLeaseAfterFailedLoad(WorldId id) {
+        if (nodeId == null) {
+            return;
+        }
+        if (registry.find(id).isPresent()) {
+            return;
+        }
+        try {
+            Optional<PlayerWorld> found = worlds.findById(id);
+            if (found.isEmpty()) {
+                return;
+            }
+            PlayerWorld row = found.get();
+            if (row.state() != WorldState.READY && row.state() != WorldState.CREATING) {
+                return;
+            }
+            if (!nodeId.equals(row.assignedNode())) {
+                return;
+            }
+            boolean released = worlds.releaseLease(id, nodeId, row.generation());
+            if (released) {
+                events.info(LogEvent.LEASE_RELEASE, "released lease after failed load gen " + row.generation(), id);
+            }
+        } catch (SQLException e) {
+            log.warn("could not release lease for {} after failed load", id, e);
+        }
     }
 
     private Checked readForLoad(WorldId id, NetworkPolicy current) {
@@ -544,9 +608,32 @@ public final class WorldLifecycleService {
                 byte[] manifestBytes = objectStore.getBytes(row.manifestKey());
                 String manifestJson = new String(manifestBytes, StandardCharsets.UTF_8);
                 Manifest manifest = ManifestCodec.decode(manifestJson);
-                WorldDownloader.Result dlResult = worldDownloader.materialize(manifest, worldContainer);
+                // MN-4: a world whose completion marker is absent, or names a
+                // different manifest, may have diverged — so its local files are
+                // rehashed rather than trusted on size and mtime. The marker is
+                // then cleared, because from here the world is live and nothing
+                // may vouch for these files until the next clean unload.
+                boolean warm = CleanUnloadMarker.isWarmCache(worldContainer, row.id(), row.manifestKey());
+                CleanUnloadMarker.clear(worldContainer, row.id());
+                if (!warm) {
+                    log.info(
+                            "world {} has no clean-unload marker for manifest {}; verifying local files by hash "
+                                    + "before use (MN-4)",
+                            row.id(),
+                            row.manifestKey());
+                }
+                // MN-4: match the manifest rather than merge into whatever the
+                // folder held, so a stale file from an earlier generation cannot
+                // survive a cold load and be re-uploaded by the next snapshot.
+                WorldDownloader.Result dlResult = worldDownloader.materialize(
+                        manifest,
+                        worldContainer,
+                        folders.relativeDimensionFolders(primaryLevelName, row.id()),
+                        warm ? WorldDownloader.Verification.FINGERPRINT : WorldDownloader.Verification.REHASH);
                 isCold = !dlResult.wasWarm();
                 if (commitService != null) {
+                    // R7: successful materialize clears any prior self-fence on this id.
+                    commitService.allowCommits(row.id());
                     commitService.cacheManifest(row.id(), manifest);
                 }
             } catch (Exception e) {
@@ -604,6 +691,10 @@ public final class WorldLifecycleService {
                                 worlds.touchLastPlayed(row.id());
                             } catch (SQLException e) {
                                 log.warn("could not record last_played for world {}", row.id(), e);
+                            }
+                            // R7: warm path (no object-store materialize) still clears a prior fence.
+                            if (commitService != null) {
+                                commitService.allowCommits(row.id());
                             }
                             cacheMembership(row);
                             metrics.setWorldsLoaded(registry.size());
@@ -734,6 +825,19 @@ public final class WorldLifecycleService {
      *     prevent.
      */
     public CompletableFuture<Void> afterUnload(LoadedWorld loaded) {
+        return afterUnload(loaded, true);
+    }
+
+    /**
+     * {@link #afterUnload(LoadedWorld)}, told whether the unload was clean.
+     *
+     * @param clean false for MN-11a's forced unload, which skips the final commit because the
+     *     commit is the thing that is broken. The world on disk is then ahead of the manifest
+     *     {@code manifest_key} names, so MN-4's marker is cleared rather than written: a marker
+     *     claiming this folder matches that manifest would let the next load verify it on size
+     *     and mtime alone and accept a diverged region file as current.
+     */
+    public CompletableFuture<Void> afterUnload(LoadedWorld loaded, boolean clean) {
         Objects.requireNonNull(loaded, "loaded");
         registry.unregister(loaded.id());
         membershipCache.invalidate(loaded.id());
@@ -743,6 +847,19 @@ public final class WorldLifecycleService {
                 () -> {
                     try {
                         worlds.touchLastPlayed(loaded.id());
+                        // MN-4 / D18: the marker names the manifest this world was
+                        // unloaded at, read here rather than carried in, because
+                        // the final commit has just moved it and the row is what
+                        // knows. Written before the release, so a node that takes
+                        // the lease next finds a marker that is already true.
+                        if (clean) {
+                            String manifestKey = worlds.findById(loaded.id())
+                                    .map(PlayerWorld::manifestKey)
+                                    .orElse(null);
+                            CleanUnloadMarker.write(worldContainer, loaded.id(), manifestKey);
+                        } else {
+                            CleanUnloadMarker.clear(worldContainer, loaded.id());
+                        }
                         if (nodeId != null) {
                             boolean released = worlds.releaseLease(loaded.id(), nodeId, loaded.generation());
                             if (released) {

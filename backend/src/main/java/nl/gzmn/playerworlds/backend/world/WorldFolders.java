@@ -67,6 +67,58 @@ public final class WorldFolders {
         return List.copyOf(roots);
     }
 
+    /**
+     * Relative folders inside an archive's extract tree, one per dimension.
+     *
+     * <p>Flat, not nested: {@code ArchivePacker} names each tar entry
+     * {@code <bukkitWorldName>/<path>} because it walks the dimension directories
+     * it is handed and uses their own names. This is the inverse of that, and the
+     * only other place that has to agree about it — recovered from the layout
+     * rather than by appending {@code _nether} and {@code _the_end}, for the same
+     * reason {@link #resolve} does not hardcode them.
+     */
+    public List<Path> archiveDimensionFolders(WorldId id) {
+        Objects.requireNonNull(id, "id");
+        List<Path> roots = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            roots.add(Path.of(bukkitWorldName(id, dimension)));
+        }
+        return List.copyOf(roots);
+    }
+
+    /**
+     * The directory that holds every player world's dimension folders.
+     *
+     * <p>Recovered from the layout with the same probe {@link #resolve} uses for
+     * the suffixes, so the startup sweep does not rebuild Paper 26's
+     * {@code <level>/dimensions/minecraft/} nesting by hand — which is what it
+     * did, in a second copy that a layout change would have left behind.
+     */
+    public Path dimensionsRoot(Path scratchRoot, String primaryLevelName) {
+        Objects.requireNonNull(scratchRoot, "scratchRoot");
+        Objects.requireNonNull(primaryLevelName, "primaryLevelName");
+        Path probe = layout.bukkitWorldFolder(scratchRoot, primaryLevelName, PROBE, DimensionKind.OVERWORLD);
+        Path parent = probe.getParent();
+        if (parent == null) {
+            throw new IllegalStateException("layout put a world folder at the filesystem root: " + probe);
+        }
+        return parent;
+    }
+
+    /** Absolute on-disk folders for every dimension of {@code id}. */
+    public List<Path> onDiskFolders(Path scratchRoot, String primaryLevelName, WorldId id) {
+        List<Path> folders = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            folders.add(onDiskFolder(scratchRoot, primaryLevelName, id, dimension));
+        }
+        return List.copyOf(folders);
+    }
+
+    /** Which player world a dimension folder name belongs to, or empty when it is not one of ours. */
+    public Optional<WorldId> worldIdOf(String bukkitWorldName) {
+        return resolve(bukkitWorldName).map(PlayerWorldDimension::worldId);
+    }
+
     /** Absolute on-disk folder for one dimension under the world container. */
     public Path onDiskFolder(Path scratchRoot, String primaryLevelName, WorldId id, DimensionKind dimension) {
         Objects.requireNonNull(scratchRoot, "scratchRoot");

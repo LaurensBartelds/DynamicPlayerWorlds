@@ -6,11 +6,14 @@ import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
+import nl.gzmn.playerworlds.backend.control.WorldHandoff;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.PaperItemCodec;
 import nl.gzmn.playerworlds.backend.platform.Platform;
@@ -18,19 +21,26 @@ import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.backend.profile.ProfileService;
 import nl.gzmn.playerworlds.backend.profile.WorldCommitService;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
+import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
+import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.db.Database;
+import nl.gzmn.playerworlds.core.db.MembershipRepository;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.obs.StorageHealthCheck;
+import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
+import nl.gzmn.playerworlds.core.storage.ObjectStoreHealthCheck;
 import nl.gzmn.playerworlds.core.storage.PlainFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
@@ -95,6 +105,9 @@ class PeriodicSyncTaskTest {
                 scratchDir,
                 "node-test",
                 WorldFixture.PRIMARY_LEVEL_NAME);
+        // MN-11a's failure window lives on the LoadedWorld, so the service has to be able to
+        // find it; GzmnWorldsPlugin wires this the same way.
+        commitService.setRegistry(registry);
 
         MainThread.enter(Thread.currentThread());
         server = MockBukkit.mock();
@@ -231,6 +244,169 @@ class PeriodicSyncTaskTest {
         assertThat(commitService.cachedManifest(validId1)).isPresent();
         assertThat(commitService.cachedManifest(validId2)).isPresent();
         assertThat(commitService.cachedManifest(invalidId)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a commit that fails is counted against MN-11a's window (12.7)")
+    void aFailedCommitIsCounted() throws Exception {
+        LoadedWorld world = registerWorldWhoseCommitsFail();
+        assertThat(world.consecutiveCommitFailures())
+                .as("a world that has just loaded is not behind on anything")
+                .isZero();
+        assertThat(world.isSyncFailingFor(Duration.ZERO)).isFalse();
+
+        new PeriodicSyncTask(registry, commitService, NetworkPolicy::defaults).run();
+        flushExecutors();
+
+        assertThat(world.consecutiveCommitFailures()).isEqualTo(1);
+        assertThat(world.isSyncFailingFor(Duration.ZERO)).isTrue();
+        assertThat(world.isSyncFailingFor(Duration.ofHours(1)))
+                .as("one failed commit is not thirty minutes of them")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("a world whose commits have failed past the bound is unloaded (MN-11a)")
+    void aWorldOverTheSyncFailureBoundIsUnloaded() throws Exception {
+        LoadedWorld world = registerWorldWhoseCommitsFail();
+        WorldHandoff handoff = handoff();
+        // storage.max-sync-failure-minutes = 0: the bound is reached by the first failure, so the
+        // test does not have to wait out a real one.
+        Supplier<NetworkPolicy> impatient =
+                () -> NetworkPolicy.fromRaw(Map.of(NetworkPolicy.KEY_MAX_SYNC_FAILURE_MINUTES, "0"));
+        PeriodicSyncTask task = new PeriodicSyncTask(registry, commitService, impatient, () -> handoff, 0);
+
+        // First sweep: the commit fails and is counted. The world is still loaded, because
+        // MN-11a bounds the failure window rather than reacting to a single failure.
+        task.run();
+        flushExecutors();
+        assertThat(registry.isLoaded(world.id()))
+                .as("one failed sync keeps playing; the world is safe locally (12.7)")
+                .isTrue();
+
+        // Second: the window is over and the world stops.
+        task.run();
+        flushExecutors();
+
+        assertThat(registry.isLoaded(world.id())).isFalse();
+        assertThat(Files.isDirectory(
+                        WorldFixture.dimensionFolder(scratchDir, world.id().folder())))
+                .as("the local folders are the newest copy of the world; MN-11a keeps them")
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("a world whose commits succeed is never unloaded by MN-11a")
+    void aHealthyWorldIsNeverUnloaded() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        WorldFixture.materialize(scratchDir, id, WorldFixture.DimensionSet.ALL_THREE);
+        onDb(() -> {
+            worldRepo.create(id, owner, "healthy", 111L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(id);
+            return null;
+        });
+        server.addSimpleWorld(folders.bukkitWorldName(id, DimensionKind.OVERWORLD));
+        LoadedWorld world = registry.register(new LoadedWorld(id, owner, "healthy", 111L, 5000));
+
+        WorldHandoff handoff = handoff();
+        Supplier<NetworkPolicy> impatient =
+                () -> NetworkPolicy.fromRaw(Map.of(NetworkPolicy.KEY_MAX_SYNC_FAILURE_MINUTES, "0"));
+        PeriodicSyncTask task = new PeriodicSyncTask(registry, commitService, impatient, () -> handoff, 0);
+
+        task.run();
+        flushExecutors();
+        task.run();
+        flushExecutors();
+
+        // Even at a zero-minute bound: the window opens on a failure, and there has not been one.
+        assertThat(world.consecutiveCommitFailures()).isZero();
+        assertThat(registry.isLoaded(id)).isTrue();
+    }
+
+    @Test
+    @DisplayName("a successful object storage ping records object.storage.up, independent of any world (plan 10.4)")
+    void pingSucceedsAndRecordsObjectStorageUp() throws Exception {
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (var pingStore = S3ObjectStore.open(settings);
+                WorldsMetrics metrics = WorldsMetrics.create()) {
+            StorageHealthCheck check = new ObjectStoreHealthCheck(pingStore, "_health/test-node.ping");
+            PeriodicSyncTask task =
+                    new PeriodicSyncTask(registry, commitService, NetworkPolicy::defaults, () -> null, check, metrics);
+
+            task.run();
+            flushExecutors();
+
+            assertThat(metrics.objectStorageUp()).isTrue();
+        }
+    }
+
+    @Test
+    @DisplayName("a failed object storage ping records object.storage.up=false without touching world commits")
+    void pingFailureRecordsObjectStorageDownAndDoesNotBlockCommits() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        WorldFixture.materialize(scratchDir, id, WorldFixture.DimensionSet.ALL_THREE);
+        onDb(() -> {
+            worldRepo.create(id, owner, "healthy", 111L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(id);
+            return null;
+        });
+        server.addSimpleWorld(folders.bukkitWorldName(id, DimensionKind.OVERWORLD));
+        registry.register(new LoadedWorld(id, owner, "healthy", 111L, 5000));
+
+        StorageHealthCheck alwaysFails = () -> {
+            throw new java.io.IOException("simulated bucket outage");
+        };
+        try (WorldsMetrics metrics = WorldsMetrics.create()) {
+            PeriodicSyncTask task = new PeriodicSyncTask(
+                    registry, commitService, NetworkPolicy::defaults, () -> null, alwaysFails, metrics);
+
+            task.run();
+            flushExecutors();
+
+            assertThat(metrics.objectStorageUp())
+                    .as("a broken ping must flip the gauge even though nothing here is actually committing to S3")
+                    .isFalse();
+            assertThat(commitService.cachedManifest(id))
+                    .as("the ping is independent of the commit path; a fake, unrelated ping failure must not "
+                            + "stop the world's own (unrelated, real) commit from proceeding")
+                    .isPresent();
+        }
+    }
+
+    /** A registered world whose snapshot commits fail: its row is not in the database. */
+    private LoadedWorld registerWorldWhoseCommitsFail() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        WorldFixture.materialize(scratchDir, id, WorldFixture.DimensionSet.ALL_THREE);
+        server.addSimpleWorld(folders.bukkitWorldName(id, DimensionKind.OVERWORLD));
+        LoadedWorld world = registry.register(new LoadedWorld(id, owner, "unsaveable", 111L, 5000));
+        world.markMaterialised(DimensionKind.OVERWORLD);
+        return world;
+    }
+
+    private WorldHandoff handoff() {
+        Platform platform = Platform.create(new ServerIdentity("26.2", Platform.BUILD_DATA_VERSION));
+        WorldLifecycleService lifecycle = new WorldLifecycleService(
+                worldRepo,
+                new MembershipRepository(database),
+                new MembershipCache(),
+                executors,
+                platform,
+                folders,
+                registry,
+                WorldsMetrics.create(),
+                NetworkPolicy::defaults,
+                scratchDir);
+        return new WorldHandoff(
+                registry,
+                lifecycle,
+                folders,
+                executors,
+                commitService,
+                new NodeCommandRepository(database),
+                NetworkPolicy::defaults);
     }
 
     @Test

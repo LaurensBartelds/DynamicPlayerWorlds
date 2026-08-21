@@ -178,7 +178,27 @@ public record NetworkPolicy(
     public static final Duration DEFAULT_INVITE_EXPIRY = Duration.ofMinutes(10);
     public static final Duration DEFAULT_TRANSFER_PENDING_EXPIRY = Duration.ofDays(7);
     public static final Duration DEFAULT_TRANSFER_EXPIRY = Duration.ofSeconds(60);
-    public static final Duration DEFAULT_HOLDING_TIMEOUT = Duration.ofSeconds(30);
+    /**
+     * FR-11's holding-area deadline: 90 seconds, not the specification's 30.
+     *
+     * <p>The holding timeout is the outer budget of the join path — every wait the
+     * path can take happens inside it, which is why {@code ConfigValidator} already
+     * kept {@code storage.commit-timeout-seconds} strictly below it. NFR-1's
+     * cold-load budget is such a wait, and at the documented defaults it was
+     * <em>larger</em> (60s against 30s), so a cold load still well inside the time
+     * NFR-1 grants it would have been ejected by the deadline that was supposed to
+     * be its ceiling.
+     *
+     * <p>Of the two numbers, NFR-1's is the one with a reason behind it: a cold
+     * fetch is "dominated by transfer time and therefore a function of world size
+     * and link speed". FR-11's 30 only ever meant "not indefinitely". So the outer
+     * budget moves rather than the inner one, to 90s — the 60s cold-load budget
+     * plus room for the profile restore and teleport that follow it. MN-25's
+     * mandatory progress message is what makes that wait tolerable rather than a
+     * blank screen. See plan 05 section 4 item 5a.
+     */
+    public static final Duration DEFAULT_HOLDING_TIMEOUT = Duration.ofSeconds(90);
+
     public static final Duration DEFAULT_MAINTENANCE_INTERVAL = Duration.ofMinutes(5);
     public static final Duration DEFAULT_CONTROL_POLL = Duration.ofSeconds(5);
     public static final Duration DEFAULT_CONTROL_CLAIM_TIMEOUT = Duration.ofSeconds(60);

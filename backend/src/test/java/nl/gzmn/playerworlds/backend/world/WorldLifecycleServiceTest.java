@@ -189,13 +189,13 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Perform an initial snapshot of the fixture to populate S3
-        List<Path> dirty = DirtyScanner.scanDirty(
+        DirtyScanner.Scan scan = DirtyScanner.scan(
                 fixtureDir,
                 folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
                 Map.of(),
                 List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
-                fixtureDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
+                fixtureDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), scan, true);
         Manifest manifest = snapResult.manifest();
 
         // Create world row with the manifest key pointing to S3
@@ -262,13 +262,13 @@ class WorldLifecycleServiceTest {
         UUID owner = UUID.randomUUID();
 
         // Snapshot to S3 and populate object store and cache
-        List<Path> dirty = DirtyScanner.scanDirty(
+        DirtyScanner.Scan scan = DirtyScanner.scan(
                 scratchDir,
                 folders.relativeDimensionFolders(WorldFixture.PRIMARY_LEVEL_NAME, worldId),
                 Map.of(),
                 List.of());
         SnapshotEngine.SnapshotResult snapResult = snapshotEngine.executeSnapshot(
-                scratchDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), dirty, true);
+                scratchDir, worldId, 0L, 1, Platform.BUILD_DATA_VERSION, "26.2", Map.of(), scan, true);
         Manifest manifest = snapResult.manifest();
 
         onDb(() -> {
@@ -340,5 +340,50 @@ class WorldLifecycleServiceTest {
 
         // Verify commitService cached the manifest
         assertThat(commitService.cachedManifest(worldId)).isPresent();
+    }
+
+    @Test
+    @DisplayName("R12: a failed cold load releases the lease it acquired (MN-12)")
+    void aFailedColdLoadReleasesTheLeaseItAcquired_MN12() throws Exception {
+        // Default lifecycleService has nodeId=null and never acquires; R12 needs a real node.
+        String nodeId = "node-r12";
+        WorldLifecycleService leasedLifecycle = new WorldLifecycleService(
+                worldRepo,
+                membershipRepo,
+                membershipCache,
+                executors,
+                platform,
+                folders,
+                registry,
+                metrics,
+                NetworkPolicy::defaults,
+                scratchDir,
+                WorldFixture.PRIMARY_LEVEL_NAME,
+                nodeId,
+                worldDownloader,
+                objectStore,
+                commitService,
+                objectCache);
+
+        WorldId worldId = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        onDb(() -> {
+            worldRepo.create(worldId, owner, "r12-fail", 12345L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(worldId);
+            return null;
+        });
+
+        // READY, no folders, no manifest → acquire lease then Fail("no world folder…").
+        CompletableFuture<LoadOutcome> loadFuture = leasedLifecycle.load(worldId);
+        LoadOutcome outcome = awaitFuture(loadFuture);
+
+        assertThat(outcome).isInstanceOf(LoadOutcome.Failed.class);
+        assertThat(((LoadOutcome.Failed) outcome).reason()).contains("no world folder");
+        assertThat(registry.find(worldId)).isEmpty();
+
+        var placement = onDb(() -> worldRepo.placementContext(worldId)).orElseThrow();
+        assertThat(placement.leaseHolder())
+                .as("R12/MN-12: failed load must release so the next join can place normally")
+                .isNull();
     }
 }

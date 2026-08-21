@@ -25,6 +25,7 @@ class WorldsMetricsTest {
             metrics.setQuarantineBytes(99);
             metrics.setScratchFreeBytes(1_000_000);
             metrics.dbPoolWait(Duration.ofMillis(5));
+            metrics.setObjectStorageUp(false);
 
             String text = metrics.scrape();
             assertThat(text)
@@ -41,11 +42,28 @@ class WorldsMetricsTest {
                     .contains("holding_timeouts_total")
                     .contains("quarantine_bytes")
                     .contains("scratch_free_bytes")
-                    .contains("db_pool_wait_seconds");
+                    .contains("db_pool_wait_seconds")
+                    .contains("object_storage_up");
             assertThat(text)
                     .contains("result=\"ok\"")
                     .contains("reason=\"fenced\"")
                     .contains("kind=\"cold\"");
+        }
+    }
+
+    @Test
+    @DisplayName("object storage defaults to up until a check actually fails")
+    void objectStorageDefaultsToUpUntilAFailure() {
+        try (WorldsMetrics metrics = WorldsMetrics.create()) {
+            assertThat(metrics.objectStorageUp())
+                    .as("a node that has not run its first check yet is not a known outage")
+                    .isTrue();
+
+            metrics.setObjectStorageUp(false);
+            assertThat(metrics.objectStorageUp()).isFalse();
+
+            metrics.setObjectStorageUp(true);
+            assertThat(metrics.objectStorageUp()).isTrue();
         }
     }
 }

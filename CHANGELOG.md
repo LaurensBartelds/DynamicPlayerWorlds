@@ -178,6 +178,26 @@ the jar filename (`+mc<version>`), not part of the project version.
   wrong.
 - The node heartbeat reports TPS, which MN-15 excludes on and which was being
   published as NULL.
+- Admin-configurable, MiniMessage-formatted player-facing text (NFR-5).
+  `core.config.messages` declares every message/GUI-text key with its default
+  template, grouped one small file per command area or GUI screen;
+  `MessageCatalog` (mirroring `NetworkPolicy`'s existing `network_setting`
+  pattern) overlays admin overrides read through the same `NetworkSettings`
+  cache and `INVALIDATE_CACHE` propagation as network policy. Backend and
+  proxy each carry a small `Messages`/`Placeholders` MiniMessage-rendering
+  pair — `:core` stays free of Adventure classes, since it is shaded into
+  both plugins. Every hardcoded message in `WorldActions`/`WorldCommand`, all
+  ten backend GUI screens, and all ten proxy-rendered lobby-GUI screen
+  builders were migrated onto the catalog; a template that fails to parse
+  falls back to its coded default rather than breaking the surface it
+  renders into. New `/world admin message list|get|set|reset <key>`
+  subcommand, gated on `gzmn.worlds.admin`: `set` validates a candidate
+  MiniMessage template against the key's own declared placeholders before
+  ever writing it, so a typo is caught with the admin still at the keyboard.
+  The GUI-triggered action-result wire (proxy → backend over the menu
+  channel) now carries a serialized `Component` instead of plain text, so a
+  GUI-driven success/failure message keeps its styling instead of being
+  re-wrapped in a hardcoded backend prefix.
 
 ### Changed
 
@@ -198,9 +218,106 @@ the jar filename (`+mc<version>`), not part of the project version.
 - Java toolchain 21 → 25, because `paper-api` 26.x is published with a Java 25
   target and Gradle refuses to resolve it against an older toolchain. See the
   note added to ADR 0003.
+- **PVP is on by default.** FR-9e used to say off, on the reasoning that safe
+  defaults are conservative ones. That reasoning holds for the container and
+  interact rules, which protect blocks a visitor could take or break, and it does
+  not hold for PVP: the worlds people invite each other into are ones they expect
+  to be able to fight in, and a setting nobody knows to look for reads as a
+  broken world rather than as a safe one. `/world set pvp off` and the settings
+  screen turn it off. A world stores `{}` until its owner touches a setting, so
+  this changes every existing world at its next load — which is the intent, and
+  is what FR-9e's "the database value must win over whatever the restored folder
+  carries" already guaranteed.
+- **"My Worlds" lists the worlds an invite made reachable, not only owned ones.**
+  Accepting an invite (FR-7) left the world findable only by remembering whose it
+  was: the menu asked `listOwnedBy` and nothing else. Owned worlds still come
+  first, and the create button still counts only those, because that is the
+  number FR-1's cap is about. A member opening one gets the same detail screen
+  without the management half — not decoration, since `ACTION:ARCHIVE` carries a
+  world *name* that the proxy resolves against the caller's *own* worlds, so the
+  button a visitor could not use would have hit the wrong world.
+- **The invite notification is clickable.** FR-6 told the invitee to type
+  `/world accept <owner>`. It now also offers the command as a click. The text
+  stays next to the button, because a click event is invisible in a screenshot or
+  a log and does not survive a client with chat links off.
 
 ### Fixed
 
+- **An invited player could walk into a world and not build in it.** Accepting an
+  invite writes the BUILDER row (FR-7), and the node answers "may this player
+  break a block" from `MembershipCache`, which is filled when a world loads and
+  refreshed only when something says membership moved. Kick, promote, demote,
+  ban and transfer all sent `INVALIDATE_CACHE`; accept was the one path that did
+  not. On a world that was already loaded — which is every world whose owner is
+  standing in it, waiting for you — the new member stayed a VISITOR until it next
+  unloaded (FR-9, FR-31a).
+- **Logging back in put a player inside the world they logged out of, and three
+  things depended on it not doing that.** A returning player's spawn point comes
+  out of their `playerdata`, so somebody who quit inside a player world was put
+  straight back into it whenever it was still loaded — and FR-11 describes a join
+  as landing in the holding area and being taken into a world by the transfer.
+  Because no `PlayerChangedWorldEvent` fired, the per-world profile was never
+  restored and neither was the stored position (FR-14, FR-15b), so the arrival
+  teleport to world spawn was the last word: *"my position resets every time I
+  rejoin"*. The join broadcast, routed by the world the connection landed in
+  rather than the world the player entered, announced them to the world they had
+  left even when the transfer was taking them elsewhere (FR-19). And a world
+  cannot unload while somebody is in it, so a login revived an idle one for as
+  long as the login took. Every login now lands outside the player worlds.
+- **Walking into a world announced nothing; leaving it announced a quit.** FR-19
+  suppresses join and quit broadcasts and re-emits them to the player's group,
+  and the re-emission was addressed by the *connection* rather than by the group
+  the player entered or left. Arrivals and departures are now announced on the
+  group transition, using vanilla's own translation keys so the line reads the
+  same in every client language, and to the others in the group rather than to
+  the player who moved. A portal between a world's three dimensions is not a
+  transition (FR-2).
+- **Arriving players were dropped in the air.** `World#getSpawnLocation` is a
+  stored coordinate, not a promise that anything is under it, and nothing keeps
+  it above ground once a world has been played in. The owner arrives seconds
+  after generation and never notices; an invited player arrives into a world
+  somebody has been digging in. `SafeSpawn` walks the spawn column down to the
+  first solid block a player can stand on and spreads outward when that column
+  cannot hold one, and the routed arrival (FR-11), `/pworld` and the death
+  respawn (FR-3a) all go through it.
+- **A world that could not be archived could never be removed.** `/world delete`
+  performs FR-27's archival, and hard deletion took ARCHIVED worlds only, so a
+  world created while object storage was unreachable had no exit at all: FR-35
+  had nothing to pack, no retry changed that, and the world sat in one of its
+  owner's FR-30 slots for good. FR-37 now also accepts a READY world — the node
+  ejects anyone inside, unloads it without a final commit, and deletes the live
+  folders along with the objects and the row. The confirmation for that case
+  says there is no backup rather than promising archives that do not exist, and
+  the deletion carries the state it was confirmed against so a restore
+  completing in between is refused instead of silently destroying a live world.
+  A world that never committed and never archived is deletable even while the
+  bucket is unreachable, since it has nothing there to strand — requiring the
+  sweep to succeed would have made the escape hatch depend on the outage it
+  exists for. Still a typed admin command; the GUI offers permanent deletion for
+  ARCHIVED worlds only.
+- **`storage.max-sync-failure-minutes` did nothing.** §12.7 bounds how long a
+  world may keep being played while its snapshots fail, and the setting was
+  parsed, validated and then never read, so a node whose object storage was
+  unreachable let players carry on indefinitely on a world nothing was saving —
+  one `log.warn` per failed sync and no other trace. New MN-11a implements the
+  bound: commit outcomes are counted per loaded world, `commit_succeeded` and
+  `commit_failed` are metered (both meters existed and neither was ever called),
+  every failure logs `sync.failed` with its consecutive count, and at the bound
+  the node warns the players, ejects them and unloads the world. Measured from
+  the last commit that *succeeded*, so a sync that recovers resets it. The
+  unload skips the final commit, because the commit is what is broken, and is
+  recorded as unclean so MN-4's marker cannot later vouch for folders that have
+  diverged from the manifest. Nothing is quarantined and nothing is deleted: the
+  node still holds the lease and its copy is the newest one in existence.
+- **A failed archival stranded the world it was archiving.** FR-35 moves the row
+  to ARCHIVING before it packs anything, and every failure after that point —
+  object storage unreachable, no dimensions found, a checksum that did not
+  verify — returned an error and left it there holding a live lease. FR-25c
+  loads only READY or CREATING worlds and FR-37 deletes only ARCHIVED ones, so
+  for the rest of the lease the owner could neither play the world nor get rid
+  of it, and FR-40's recovery sweep skipped it because it looks for a *dead*
+  lease. A diagnosed failure now rolls the world back to READY and drops the
+  lease at once, the way `abandonRestore` has always done for FR-36.
 - **MN-16 was not enforced.** `/world join` selected a node and only then checked
   whether the world held a live lease on that node, so the second member of a
   loaded world was routed to whichever node was emptier, where the lease

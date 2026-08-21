@@ -9,6 +9,7 @@
 # number as `<mc>.build.<n>-stable`. gzmn.plugin-conventions reduces both that
 # and the older `1.21.4-R0.1-SNAPSHOT` shape to the Minecraft version alone.
 paperApi = "26.2.build.112-stable"
+paperApi121 = "1.21.11-R0.1-SNAPSHOT"
 velocityApi = "4.0.0"
 # Optional at runtime: the proxy uses it to enumerate storage tiers when it is
 # installed, and falls back to probing configured nodes when it is not (§4).
@@ -41,6 +42,7 @@ testcontainers = "2.0.5"
 archunit = "1.5.0"
 # Artifact is mockbukkit-v<mc>; bump alongside paperApi when Paper moves.
 mockbukkit = "4.116.1"
+mockbukkit121 = "4.110.0"
 
 # Build tooling
 errorprone = "2.50.0"
@@ -52,6 +54,7 @@ licensee = "1.14.1"
 
 [libraries]
 paper-api = { module = "io.papermc.paper:paper-api", version.ref = "paperApi" }
+paper-api-v121 = { module = "io.papermc.paper:paper-api", version.ref = "paperApi121" }
 velocity-api = { module = "com.velocitypowered:velocity-api", version.ref = "velocityApi" }
 luckperms-api = { module = "net.luckperms:api", version.ref = "luckperms" }
 
@@ -87,6 +90,7 @@ testcontainers-minio = { module = "org.testcontainers:testcontainers-minio" }
 archunit-junit5 = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
 # Coordinates track the Paper line (mockbukkit-v26.2 for paperApi 26.2.*).
 mockbukkit = { module = "org.mockbukkit.mockbukkit:mockbukkit-v26.2", version.ref = "mockbukkit" }
+mockbukkit-v121 = { module = "org.mockbukkit.mockbukkit:mockbukkit-v1.21", version.ref = "mockbukkit121" }
 
 errorprone-core = { module = "com.google.errorprone:error_prone_core", version.ref = "errorprone" }
 nullaway = { module = "com.uber.nullaway:nullaway", version.ref = "nullaway" }

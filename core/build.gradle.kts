@@ -4,6 +4,12 @@ plugins {
 
 description = "Platform-independent core: model, database, storage, config, control plane"
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
 // This module must never gain a dependency on paper-api or velocity-api. It is
 // what makes the storage engine, lease logic, manifest format and control plane
 // testable without booting a Minecraft server, and it keeps the

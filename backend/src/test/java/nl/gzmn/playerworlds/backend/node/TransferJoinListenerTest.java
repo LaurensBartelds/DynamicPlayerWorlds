@@ -6,9 +6,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import net.kyori.adventure.text.Component;
@@ -16,6 +18,7 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
+import nl.gzmn.playerworlds.backend.world.LoadOutcome;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
@@ -40,7 +43,9 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.testing.TestDatabase;
+import org.bukkit.World;
 import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -113,7 +118,14 @@ class TransferJoinListenerTest {
                 tempDir);
 
         listener = new TransferJoinListener(
-                nodeConfig, transferRepo, lifecycle, folders, executors, nodeCommands, NetworkPolicy::defaults);
+                nodeConfig,
+                transferRepo,
+                lifecycle,
+                folders,
+                executors,
+                nodeCommands,
+                NetworkPolicy::defaults,
+                metrics);
 
         MainThread.enter(Thread.currentThread());
         server = MockBukkit.mock();
@@ -387,6 +399,113 @@ class TransferJoinListenerTest {
         awaitPlayerWorld(player, worldMock);
 
         assertEquals(worldMock, player.getWorld());
+        List<Long> ids = onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10));
+        assertThat(ids).isEmpty();
+    }
+
+    /** Two seconds: long enough that the enqueued eject is still claimable when asserted on. */
+    private static final Duration SHORT_HOLDING_TIMEOUT = Duration.ofSeconds(2);
+
+    private TransferJoinListener listenerWaitingOn(CompletableFuture<LoadOutcome> load) {
+        NetworkPolicy shortHold = NetworkPolicy.fromRaw(Map.of(
+                NetworkPolicy.KEY_HOLDING_TIMEOUT_SECONDS,
+                Long.toString(SHORT_HOLDING_TIMEOUT.toSeconds()),
+                // Both budgets live inside the holding timeout (NFR-1, FR-11), so
+                // they have to come down with it or ConfigValidator would refuse
+                // this policy on a real node.
+                NetworkPolicy.KEY_COLD_LOAD_BUDGET_SECONDS,
+                "1",
+                NetworkPolicy.KEY_COMMIT_TIMEOUT_SECONDS,
+                "1"));
+        return new TransferJoinListener(
+                nodeConfig, transferRepo, id -> load, folders, executors, nodeCommands, () -> shortHold, metrics);
+    }
+
+    private WorldId routedWorldFor(PlayerMock player, String name) throws Exception {
+        WorldId worldId = WorldId.random();
+        onDb(() -> {
+            PlayerWorld world = worldRepo.create(worldId, player.getUniqueId(), name, 12345L, 5000, Visibility.PRIVATE);
+            transferRepo.route(player.getUniqueId(), worldId, "node-1", world.generation());
+            return null;
+        });
+        return worldId;
+    }
+
+    /**
+     * Reads the counter out of the Prometheus exposition rather than the registry:
+     * Micrometer is shaded into the plugin jar and is not on the backend test
+     * compile classpath, and the scrape is the interface a dashboard sees anyway.
+     */
+    private double holdingTimeoutCount() {
+        String scrape = metrics.scrape();
+        String prefix = "holding_timeouts_total ";
+        return scrape.lines()
+                .map(String::strip)
+                .filter(line -> line.startsWith(prefix))
+                .map(line -> Double.parseDouble(line.substring(prefix.length()).strip()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("holding_timeouts_total is missing from the scrape: " + scrape));
+    }
+
+    @Test
+    @DisplayName("a join whose load never completes ejects at the holding timeout (FR-11)")
+    void aJoinThatNeverCompletesEjectsAtTheHoldingTimeout_FR11() throws Exception {
+        PlayerMock player = server.addPlayer();
+        World lobby = player.getWorld();
+        WorldId worldId = routedWorldFor(player, "StalledWorld");
+
+        // The load that never answers — spec section 9's "player is transferred but
+        // the world fails to load", in its worst shape: it does not fail either.
+        CompletableFuture<LoadOutcome> stalled = new CompletableFuture<>();
+        TransferJoinListener stalling = listenerWaitingOn(stalled);
+
+        stalling.onJoin(new PlayerJoinEvent(player, Component.text("joined")));
+
+        Component msg = awaitPlayerMessage(player);
+        assertThat(msg).isNotNull();
+        assertThat(PlainTextComponentSerializer.plainText().serialize(msg))
+                .contains("that world took too long to load");
+
+        List<Long> ids = awaitNodeCommands();
+        assertThat(ids).hasSize(1);
+        NodeCommand command = onDb(() -> nodeCommands.findById(ids.getFirst())).orElseThrow();
+        assertEquals(CommandKind.EJECT_PLAYER.name(), command.command());
+        EjectPayload eject = EjectPayload.parse(command.payloadJson()).orElseThrow();
+        assertEquals(player.getUniqueId(), eject.playerUuid());
+        assertThat(eject.reason()).contains("Holding area timeout");
+        assertThat(holdingTimeoutCount()).isEqualTo(1.0d);
+
+        // The load arriving late must not teleport a player already on their way to
+        // lobby: the world is real and materialised, so an unguarded sendIn would.
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        WorldMock lateWorld = server.addSimpleWorld(overworldName);
+        LoadedWorld loaded = new LoadedWorld(worldId, player.getUniqueId(), "StalledWorld", 12345L, 5000, 0L);
+        loaded.markMaterialised(DimensionKind.OVERWORLD);
+        stalled.complete(new LoadOutcome.Loaded(loaded));
+        flushExecutors();
+
+        assertThat(player.getWorld()).isEqualTo(lobby).isNotEqualTo(lateWorld);
+        assertThat(holdingTimeoutCount()).isEqualTo(1.0d);
+    }
+
+    @Test
+    @DisplayName("disconnecting before the world arrives stands the holding deadline down (FR-11)")
+    void disconnectingBeforeTheWorldArrivesStandsTheDeadlineDown_FR11() throws Exception {
+        PlayerMock player = server.addPlayer();
+        var _ = routedWorldFor(player, "AbandonedWorld");
+
+        CompletableFuture<LoadOutcome> stalled = new CompletableFuture<>();
+        TransferJoinListener stalling = listenerWaitingOn(stalled);
+
+        stalling.onJoin(new PlayerJoinEvent(player, Component.text("joined")));
+        flushExecutors();
+        var _ = player.disconnect();
+        stalling.onQuit(new PlayerQuitEvent(player, Component.text("left"), PlayerQuitEvent.QuitReason.DISCONNECTED));
+
+        Thread.sleep(SHORT_HOLDING_TIMEOUT.plusMillis(500).toMillis());
+        flushExecutors();
+
+        assertThat(holdingTimeoutCount()).isEqualTo(0.0d);
         List<Long> ids = onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10));
         assertThat(ids).isEmpty();
     }

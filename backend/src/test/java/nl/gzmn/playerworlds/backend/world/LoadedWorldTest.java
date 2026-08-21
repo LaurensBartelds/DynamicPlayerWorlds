@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.world;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Duration;
 import java.util.UUID;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.world.LoadedWorld.IdleDecision;
@@ -115,6 +116,29 @@ class LoadedWorldTest {
         world.markUnloaded(DimensionKind.END);
 
         assertThat(world.materialised()).containsExactly(DimensionKind.OVERWORLD);
+    }
+
+    @Test
+    @DisplayName("MN-11a's window opens on a failure and closes on a success")
+    void syncFailureWindow() {
+        LoadedWorld world = world();
+
+        // A world that has just loaded is not behind on anything, however small the bound.
+        assertThat(world.consecutiveCommitFailures()).isZero();
+        assertThat(world.isSyncFailingFor(Duration.ZERO)).isFalse();
+
+        assertThat(world.recordCommitFailure()).isEqualTo(1);
+        assertThat(world.recordCommitFailure()).isEqualTo(2);
+        assertThat(world.isSyncFailingFor(Duration.ZERO)).isTrue();
+        assertThat(world.isSyncFailingFor(Duration.ofHours(1)))
+                .as("the window is measured in time, not in failures")
+                .isFalse();
+
+        world.recordCommitSuccess();
+        assertThat(world.consecutiveCommitFailures()).isZero();
+        assertThat(world.isSyncFailingFor(Duration.ZERO))
+                .as("a sync that recovers resets the window (MN-11a)")
+                .isFalse();
     }
 
     @Test

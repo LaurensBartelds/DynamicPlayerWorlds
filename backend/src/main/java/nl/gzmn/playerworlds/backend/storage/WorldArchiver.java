@@ -237,7 +237,16 @@ public final class WorldArchiver {
                     LocalObjectCache cache =
                             new LocalObjectCache(tempMaterializeDir.resolve(".cache"), PlainFileCloner.INSTANCE);
                     WorldDownloader downloader = new WorldDownloader(objectStore, cache, PlainFileCloner.INSTANCE);
-                    downloader.materialize(manifest, tempMaterializeDir);
+                    // Fresh temp directory, so the mirror half has nothing to
+                    // remove; the roots are passed because materialize will not
+                    // guess which files it is allowed to delete.
+                    // Fresh temp directory, so nothing local can be trusted and
+                    // nothing has to be: every file is a download either way.
+                    downloader.materialize(
+                            manifest,
+                            tempMaterializeDir,
+                            relativeDimensionFolders(folderBase),
+                            WorldDownloader.Verification.REHASH);
 
                     for (DimensionKind dimension : DimensionKind.values()) {
                         Path matDir = worldLayout.bukkitWorldFolder(
@@ -254,7 +263,7 @@ public final class WorldArchiver {
 
         if (dimensionDirs.isEmpty()) {
             if (tempMaterializeDir != null) deleteDirectoryRecursively(tempMaterializeDir);
-            return ArchiveResult.error("No world dimensions found to archive for " + worldId);
+            return abandon(worldId, "No world dimensions found to archive for " + worldId);
         }
 
         // 4. Pack archive
@@ -267,7 +276,7 @@ public final class WorldArchiver {
             packResult = ArchivePacker.pack(dimensionDirs, tempArchive, useZstd, currentPolicy.excludeGlobs());
         } catch (Exception e) {
             if (tempMaterializeDir != null) deleteDirectoryRecursively(tempMaterializeDir);
-            return ArchiveResult.error("Failed to pack archive: " + e.getMessage());
+            return abandon(worldId, "Failed to pack archive: " + e.getMessage());
         } finally {
             if (tempMaterializeDir != null) {
                 deleteDirectoryRecursively(tempMaterializeDir);
@@ -283,13 +292,13 @@ public final class WorldArchiver {
                     + clock.now().toEpochMilli() + ext;
         } catch (SQLException e) {
             deleteQuietly(tempArchive);
-            return ArchiveResult.error("Failed to read database time for archive key: " + e.getMessage());
+            return abandon(worldId, "Failed to read database time for archive key: " + e.getMessage());
         }
         try {
             archiveStorage.uploadArchive(archiveKey, tempArchive);
         } catch (Exception e) {
             deleteQuietly(tempArchive);
-            return ArchiveResult.error("Failed to upload archive: " + e.getMessage());
+            return abandon(worldId, "Failed to upload archive: " + e.getMessage());
         }
 
         // 6. Verify the stored archive (FR-35, CONTRIBUTING rule 8).
@@ -315,7 +324,7 @@ public final class WorldArchiver {
         } catch (Exception e) {
             archiveStorage.deleteArchive(archiveKey);
             deleteQuietly(tempArchive);
-            return ArchiveResult.error("Archive verification failed: " + e.getMessage());
+            return abandon(worldId, "Archive verification failed: " + e.getMessage());
         }
 
         // 7. Atomic DB transition to ARCHIVED
@@ -326,12 +335,12 @@ public final class WorldArchiver {
             if (!committed) {
                 archiveStorage.deleteArchive(archiveKey);
                 deleteQuietly(tempArchive);
-                return ArchiveResult.error("Failed to commit ARCHIVED state to database for world " + worldId);
+                return abandon(worldId, "Failed to commit ARCHIVED state to database for world " + worldId);
             }
         } catch (SQLException e) {
             archiveStorage.deleteArchive(archiveKey);
             deleteQuietly(tempArchive);
-            return ArchiveResult.error("Database commit error: " + e.getMessage());
+            return abandon(worldId, "Database commit error: " + e.getMessage());
         }
 
         // 8. Purge live snapshot prefix & local scratch folders
@@ -358,6 +367,30 @@ public final class WorldArchiver {
         return ArchiveResult.ok(archiveKey, packResult.sizeBytes(), packResult.checksum());
     }
 
+    /**
+     * Returns a failed archival to READY, releases the lease and reports the failure (FR-35).
+     *
+     * <p>Called from every exit after the row reached ARCHIVING. FR-40's sweep only recognises a
+     * <em>dead</em> lease, so without this a diagnosed failure leaves the world mid-transition for
+     * the rest of the lease: FR-25c will not load a world that is not READY or CREATING, and FR-37
+     * will not delete one that is not ARCHIVED, so for that window the owner can neither play the
+     * world nor get rid of it. Safe wherever it is called from, because FR-35 deletes nothing
+     * before the checksum of the written archive verifies.
+     */
+    private ArchiveResult abandon(WorldId worldId, String message) {
+        try {
+            if (!worlds.abandonArchive(worldId, nodeId)) {
+                log.warn(
+                        "Could not roll world {} back to READY after a failed archival;"
+                                + " the lease has probably been fenced",
+                        worldId);
+            }
+        } catch (SQLException e) {
+            log.error("Failed to roll world {} back to READY after a failed archival", worldId, e);
+        }
+        return ArchiveResult.error(message);
+    }
+
     /** Best effort: a leftover scratch file is swept by FR-40, a failed archival must not be. */
     private static void deleteQuietly(Path file) {
         try {
@@ -365,6 +398,19 @@ public final class WorldArchiver {
         } catch (IOException e) {
             log.debug("Could not delete temporary archive file {}", file, e);
         }
+    }
+
+    /**
+     * The world's dimension folders relative to a scratch root, which is what
+     * {@link WorldDownloader#materialize} needs to know before it may delete
+     * anything.
+     */
+    private List<Path> relativeDimensionFolders(String folderBase) {
+        List<Path> roots = new ArrayList<>(DimensionKind.values().length);
+        for (DimensionKind dimension : DimensionKind.values()) {
+            roots.add(worldLayout.relativeWorldFolder(primaryLevelName, folderBase, dimension));
+        }
+        return List.copyOf(roots);
     }
 
     private static void deleteDirectoryRecursively(@Nullable Path dir) {

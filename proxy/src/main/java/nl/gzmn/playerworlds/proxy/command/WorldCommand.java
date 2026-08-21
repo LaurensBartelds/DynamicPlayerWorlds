@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.proxy.command;
 
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
@@ -16,18 +17,28 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.JsonText;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.config.messages.MessageKey;
+import nl.gzmn.playerworlds.core.config.messages.MessageRegistry;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.ControlChannels;
 import nl.gzmn.playerworlds.core.control.MigratePayload;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.db.Database;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
+import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository.NodeStatus;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
@@ -45,6 +56,7 @@ import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
+import nl.gzmn.playerworlds.proxy.permission.WorldPermissions;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -66,6 +78,7 @@ public final class WorldCommand {
 
     /** Implemented here, for the enable log line and for tests. */
     public static final List<String> SUBCOMMANDS = List.of(
+            "menu",
             "create",
             "join",
             "delete",
@@ -87,16 +100,21 @@ public final class WorldCommand {
             "storage",
             "admin");
 
-    /** Permissions per specification section 6. */
-    public static final String CREATE_PERMISSION = "gzmn.worlds.create";
+    /**
+     * Permissions per specification section 6.
+     *
+     * <p>Canonical definitions live in {@link WorldPermissions}. These aliases remain so existing
+     * call sites and tests keep compiling; the real gate is {@link WorldPermissions#allows}.
+     */
+    public static final String CREATE_PERMISSION = WorldPermissions.CREATE;
 
-    public static final String JOIN_PERMISSION = "gzmn.worlds.join";
-    public static final String PUBLIC_PERMISSION = "gzmn.worlds.public";
-    public static final String ADMIN_PERMISSION = "gzmn.worlds.admin";
+    public static final String JOIN_PERMISSION = WorldPermissions.JOIN;
+    public static final String PUBLIC_PERMISSION = WorldPermissions.PUBLIC;
+    public static final String ADMIN_PERMISSION = WorldPermissions.ADMIN;
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
-    public static final List<String> ADMIN_SUBCOMMANDS =
-            List.of("list", "unload", "migrate", "drain", "transfer", "storage", "archive", "restore", "delete");
+    public static final List<String> ADMIN_SUBCOMMANDS = List.of(
+            "list", "unload", "migrate", "drain", "transfer", "storage", "archive", "restore", "delete", "message");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -116,6 +134,9 @@ public final class WorldCommand {
     private final Supplier<NetworkPolicy> policy;
     private final StorageTiers storageTiers = new StorageTiers();
 
+    /** Write handle for {@code /world admin message}; {@code null} disables that subcommand. */
+    private final @Nullable NetworkSettings networkSettings;
+
     public WorldCommand(
             ProxyServer proxy,
             PluginExecutors executors,
@@ -128,6 +149,7 @@ public final class WorldCommand {
             NodeRegistry registry,
             Placement placement,
             NodeCommandRepository nodeCommands,
+            Database database,
             Supplier<NetworkPolicy> policy) {
         this(
                 new WorldActions(
@@ -142,6 +164,7 @@ public final class WorldCommand {
                         registry,
                         placement,
                         nodeCommands,
+                        database,
                         policy),
                 proxy,
                 executors,
@@ -159,6 +182,18 @@ public final class WorldCommand {
             Placement placement,
             NodeCommandRepository nodeCommands,
             Supplier<NetworkPolicy> policy) {
+        this(actions, proxy, executors, worlds, placement, nodeCommands, policy, null);
+    }
+
+    public WorldCommand(
+            WorldActions actions,
+            ProxyServer proxy,
+            PluginExecutors executors,
+            PlayerWorldRepository worlds,
+            Placement placement,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy,
+            @Nullable NetworkSettings networkSettings) {
         this.actions = Objects.requireNonNull(actions, "actions");
         this.proxy = Objects.requireNonNull(proxy, "proxy");
         this.executors = Objects.requireNonNull(executors, "executors");
@@ -166,10 +201,16 @@ public final class WorldCommand {
         this.placement = Objects.requireNonNull(placement, "placement");
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.policy = Objects.requireNonNull(policy, "policy");
+        this.networkSettings = networkSettings;
     }
 
-    private static boolean hasPermissionOrDefault(CommandSource source, String permission) {
-        return source.getPermissionValue(permission) != com.velocitypowered.api.permission.Tristate.FALSE;
+    /**
+     * Brigadier completion hint only (D14). The authoritative check is in {@link WorldActions}
+     * via {@link WorldPermissions#allows}; this keeps the subcommand out of tab-complete for
+     * callers who cannot use it.
+     */
+    private static boolean maySee(CommandSource source, String permission) {
+        return WorldPermissions.allows(source, permission);
     }
 
     private static final AtomicLong CORRELATION_SEQ = new AtomicLong(1);
@@ -181,53 +222,46 @@ public final class WorldCommand {
                     openMenuOrUsage(context.getSource());
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 })
+                .then(BrigadierCommand.literalArgumentBuilder("menu").executes(context -> {
+                    openMenuOrUsage(context.getSource());
+                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                }))
                 .then(BrigadierCommand.literalArgumentBuilder("invite")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        var _ = actions.invite(caller, StringArgumentType.getString(context, "player"));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> invite(context, null))
+                                .then(worldArgument().executes(context -> invite(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("accept")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.accept(caller, StringArgumentType.getString(context, "owner"));
+                                        deliver(
+                                                caller,
+                                                actions.accept(caller, StringArgumentType.getString(context, "owner")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("kick")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        var _ = actions.kick(caller, StringArgumentType.getString(context, "player"));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> kick(context, null))
+                                .then(worldArgument().executes(context -> kick(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("promote")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        var _ = actions.promote(
-                                                caller, StringArgumentType.getString(context, "player"));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> promote(context, null))
+                                .then(worldArgument().executes(context -> promote(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("transfer")
                         .then(BrigadierCommand.literalArgumentBuilder("accept")
                                 .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.transferAccept(
-                                                        caller, StringArgumentType.getString(context, "owner"));
+                                                deliver(
+                                                        caller,
+                                                        actions.transferAccept(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
@@ -236,38 +270,33 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.transferDecline(
-                                                        caller, StringArgumentType.getString(context, "owner"));
+                                                deliver(
+                                                        caller,
+                                                        actions.transferDecline(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        var _ = actions.transfer(
-                                                caller, StringArgumentType.getString(context, "player"), false);
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })
+                                .executes(context -> transfer(context, null, false))
                                 .then(BrigadierCommand.literalArgumentBuilder("confirm")
-                                        .executes(context -> {
-                                            Player caller = playerOrNull(context);
-                                            if (caller != null) {
-                                                var _ = actions.transfer(
-                                                        caller, StringArgumentType.getString(context, "player"), true);
-                                            }
-                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
+                                        .executes(context -> transfer(context, null, true)))
+                                .then(worldArgument()
+                                        .executes(context -> transfer(context, worldName(context), false))
+                                        .then(BrigadierCommand.literalArgumentBuilder("confirm")
+                                                .executes(context -> transfer(context, worldName(context), true))))))
                 .then(BrigadierCommand.literalArgumentBuilder("create")
-                        .requires(source -> hasPermissionOrDefault(source, CREATE_PERMISSION))
+                        .requires(source -> maySee(source, CREATE_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.create(
-                                                caller, StringArgumentType.getString(context, "name"), null);
+                                        deliver(
+                                                caller,
+                                                actions.create(
+                                                        caller, StringArgumentType.getString(context, "name"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -275,10 +304,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.create(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "name"),
-                                                        StringArgumentType.getString(context, "seed"));
+                                                        actions.create(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                StringArgumentType.getString(context, "seed")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
@@ -287,8 +318,10 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.delete(
-                                                caller, StringArgumentType.getString(context, "name"), false);
+                                        deliver(
+                                                caller,
+                                                actions.delete(
+                                                        caller, StringArgumentType.getString(context, "name"), false));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -296,8 +329,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.delete(
-                                                        caller, StringArgumentType.getString(context, "name"), true);
+                                                deliver(
+                                                        caller,
+                                                        actions.delete(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                true));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))
@@ -305,8 +342,12 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.deleteHard(
-                                                        caller, StringArgumentType.getString(context, "name"), false);
+                                                deliver(
+                                                        caller,
+                                                        actions.deleteHard(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                false));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })
@@ -314,10 +355,12 @@ public final class WorldCommand {
                                                 .executes(context -> {
                                                     Player caller = playerOrNull(context);
                                                     if (caller != null) {
-                                                        var _ = actions.deleteHard(
+                                                        deliver(
                                                                 caller,
-                                                                StringArgumentType.getString(context, "name"),
-                                                                true);
+                                                                actions.deleteHard(
+                                                                        caller,
+                                                                        StringArgumentType.getString(context, "name"),
+                                                                        true));
                                                     }
                                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                                 })))))
@@ -326,18 +369,22 @@ public final class WorldCommand {
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.restore(caller, StringArgumentType.getString(context, "name"));
+                                        deliver(
+                                                caller,
+                                                actions.restore(caller, StringArgumentType.getString(context, "name")));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
                 .then(BrigadierCommand.literalArgumentBuilder("join")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .then(BrigadierCommand.requiredArgumentBuilder("owner", StringArgumentType.word())
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.join(
-                                                caller, StringArgumentType.getString(context, "owner"), null);
+                                        deliver(
+                                                caller,
+                                                actions.join(
+                                                        caller, StringArgumentType.getString(context, "owner"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -345,40 +392,38 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.join(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "owner"),
-                                                        StringArgumentType.getString(context, "name"));
+                                                        actions.join(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "owner"),
+                                                                StringArgumentType.getString(context, "name")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
-                .then(BrigadierCommand.literalArgumentBuilder("members").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        var _ = actions.members(caller);
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                .then(BrigadierCommand.literalArgumentBuilder("members")
+                        .executes(context -> members(context, null))
+                        .then(worldArgument().executes(context -> members(context, worldName(context)))))
                 .then(BrigadierCommand.literalArgumentBuilder("list").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.list(caller);
+                        deliver(caller, actions.list(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
                 .then(BrigadierCommand.literalArgumentBuilder("browse")
-                        .requires(source -> hasPermissionOrDefault(source, JOIN_PERMISSION))
+                        .requires(source -> maySee(source, JOIN_PERMISSION))
                         .executes(context -> {
-                            var _ = actions.browse(context.getSource());
+                            deliver(context.getSource(), actions.browse(context.getSource()));
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                         }))
                 .then(BrigadierCommand.literalArgumentBuilder("public")
-                        .requires(source -> source.hasPermission(PUBLIC_PERMISSION))
+                        .requires(source -> maySee(source, PUBLIC_PERMISSION))
                         .then(BrigadierCommand.literalArgumentBuilder("on")
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.setPublic(caller, true, null);
+                                        deliver(caller, actions.setPublic(caller, true, null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -387,48 +432,41 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.setPublic(
+                                                deliver(
                                                         caller,
-                                                        true,
-                                                        StringArgumentType.getString(context, "description"));
+                                                        actions.setPublic(
+                                                                caller,
+                                                                true,
+                                                                StringArgumentType.getString(context, "description")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         })))
                         .then(BrigadierCommand.literalArgumentBuilder("off").executes(context -> {
                             Player caller = playerOrNull(context);
                             if (caller != null) {
-                                var _ = actions.setPublic(caller, false, null);
+                                deliver(caller, actions.setPublic(caller, false, null));
                             }
                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                         })))
                 .then(BrigadierCommand.literalArgumentBuilder("set")
                         .then(BrigadierCommand.requiredArgumentBuilder("setting", StringArgumentType.word())
                                 .then(BrigadierCommand.requiredArgumentBuilder("value", StringArgumentType.word())
-                                        .executes(context -> {
-                                            Player caller = playerOrNull(context);
-                                            if (caller != null) {
-                                                var _ = actions.setSetting(
-                                                        caller,
-                                                        StringArgumentType.getString(context, "setting"),
-                                                        StringArgumentType.getString(context, "value"));
-                                            }
-                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
-                .then(BrigadierCommand.literalArgumentBuilder("settings").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        var _ = actions.showSettings(caller);
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                                        .executes(context -> setSetting(context, null))
+                                        .then(worldArgument()
+                                                .executes(context -> setSetting(context, worldName(context)))))))
+                .then(BrigadierCommand.literalArgumentBuilder("settings")
+                        .executes(context -> showSettings(context, null))
+                        .then(worldArgument().executes(context -> showSettings(context, worldName(context)))))
                 .then(BrigadierCommand.literalArgumentBuilder("ban")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
                                 .suggests(this::suggestOnlinePlayers)
                                 .executes(context -> {
                                     Player caller = playerOrNull(context);
                                     if (caller != null) {
-                                        var _ = actions.ban(
-                                                caller, StringArgumentType.getString(context, "player"), null);
+                                        deliver(
+                                                caller,
+                                                actions.ban(
+                                                        caller, StringArgumentType.getString(context, "player"), null));
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
@@ -437,36 +475,29 @@ public final class WorldCommand {
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
                                             if (caller != null) {
-                                                var _ = actions.ban(
+                                                deliver(
                                                         caller,
-                                                        StringArgumentType.getString(context, "player"),
-                                                        StringArgumentType.getString(context, "reason"));
+                                                        actions.ban(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "player"),
+                                                                StringArgumentType.getString(context, "reason")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))))
                 .then(BrigadierCommand.literalArgumentBuilder("unban")
                         .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
-                                .executes(context -> {
-                                    Player caller = playerOrNull(context);
-                                    if (caller != null) {
-                                        var _ = actions.unban(caller, StringArgumentType.getString(context, "player"));
-                                    }
-                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                })))
+                                .executes(context -> unban(context, null))
+                                .then(worldArgument().executes(context -> unban(context, worldName(context))))))
                 .then(BrigadierCommand.literalArgumentBuilder("storage").executes(context -> {
                     Player caller = playerOrNull(context);
                     if (caller != null) {
-                        var _ = actions.storage(caller);
+                        deliver(caller, actions.storage(caller));
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
-                .then(BrigadierCommand.literalArgumentBuilder("bans").executes(context -> {
-                    Player caller = playerOrNull(context);
-                    if (caller != null) {
-                        var _ = actions.listBans(caller);
-                    }
-                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                }))
+                .then(BrigadierCommand.literalArgumentBuilder("bans")
+                        .executes(context -> listBans(context, null))
+                        .then(worldArgument().executes(context -> listBans(context, worldName(context)))))
                 .then(adminTree());
         return new BrigadierCommand(root);
     }
@@ -476,9 +507,12 @@ public final class WorldCommand {
      */
     private LiteralArgumentBuilder<CommandSource> adminTree() {
         return BrigadierCommand.literalArgumentBuilder("admin")
-                .requires(source -> source.hasPermission(ADMIN_PERMISSION))
+                .requires(source -> maySee(source, ADMIN_PERMISSION))
                 .executes(context -> {
-                    info(context.getSource(), "/world admin <" + String.join("|", ADMIN_SUBCOMMANDS) + ">");
+                    info(
+                            context.getSource(),
+                            "messages.command.admin.usage",
+                            Placeholders.raw("subcommands", String.join("|", ADMIN_SUBCOMMANDS)));
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 })
                 .then(BrigadierCommand.literalArgumentBuilder("list").executes(context -> {
@@ -580,6 +614,54 @@ public final class WorldCommand {
                                                     StringArgumentType.getString(context, "id"),
                                                     true);
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
+                .then(BrigadierCommand.literalArgumentBuilder("message")
+                        .executes(context -> {
+                            adminMessageList(context.getSource(), 0);
+                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                        })
+                        .then(BrigadierCommand.literalArgumentBuilder("list")
+                                .executes(context -> {
+                                    adminMessageList(context.getSource(), 0);
+                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                })
+                                .then(BrigadierCommand.requiredArgumentBuilder(
+                                                "page", com.mojang.brigadier.arguments.IntegerArgumentType.integer(1))
+                                        .executes(context -> {
+                                            adminMessageList(
+                                                    context.getSource(),
+                                                    com.mojang.brigadier.arguments.IntegerArgumentType.getInteger(
+                                                                    context, "page")
+                                                            - 1);
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.literalArgumentBuilder("get")
+                                .then(BrigadierCommand.requiredArgumentBuilder("key", StringArgumentType.word())
+                                        .suggests(this::suggestMessageKeys)
+                                        .executes(context -> {
+                                            adminMessageGet(
+                                                    context.getSource(), StringArgumentType.getString(context, "key"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.literalArgumentBuilder("set")
+                                .then(BrigadierCommand.requiredArgumentBuilder("key", StringArgumentType.word())
+                                        .suggests(this::suggestMessageKeys)
+                                        .then(BrigadierCommand.requiredArgumentBuilder(
+                                                        "value", StringArgumentType.greedyString())
+                                                .executes(context -> {
+                                                    adminMessageSet(
+                                                            context.getSource(),
+                                                            StringArgumentType.getString(context, "key"),
+                                                            StringArgumentType.getString(context, "value"));
+                                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                                }))))
+                        .then(BrigadierCommand.literalArgumentBuilder("reset")
+                                .then(BrigadierCommand.requiredArgumentBuilder("key", StringArgumentType.word())
+                                        .suggests(this::suggestMessageKeys)
+                                        .executes(context -> {
+                                            adminMessageReset(
+                                                    context.getSource(), StringArgumentType.getString(context, "key"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                         }))));
     }
 
@@ -593,7 +675,7 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             List<NodeStatus> all = placement.allNodes();
             if (all.isEmpty()) {
-                info(source, "no node has ever published a heartbeat");
+                info(source, "messages.command.admin.list.no-heartbeat");
                 return;
             }
             java.util.Set<String> alive = new java.util.HashSet<>();
@@ -602,8 +684,9 @@ public final class WorldCommand {
             }
             info(
                     source,
-                    all.size() + " node(s); alive means a heartbeat within "
-                            + current.deadAfter().toSeconds() + "s and not draining (MN-18)");
+                    "messages.command.admin.list.summary",
+                    Placeholders.count("count", all.size()),
+                    Placeholders.count("seconds", current.deadAfter().toSeconds()));
             for (NodeStatus node : all) {
                 boolean isAlive = alive.contains(node.nodeId());
                 String state = node.draining() ? "DRAINING" : isAlive ? "alive" : "DEAD";
@@ -611,14 +694,16 @@ public final class WorldCommand {
                 Double tps = node.tps();
                 NamedTextColor colour =
                         node.draining() ? NamedTextColor.YELLOW : isAlive ? NamedTextColor.GREEN : NamedTextColor.RED;
-                source.sendMessage(Component.text(
+                Component line = Component.text(
                         node.nodeId() + " [" + state + "] " + node.address()
                                 + " worlds=" + node.loadedWorlds() + "/" + current.maxWorldsPerNode()
                                 + " players=" + node.onlinePlayers()
                                 + " heap=" + (heap == null ? "?" : heap + "%")
                                 + " tps=" + (tps == null ? "?" : String.format(Locale.ROOT, "%.1f", tps))
                                 + " mc=" + node.mcVersion() + " dataVersion=" + node.dataVersion(),
-                        colour));
+                        colour);
+                source.sendMessage(
+                        actions.info("messages.command.admin.list.node-status", Placeholders.component("line", line)));
             }
         });
     }
@@ -634,12 +719,12 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(source, "no world with that id");
+                error(source, "messages.command.admin.no-world-for-id");
                 return;
             }
             Optional<String> holder = worlds.leaseHolder(worldId);
             if (holder.isEmpty()) {
-                info(source, "that world holds no live lease; nothing to unload");
+                info(source, "messages.command.admin.unload.no-lease");
                 return;
             }
             nodeCommands.enqueue(
@@ -650,7 +735,11 @@ public final class WorldCommand {
                     NodeCommand.EMPTY_PAYLOAD,
                     current.holdingTimeout(),
                     ControlChannels.forNode(holder.get()));
-            success(source, "asked " + holder.get() + " to commit and unload " + worldId);
+            success(
+                    source,
+                    "messages.command.admin.unload.success",
+                    Placeholders.raw("holder", holder.get()),
+                    Placeholders.raw("world", worldId.toString()));
         });
     }
 
@@ -668,21 +757,26 @@ public final class WorldCommand {
             Placement.MigrationCheck check = placement.canTake(targetNode, worldId, current);
             switch (check) {
                 case Placement.MigrationCheck.UnknownNode ignored -> {
-                    error(source, "no node called '" + targetNode + "' has ever registered");
+                    error(source, "messages.command.admin.unknown-node", Placeholders.raw("node", targetNode));
                 }
                 case Placement.MigrationCheck.NotAvailable unavailable -> {
                     error(
                             source,
-                            unavailable.draining()
-                                    ? "'" + targetNode + "' is draining and takes no worlds (MN-22)"
-                                    : "'" + targetNode + "' has not published a heartbeat recently (MN-18)");
+                            "messages.command.admin.migrate.not-available",
+                            Placeholders.raw("node", targetNode),
+                            Placeholders.raw(
+                                    "reason",
+                                    unavailable.draining()
+                                            ? "is draining and takes no worlds (MN-22)"
+                                            : "has not published a heartbeat recently (MN-18)"));
                 }
                 case Placement.MigrationCheck.TooOld tooOld -> {
                     error(
                             source,
-                            "'" + targetNode + "' runs data version " + tooOld.nodeDataVersion()
-                                    + " and that world was last saved at " + tooOld.worldDataVersion()
-                                    + "; it cannot open it (MN-26)");
+                            "messages.command.admin.migrate.too-old",
+                            Placeholders.raw("node", targetNode),
+                            Placeholders.count("node-version", tooOld.nodeDataVersion()),
+                            Placeholders.count("world-version", tooOld.worldDataVersion()));
                 }
                 case Placement.MigrationCheck.Ready ready -> {
                     migrateReadyWorld(source, worldId, ready, current);
@@ -701,20 +795,24 @@ public final class WorldCommand {
             Optional<PlayerWorldRepository.LeaseGrant> grant =
                     worlds.acquireLease(worldId, targetNode, ready.node().dataVersion(), current.leaseDuration());
             if (grant.isEmpty()) {
-                error(source, "a node took that world while you were typing; try again");
+                error(source, "messages.command.admin.migrate.lease-race");
                 return;
             }
-            success(source, worldId + " was not loaded; its lease is now on " + targetNode);
+            success(
+                    source,
+                    "messages.command.admin.migrate.unloaded-relocated",
+                    Placeholders.raw("world", worldId.toString()),
+                    Placeholders.raw("node", targetNode));
             return;
         }
         if (holder.equals(targetNode)) {
-            info(source, "that world is already on " + targetNode);
+            info(source, "messages.command.admin.migrate.already-there", Placeholders.raw("node", targetNode));
             return;
         }
 
         Optional<PlayerWorld> row = worlds.findById(worldId);
         if (row.isEmpty()) {
-            error(source, "no world with that id");
+            error(source, "messages.command.admin.no-world-for-id");
             return;
         }
 
@@ -732,20 +830,24 @@ public final class WorldCommand {
                 ControlChannels.forNode(holder));
         info(
                 source,
-                "asked " + holder + " to hand " + worldId + " over to " + targetNode + "; players inside get a "
-                        + countdown + "s countdown (MN-21)");
+                "messages.command.admin.migrate.handoff-requested",
+                Placeholders.raw("holder", holder),
+                Placeholders.raw("world", worldId.toString()),
+                Placeholders.raw("node", targetNode),
+                Placeholders.count("countdown", countdown));
 
         Optional<NodeCommand> completed = awaitCompletion(commandId, countdown, current);
         if (completed.isEmpty()) {
-            error(
-                    source,
-                    "no answer from " + holder + " yet; the world stays where it is. Check /world admin list and the "
-                            + "node's log, then try again");
+            error(source, "messages.command.admin.migrate.no-answer", Placeholders.raw("holder", holder));
             return;
         }
         String result = completed.get().result();
         if (!CommandResult.OK.equals(result)) {
-            error(source, holder + " refused to give the world up: " + result);
+            error(
+                    source,
+                    "messages.command.admin.migrate.refused",
+                    Placeholders.raw("holder", holder),
+                    Placeholders.raw("result", result != null ? result : "(no reason given)"));
             return;
         }
 
@@ -755,12 +857,17 @@ public final class WorldCommand {
             Optional<String> nowOn = worlds.leaseHolder(worldId);
             error(
                     source,
-                    "the world was released but "
-                            + nowOn.orElse("another node")
-                            + " took the lease before " + targetNode + " could");
+                    "messages.command.admin.migrate.race-after-release",
+                    Placeholders.raw("now-on", nowOn.orElse("another node")),
+                    Placeholders.raw("node", targetNode));
             return;
         }
-        success(source, worldId + " moved from " + holder + " to " + targetNode + " (MN-19)");
+        success(
+                source,
+                "messages.command.admin.migrate.success",
+                Placeholders.raw("world", worldId.toString()),
+                Placeholders.raw("from", holder),
+                Placeholders.raw("to", targetNode));
     }
 
     private Optional<NodeCommand> awaitCompletion(long commandId, int countdownSeconds, NetworkPolicy current)
@@ -791,7 +898,7 @@ public final class WorldCommand {
     private void adminDrain(CommandSource source, String targetNode, boolean draining) {
         runAsAdmin(source, () -> {
             if (placement.allNodes().stream().noneMatch(node -> node.nodeId().equals(targetNode))) {
-                error(source, "no node called '" + targetNode + "' has ever registered");
+                error(source, "messages.command.admin.unknown-node", Placeholders.raw("node", targetNode));
                 return;
             }
             List<WorldId> holding = worlds.worldsLeasedTo(targetNode);
@@ -811,14 +918,12 @@ public final class WorldCommand {
             if (draining) {
                 success(
                         source,
-                        "draining " + targetNode + ": it takes no new placements and releases its " + holding.size()
-                                + " world(s) in place (MN-22)");
-                info(
-                        source,
-                        "its worlds are placed fresh on the next join (MN-20); it leaves the proxy's server "
-                                + "list on the next sweep");
+                        "messages.command.admin.drain.on",
+                        Placeholders.raw("node", targetNode),
+                        Placeholders.count("count", holding.size()));
+                info(source, "messages.command.admin.drain.on-hint");
             } else {
-                success(source, targetNode + " will take new placements again");
+                success(source, "messages.command.admin.drain.off", Placeholders.raw("node", targetNode));
             }
         });
     }
@@ -836,42 +941,48 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(source, "no world with that id");
+                error(source, "messages.command.admin.no-world-for-id");
                 return;
             }
             PlayerWorld world = found.get();
             Optional<UUID> target = actions.resolvePlayer(targetName);
             if (target.isEmpty()) {
-                error(source, "no player called '" + targetName + "' has been seen on this network");
+                error(source, "messages.command.generic.player-not-found", Placeholders.text("player", targetName));
                 return;
             }
             if (target.get().equals(world.ownerUuid())) {
-                error(source, targetName + " is already the owner of that world");
+                error(source, "messages.command.admin.transfer.already-owner", Placeholders.text("target", targetName));
                 return;
             }
             int ownedCount = worlds.countOwnedBy(target.get());
             if (ownedCount >= current.maxWorldsPerPlayer()) {
-                error(source, targetName + " has reached their world limit (" + current.maxWorldsPerPlayer() + ")");
+                error(
+                        source,
+                        "messages.command.admin.transfer.cap-reached",
+                        Placeholders.text("target", targetName),
+                        Placeholders.count("max", current.maxWorldsPerPlayer()));
                 return;
             }
             if (!worlds.transferOwnership(worldId, world.ownerUuid(), target.get(), "ADMIN")) {
-                error(source, "could not transfer world " + worldId);
+                error(source, "messages.command.admin.transfer.failed", Placeholders.raw("world", worldId.toString()));
                 return;
             }
             actions.enqueueToWorldOrAliveNodes(world, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, current);
             success(
                     source,
-                    "transferred ownership of '" + world.name() + "' (" + worldId + ") to " + targetName
-                            + " with reason ADMIN");
+                    "messages.command.admin.transfer.success",
+                    Placeholders.text("world", world.name()),
+                    Placeholders.raw("id", worldId.toString()),
+                    Placeholders.text("target", targetName));
             proxy.getPlayer(target.get())
-                    .ifPresent(online -> online.sendMessage(Component.text(
-                            "You were granted ownership of '" + world.name() + "' by an administrator.",
-                            NamedTextColor.GREEN)));
+                    .ifPresent(online -> online.sendMessage(actions.success(
+                            "messages.command.admin.transfer.new-owner-notice",
+                            Placeholders.text("world", world.name()))));
             proxy.getPlayer(world.ownerUuid())
-                    .ifPresent(online -> online.sendMessage(Component.text(
-                            "Ownership of '" + world.name() + "' was transferred to " + targetName
-                                    + " by an administrator.",
-                            NamedTextColor.YELLOW)));
+                    .ifPresent(online -> online.sendMessage(actions.info(
+                            "messages.command.admin.transfer.old-owner-notice",
+                            Placeholders.text("world", world.name()),
+                            Placeholders.text("target", targetName))));
         });
     }
 
@@ -881,7 +992,7 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<UUID> target = actions.resolvePlayer(targetName);
             if (target.isEmpty()) {
-                error(source, "no player called '" + targetName + "' has been seen on this network");
+                error(source, "messages.command.generic.player-not-found", Placeholders.text("player", targetName));
                 return;
             }
             UUID uuid = target.get();
@@ -890,9 +1001,9 @@ public final class WorldCommand {
             StorageQuota quota = online.isPresent()
                     ? storageTiers.evaluate(online.get(), used, current).quota()
                     : new StorageQuota(uuid, used, current.defaultStorageLimitBytes(), false);
-            WorldActions.renderStorage(source, targetName + "'s", quota, worlds.listOwnedBy(uuid));
+            actions.renderStorage(source, targetName + "'s", quota, worlds.listOwnedBy(uuid));
             if (online.isEmpty()) {
-                info(source, "  (offline: allowance shown is the network default, not their permission tier)");
+                info(source, "messages.command.admin.storage.offline-note");
             }
         });
     }
@@ -908,12 +1019,15 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(source, "no world with that id");
+                error(source, "messages.command.admin.no-world-for-id");
                 return;
             }
             PlayerWorld world = found.get();
             if (world.state() == WorldState.ARCHIVED) {
-                info(source, "'" + world.name() + "' is already archived");
+                info(
+                        source,
+                        "messages.command.admin.archive.already-archived",
+                        Placeholders.text("world", world.name()));
                 return;
             }
             String node = adminNodeOrExplain(source, world, current);
@@ -921,7 +1035,11 @@ public final class WorldCommand {
                 return;
             }
             actions.enqueueTo(node, world, CommandKind.ARCHIVE_WORLD, ArchivePayload.format(null), current);
-            success(source, "queued archival of '" + world.name() + "' on " + node);
+            success(
+                    source,
+                    "messages.command.admin.archive.success",
+                    Placeholders.text("world", world.name()),
+                    Placeholders.raw("node", node));
             log.info("world {} queued for archival on {} by an administrator (FR-35)", worldId, node);
         });
     }
@@ -937,19 +1055,23 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(source, "no world with that id");
+                error(source, "messages.command.admin.no-world-for-id");
                 return;
             }
             PlayerWorld world = found.get();
             if (world.state() != WorldState.ARCHIVED) {
-                error(source, "'" + world.name() + "' is " + world.state() + " and does not need restoring");
+                error(
+                        source,
+                        "messages.command.admin.restore.not-archived",
+                        Placeholders.text("world", world.name()),
+                        Placeholders.raw("state", world.state().name()));
                 return;
             }
             UUID newOwner = null;
             if (targetName != null) {
                 Optional<UUID> target = actions.resolvePlayer(targetName);
                 if (target.isEmpty()) {
-                    error(source, "no player called '" + targetName + "' has been seen on this network");
+                    error(source, "messages.command.generic.player-not-found", Placeholders.text("player", targetName));
                     return;
                 }
                 newOwner = target.get();
@@ -961,8 +1083,10 @@ public final class WorldCommand {
             actions.enqueueTo(node, world, CommandKind.RESTORE_WORLD, ArchivePayload.format(newOwner), current);
             success(
                     source,
-                    "queued restore of '" + world.name() + "' on " + node
-                            + (targetName == null ? "" : " for " + targetName));
+                    "messages.command.admin.restore.success",
+                    Placeholders.text("world", world.name()),
+                    Placeholders.raw("node", node),
+                    Placeholders.text("target-suffix", targetName == null ? "" : " for " + targetName));
             log.info("world {} queued for restore on {} by an administrator (FR-36)", worldId, node);
         });
     }
@@ -980,24 +1104,28 @@ public final class WorldCommand {
         runAsAdmin(source, () -> {
             Optional<PlayerWorld> found = worlds.findById(worldId);
             if (found.isEmpty()) {
-                error(source, "no world with that id");
+                error(source, "messages.command.admin.no-world-for-id");
                 return;
             }
             PlayerWorld world = found.get();
             if (!confirmed) {
-                error(
+                error(source, "messages.command.admin.delete.confirm", Placeholders.text("world", world.name()));
+                info(
                         source,
-                        "this permanently destroys '" + world.name() + "' and every archive of it. "
-                                + "There is no undo and no other command undoes it.");
-                info(source, "type /world admin delete " + worldId.value() + " confirm to go ahead");
+                        "messages.command.admin.delete.confirm-hint",
+                        Placeholders.raw("id", worldId.value().toString()));
                 return;
             }
             if (!worlds.deleteHard(worldId)) {
-                error(source, "'" + world.name() + "' changed while you were confirming; try again");
+                error(source, "messages.command.admin.delete.changed", Placeholders.text("world", world.name()));
                 return;
             }
             actions.enqueueToWorldOrAliveNodes(world, CommandKind.UNLOAD_WORLD, NodeCommand.EMPTY_PAYLOAD, current);
-            success(source, "permanently deleted '" + world.name() + "' (" + worldId.value() + ")");
+            success(
+                    source,
+                    "messages.command.admin.delete.success",
+                    Placeholders.text("world", world.name()),
+                    Placeholders.raw("id", worldId.value().toString()));
             log.warn(
                     "world {} ('{}') hard deleted by an administrator (FR-37); archives are gone",
                     worldId,
@@ -1014,16 +1142,173 @@ public final class WorldCommand {
     }
 
     // -----------------------------------------------------------------------
+    // Admin message subcommands (NFR-5)
+    //
+    // network_setting is the single source of truth (ADR 0007's precedent):
+    // one row per key, read by every component through NetworkSettings /
+    // MessageCatalog, invalidated network-wide via the existing INVALIDATE_CACHE
+    // control-plane command. set/reset validate the MiniMessage template before
+    // ever writing it, so a typo is caught with the admin still at the keyboard.
+    // -----------------------------------------------------------------------
+
+    private static final int MESSAGE_PAGE_SIZE = 12;
+
+    /** {@code /world admin message list [page]} — every declared key, paginated. */
+    private void adminMessageList(CommandSource source, int pageIndex) {
+        List<String> keys = MessageRegistry.ALL.keySet().stream().sorted().toList();
+        int pages = Math.max(1, (keys.size() + MESSAGE_PAGE_SIZE - 1) / MESSAGE_PAGE_SIZE);
+        int page = Math.max(0, Math.min(pageIndex, pages - 1));
+        info(
+                source,
+                "messages.command.admin.message.list-header",
+                Placeholders.count("page", page + 1),
+                Placeholders.count("pages", pages));
+        int start = page * MESSAGE_PAGE_SIZE;
+        int end = Math.min(keys.size(), start + MESSAGE_PAGE_SIZE);
+        for (int i = start; i < end; i++) {
+            info(source, "messages.command.admin.message.list-entry", Placeholders.raw("key", keys.get(i)));
+        }
+        info(source, "messages.command.admin.message.list-footer");
+    }
+
+    /** {@code /world admin message get <key>} — the stored (or default) template plus a rendered preview. */
+    private void adminMessageGet(CommandSource source, String key) {
+        MessageKey def = MessageRegistry.ALL.get(key);
+        if (def == null) {
+            error(source, "messages.command.admin.message.unknown-key", Placeholders.raw("key", key));
+            return;
+        }
+        NetworkSettings settings = networkSettings;
+        if (settings == null) {
+            error(source, "messages.command.generic-failure");
+            return;
+        }
+        runAsAdmin(source, () -> {
+            MessageCatalog catalog = MessageCatalog.fromRaw(settings.snapshot());
+            String templateText = def.lore() ? String.join("\\n", catalog.getLore(key)) : catalog.get(key);
+            info(source, "messages.command.admin.message.get-header", Placeholders.raw("key", key));
+            info(source, "messages.command.admin.message.get-template", Placeholders.text("template", templateText));
+            info(
+                    source,
+                    "messages.command.admin.message.get-preview",
+                    Placeholders.component("preview", previewOf(def, templateText)));
+            info(source, "messages.command.admin.message.get-footer");
+        });
+    }
+
+    /** {@code /world admin message set <key> <value>} — validated before it is ever written. */
+    private void adminMessageSet(CommandSource source, String key, String rawValue) {
+        MessageKey def = MessageRegistry.ALL.get(key);
+        if (def == null) {
+            error(source, "messages.command.admin.message.unknown-key", Placeholders.raw("key", key));
+            return;
+        }
+        NetworkSettings settings = networkSettings;
+        if (settings == null) {
+            error(source, "messages.command.generic-failure");
+            return;
+        }
+        // \n is a literal two-character escape here, not a real newline -- chat cannot carry one --
+        // so a lore key's multi-line value is typed as "line one\nline two".
+        List<String> lines =
+                def.lore() ? List.of(rawValue.split(java.util.regex.Pattern.quote("\\n"), -1)) : List.of(rawValue);
+        try {
+            for (String line : lines) {
+                Messages.validate(def, line);
+            }
+        } catch (RuntimeException e) {
+            error(
+                    source,
+                    "messages.command.admin.message.invalid",
+                    Placeholders.raw("key", key),
+                    Placeholders.text("reason", e.getMessage() != null ? e.getMessage() : "invalid syntax"));
+            return;
+        }
+        String jsonValue = def.lore() ? JsonText.quoteStringList(lines) : JsonText.quoteString(rawValue);
+        String updatedBy = updatedByOf(source);
+        runAsAdmin(source, () -> {
+            settings.putAndReload(key, jsonValue, updatedBy);
+            broadcastMessagesInvalidateCache();
+            success(source, "messages.command.admin.message.set-success", Placeholders.raw("key", key));
+        });
+    }
+
+    /** {@code /world admin message reset <key>} — rewrites the row back to the coded default. */
+    private void adminMessageReset(CommandSource source, String key) {
+        MessageKey def = MessageRegistry.ALL.get(key);
+        if (def == null) {
+            error(source, "messages.command.admin.message.unknown-key", Placeholders.raw("key", key));
+            return;
+        }
+        NetworkSettings settings = networkSettings;
+        if (settings == null) {
+            error(source, "messages.command.generic-failure");
+            return;
+        }
+        String jsonValue = def.lore()
+                ? JsonText.quoteStringList(def.defaultLoreLines())
+                : JsonText.quoteString(def.defaultTemplate());
+        String updatedBy = updatedByOf(source);
+        runAsAdmin(source, () -> {
+            settings.putAndReload(key, jsonValue, updatedBy);
+            broadcastMessagesInvalidateCache();
+            success(source, "messages.command.admin.message.reset-success", Placeholders.raw("key", key));
+        });
+    }
+
+    private static String updatedByOf(CommandSource source) {
+        return source instanceof Player player ? player.getUniqueId().toString() : "console";
+    }
+
+    /** Renders a candidate/stored template against dummy values for its own declared placeholders. */
+    private static Component previewOf(MessageKey def, String templateText) {
+        TagResolver[] samples = new TagResolver[def.placeholders().size()];
+        int i = 0;
+        for (String name : def.placeholders()) {
+            samples[i++] = Placeholder.unparsed(name, "example");
+        }
+        try {
+            return MiniMessage.miniMessage().deserialize(templateText, samples);
+        } catch (RuntimeException e) {
+            return Component.text("(could not render: " + e.getMessage() + ")", NamedTextColor.RED);
+        }
+    }
+
+    /** Broadcasts INVALIDATE_CACHE to every alive node, network-wide (no single world owns this change). */
+    private void broadcastMessagesInvalidateCache() throws SQLException {
+        NetworkPolicy current = policy.get();
+        for (var alive : placement.aliveNodes(current.deadAfter())) {
+            nodeCommands.enqueue(
+                    alive.nodeId(),
+                    null,
+                    null,
+                    CommandKind.INVALIDATE_CACHE.name(),
+                    NodeCommand.EMPTY_PAYLOAD,
+                    current.holdingTimeout(),
+                    ControlChannels.forNode(alive.nodeId()));
+        }
+    }
+
+    private CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestMessageKeys(
+            CommandContext<CommandSource> context, com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
+        String prefix = builder.getRemaining().toLowerCase(Locale.ROOT);
+        for (String key : MessageRegistry.ALL.keySet()) {
+            if (key.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                builder.suggest(key);
+            }
+        }
+        return builder.buildFuture();
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 
-    private static @Nullable Player playerOrNull(CommandContext<CommandSource> context) {
+    private @Nullable Player playerOrNull(CommandContext<CommandSource> context) {
         if (context.getSource() instanceof Player player) {
             return player;
         }
-        context.getSource()
-                .sendMessage(Component.text(
-                        "/world acts on the caller's own worlds and must be run by a player", NamedTextColor.RED));
+        error(context.getSource(), "messages.command.player-only");
         return null;
     }
 
@@ -1058,7 +1343,7 @@ public final class WorldCommand {
         try {
             return Optional.of(new WorldId(UUID.fromString(raw.strip())));
         } catch (IllegalArgumentException e) {
-            error(source, "'" + raw + "' is not a world id (section 6 takes the uuid, not the name)");
+            error(source, "messages.command.admin.invalid-world-id", Placeholders.text("raw", raw));
             return Optional.empty();
         }
     }
@@ -1077,9 +1362,162 @@ public final class WorldCommand {
                 task.run();
             } catch (SQLException e) {
                 log.error("/world admin failed", e);
-                error(source, "that did not work; the failure is in the proxy log");
+                error(source, "messages.command.generic-failure");
             }
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // Owner subcommands (section 6)
+    //
+    // Two bindings and one method each: with a trailing world name and without.
+    // Without one, WorldActions decides which world is meant -- the one the
+    // caller is standing in, or their only one.
+    //
+    // /world ban and /world public are the two that take no world name. Both
+    // end in free text, and a trailing name after free text cannot be told from
+    // more of it: "/world ban Bob griefing" would have to guess whether
+    // "griefing" is a reason or a world. Those two say so in their refusal and
+    // point at the menu.
+    // -----------------------------------------------------------------------
+
+    /** The optional trailing world name shared by every owner subcommand. */
+    private RequiredArgumentBuilder<CommandSource, String> worldArgument() {
+        return BrigadierCommand.requiredArgumentBuilder("world", StringArgumentType.word())
+                .suggests(this::suggestOwnedWorlds);
+    }
+
+    private static String worldName(CommandContext<CommandSource> context) {
+        return StringArgumentType.getString(context, "world");
+    }
+
+    private int invite(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.invite(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int kick(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.kick(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int promote(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.promote(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int transfer(CommandContext<CommandSource> context, @Nullable String world, boolean confirmed) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.transfer(caller, targetName, confirmed, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int unban(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String targetName = StringArgumentType.getString(context, "player");
+            deliverForWorld(caller, world, worldId -> actions.unban(caller, targetName, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int setSetting(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            String setting = StringArgumentType.getString(context, "setting");
+            String value = StringArgumentType.getString(context, "value");
+            deliverForWorld(caller, world, worldId -> actions.setSetting(caller, setting, value, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int showSettings(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.showSettings(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int members(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.members(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private int listBans(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            deliverForWorld(caller, world, worldId -> actions.listBans(caller, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    /**
+     * Runs an owner action against the world the caller named, or lets
+     * {@link WorldActions} work out which world is meant when they named none.
+     *
+     * <p>The name is turned into an id here because this is the surface that has
+     * a name: the menu holds ids already and passes them straight through. A
+     * name that is not one of the caller's own worlds never reaches the action.
+     */
+    private void deliverForWorld(
+            Player caller,
+            @Nullable String world,
+            Function<@Nullable WorldId, CompletableFuture<ActionResult>> action) {
+        if (world == null) {
+            deliver(caller, action.apply(null));
+            return;
+        }
+        deliver(caller, actions.ownedWorld(caller, world).thenCompose(target -> switch (target) {
+            case WorldActions.Target.None none -> CompletableFuture.completedFuture(none.refusal());
+            case WorldActions.Target.Found found -> action.apply(found.world().id());
+        }));
+    }
+
+    /**
+     * The caller's own world names, for the trailing argument.
+     *
+     * <p>On the database pool: a suggestion provider runs on every keystroke,
+     * and every run of this one is a query.
+     */
+    private CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestOwnedWorlds(
+            CommandContext<CommandSource> context, com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
+        if (!(context.getSource() instanceof Player player)) {
+            return builder.buildFuture();
+        }
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    String prefix = builder.getRemaining().toLowerCase(Locale.ROOT);
+                    try {
+                        for (PlayerWorld owned : worlds.listOwnedBy(player.getUniqueId())) {
+                            if (owned.name().toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                                builder.suggest(owned.name());
+                            }
+                        }
+                    } catch (SQLException e) {
+                        log.debug("could not suggest world names: {}", e.getMessage());
+                    }
+                    return builder.build();
+                },
+                executors.db());
     }
 
     /**
@@ -1094,7 +1532,7 @@ public final class WorldCommand {
         return new BrigadierCommand(root);
     }
 
-    private static void openMenuOrUsage(CommandSource source) {
+    private void openMenuOrUsage(CommandSource source) {
         if (source instanceof Player player) {
             Optional<ServerConnection> connection = player.getCurrentServer();
             if (connection.isPresent()) {
@@ -1106,20 +1544,42 @@ public final class WorldCommand {
         usage(source);
     }
 
-    private static void usage(CommandSource source) {
-        source.sendMessage(Component.text("/world <" + String.join("|", SUBCOMMANDS) + ">", NamedTextColor.YELLOW));
+    private void usage(CommandSource source) {
+        info(source, "messages.command.usage", Placeholders.raw("subcommands", String.join("|", SUBCOMMANDS)));
     }
 
-    private static Component info(CommandSource source, String message) {
-        return WorldActions.info(source, message);
+    /**
+     * Builds and sends, because these are the command tree's own replies rather
+     * than an action's result. {@link WorldActions}' builders are pure (NFR-5);
+     * the sending is here, where the surface is known.
+     */
+    private Component info(CommandSource source, String key, TagResolver... placeholders) {
+        Component line = actions.info(key, placeholders);
+        source.sendMessage(line);
+        return line;
     }
 
-    private static Component success(CommandSource source, String message) {
-        return WorldActions.success(source, message);
+    private Component success(CommandSource source, String key, TagResolver... placeholders) {
+        Component line = actions.success(key, placeholders);
+        source.sendMessage(line);
+        return line;
     }
 
-    private static Component error(CommandSource source, String message) {
-        return WorldActions.error(source, message);
+    private Component error(CommandSource source, String key, TagResolver... placeholders) {
+        Component line = actions.error(key, placeholders);
+        source.sendMessage(line);
+        return line;
+    }
+
+    /**
+     * Sends an action's outcome to whoever asked for it.
+     *
+     * <p>The command tree used to discard every one of these futures and rely on
+     * {@link WorldActions} sending as a side effect of building the message. One
+     * place decides delivery now, and this is it for chat (NFR-5).
+     */
+    private static void deliver(CommandSource source, java.util.concurrent.CompletionStage<ActionResult> pending) {
+        var _ = pending.thenAccept(result -> source.sendMessage(result.message()));
     }
 
     @FunctionalInterface

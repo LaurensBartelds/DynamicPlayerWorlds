@@ -69,7 +69,8 @@ public final class SnapshotEngine {
     }
 
     /**
-     * Executes a snapshot of the given dirty files for a world.
+     * Snapshots a world: uploads what changed, and writes a manifest describing
+     * every file the scan found.
      *
      * @param scratchRoot root directory containing local world folders
      * @param worldId world identity being snapshotted
@@ -77,8 +78,10 @@ public final class SnapshotEngine {
      * @param sequence monotonic sequence counter within the generation
      * @param dataVersion Minecraft data version (from {@code level.dat})
      * @param mcVersion Minecraft release version string (e.g. {@code 26.2})
-     * @param baselineEntries previous manifest entries to merge over (or empty map for initial snapshot)
-     * @param dirtyRelativePaths paths relative to {@code scratchRoot} of modified or new files to snapshot
+     * @param baselineEntries previous manifest entries, carried forward for files
+     *     the scan saw and found unchanged (or an empty map for an initial snapshot)
+     * @param scan what {@link DirtyScanner} saw: the dirty subset to copy, hash and
+     *     upload, and the observed set the new manifest is built from (MN-3, D16)
      * @param verifyRegionStructure whether to validate Anvil region file structure (MN-5c)
      * @return result record containing the new manifest and summary metrics
      * @throws RegionStructureException if region structure validation fails
@@ -92,13 +95,14 @@ public final class SnapshotEngine {
             int dataVersion,
             String mcVersion,
             Map<String, ManifestEntry> baselineEntries,
-            Collection<Path> dirtyRelativePaths,
+            DirtyScanner.Scan scan,
             boolean verifyRegionStructure) {
         Objects.requireNonNull(scratchRoot, "scratchRoot");
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(mcVersion, "mcVersion");
         Objects.requireNonNull(baselineEntries, "baselineEntries");
-        Objects.requireNonNull(dirtyRelativePaths, "dirtyRelativePaths");
+        Objects.requireNonNull(scan, "scan");
+        Collection<Path> dirtyRelativePaths = scan.dirty();
 
         Path tempSnapshotDir = scratchRoot.resolve(".snapshot-" + worldId.value() + "-" + UUID.randomUUID());
         try {
@@ -106,7 +110,21 @@ public final class SnapshotEngine {
             List<SnapshotCopier.CopiedFile> copied = copier.copyAll(scratchRoot, tempSnapshotDir, dirtyRelativePaths);
 
             // 2. Hash, validate .mca structure (MN-5c), cache and upload objects to ObjectStore
-            Map<String, ManifestEntry> newEntries = new LinkedHashMap<>(baselineEntries);
+            //
+            // MN-3 / D16: the manifest is the complete file set, not the previous
+            // one with the dirty files laid over it. Start from what the scan saw
+            // on disk — the baseline entry where a file is unchanged, nothing at
+            // all where it is gone — and a deletion falls out. Overlaying kept
+            // every entry forever: a deleted file came back on the next cold load
+            // and MN-2b could never collect its object, because a retained
+            // manifest still pointed at it.
+            Map<String, ManifestEntry> newEntries = new LinkedHashMap<>();
+            for (String observed : scan.observed()) {
+                ManifestEntry carried = baselineEntries.get(observed);
+                if (carried != null) {
+                    newEntries.put(observed, carried);
+                }
+            }
             long uploadedBytes = 0;
 
             for (SnapshotCopier.CopiedFile file : copied) {
@@ -118,7 +136,9 @@ public final class SnapshotEngine {
 
                 String s3Key = "worlds/" + worldId.value() + "/data/" + sha256;
                 if (!objectStore.exists(s3Key)) {
-                    objectStore.putObject(s3Key, file.snapshotPath());
+                    // Server-side verified against the digest already computed above (MN-2,
+                    // CONTRIBUTING rule 8) — no second read of the file to get it.
+                    objectStore.putObject(s3Key, file.snapshotPath(), hashed.md5Base64());
                     uploadedBytes += hashed.sizeBytes();
                 }
 
@@ -135,8 +155,12 @@ public final class SnapshotEngine {
             Manifest manifest =
                     new Manifest(worldId, generation, sequence, dataVersion, mcVersion, clock.instant(), newEntries);
             String manifestJson = ManifestCodec.encode(manifest);
+            byte[] manifestBytes = manifestJson.getBytes(StandardCharsets.UTF_8);
             objectStore.putBytes(
-                    manifest.manifestKey(), manifestJson.getBytes(StandardCharsets.UTF_8), "application/json");
+                    manifest.manifestKey(),
+                    manifestBytes,
+                    "application/json",
+                    ContentHasher.hashBytes(manifestBytes).md5Base64());
 
             log.debug(
                     "Snapshot complete for world {}: gen={}, seq={}, dirty={}, uploadedBytes={}, manifestKey={}",

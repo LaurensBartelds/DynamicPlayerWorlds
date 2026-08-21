@@ -230,6 +230,41 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("listSharedWith returns the worlds an invite made reachable, never the player's own")
+    void listSharedWithReturnsAcceptedInvitesOnly() throws Exception {
+        // FR-7: the invitee's route back to a world is the menu, and the menu can
+        // only show what a query returns. listOwnedBy answers a different
+        // question and answered it alone until this existed.
+        MembershipRepository membership = new MembershipRepository(database);
+        UUID owner = UUID.randomUUID();
+        UUID guest = UUID.randomUUID();
+        UUID stranger = UUID.randomUUID();
+
+        PlayerWorld theirs = create(WorldId.random(), owner, "theirs", 1L);
+        PlayerWorld alsoTheirs = create(WorldId.random(), owner, "also-theirs", 2L);
+        PlayerWorld guestsOwn = create(WorldId.random(), guest, "guests-own", 3L);
+
+        membership.invite(theirs.id(), guest, owner, Duration.ofMinutes(10));
+        assertThat(membership.acceptInvite(theirs.id(), guest))
+                .isInstanceOf(MembershipRepository.AcceptOutcome.Accepted.class);
+        // The guest also owns a world, and owning it makes them a member of it.
+        database.inTransaction(
+                connection -> membership.insertMember(connection, guestsOwn.id(), guest, Role.OWNER, null));
+
+        List<PlayerWorld> shared = worlds.listSharedWith(guest);
+
+        assertThat(shared).extracting(PlayerWorld::name).containsExactly("theirs");
+        assertThat(shared)
+                .as("a world the player owns is theirs, not shared with them (FR-31a)")
+                .noneMatch(world -> world.id().equals(guestsOwn.id()));
+        assertThat(shared)
+                .as("an invite that was never accepted is not membership (FR-7)")
+                .noneMatch(world -> world.id().equals(alsoTheirs.id()));
+        assertThat(worlds.listSharedWith(stranger)).isEmpty();
+        assertThat(worlds.listSharedWith(owner)).isEmpty();
+    }
+
+    @Test
     @DisplayName("a world newer than this node is refused, an unversioned one is not (MN-26)")
     void versionGateRefusesNewerWorlds() throws Exception {
         WorldId id = WorldId.random();
@@ -243,6 +278,79 @@ class PlayerWorldRepositoryTest {
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(4903)).isTrue();
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(4902)).isFalse();
         assertThat(worlds.findById(id).orElseThrow().isOpenableBy(5000)).isTrue();
+    }
+
+    @Test
+    @DisplayName("R10: first snapshot commit re-keys generation-0 profiles onto the new snapshot (FR-15b)")
+    void enablingObjectStorageDoesNotOrphanGenerationZeroProfiles() throws Exception {
+        // No-object-storage era: profiles committed at generation 0, manifest_key null.
+        // First real snapshot must carry those rows forward or FR-15b issues a fresh
+        // inventory to every player who was not online for the commit (§7).
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "r10-transition", 1234L);
+
+        ProfileRepository profiles = new ProfileRepository(database);
+        UUID alice = UUID.randomUUID();
+        UUID bob = UUID.randomUUID();
+        byte[] aliceData = new byte[] {10, 20, 30};
+        byte[] bobData = new byte[] {40, 50};
+        // Two gen-0 sequences; re-key must take the newest per player.
+        database.inTransaction(connection -> {
+            profiles.saveAll(connection, id, new ProfileRepository.Snapshot(0L, 0), 1, Map.of(alice, new byte[] {1}));
+            profiles.saveAll(
+                    connection, id, new ProfileRepository.Snapshot(0L, 1), 1, Map.of(alice, aliceData, bob, bobData));
+            return null;
+        });
+        assertThat(worlds.findById(id).orElseThrow().manifestKey()).isNull();
+
+        ProfileRepository.Snapshot firstStorage = new ProfileRepository.Snapshot(1L, 1);
+        byte[] liveAlice = new byte[] {99}; // online at the transition — live wins
+        boolean committed = worlds.commitSnapshot(
+                id,
+                0L,
+                "node-a",
+                "worlds/" + id.value() + "/manifest/1-1.json",
+                2048L,
+                4903,
+                "26.2",
+                firstStorage,
+                1,
+                Map.of(alice, liveAlice),
+                profiles);
+
+        assertThat(committed).isTrue();
+        assertThat(worlds.findById(id).orElseThrow().manifestKey())
+                .isEqualTo("worlds/" + id.value() + "/manifest/1-1.json");
+
+        assertThat(profiles.load(id, alice, firstStorage).orElseThrow().data())
+                .as("R10: live payload on the first storage commit must win over gen-0")
+                .containsExactly(99);
+        assertThat(profiles.load(id, bob, firstStorage).orElseThrow().data())
+                .as("R10: departed player's newest gen-0 profile must be re-keyed onto the first snapshot")
+                .containsExactly(40, 50);
+
+        // Second commit captures nobody (bob never came back). R10 widened: every
+        // commit re-keys each player's newest surviving row forward, not just the
+        // gen-0 transition, so bob is not orphaned the moment the manifest moves
+        // past the snapshot his row is keyed to.
+        ProfileRepository.Snapshot second = new ProfileRepository.Snapshot(1L, 2);
+        assertThat(worlds.commitSnapshot(
+                        id,
+                        0L,
+                        "node-a",
+                        "worlds/" + id.value() + "/manifest/1-2.json",
+                        4096L,
+                        4903,
+                        "26.2",
+                        second,
+                        1,
+                        Map.of(),
+                        profiles))
+                .isTrue();
+        assertThat(profiles.load(id, bob, second).orElseThrow().data())
+                .as("R10 widened: a player absent from this commit is still carried forward, not orphaned")
+                .containsExactly(40, 50);
     }
 
     @Test
@@ -960,6 +1068,48 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("abandonArchive returns a failed archival to READY and drops its lease (FR-35)")
+    void abandonArchiveReturnsWorldToReady() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "abandon-me", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        assertThat(worlds.acquireLease(id, "node-1", 3953, Duration.ofMinutes(5)))
+                .isPresent();
+        assertThat(worlds.transitionState(id, WorldState.READY, WorldState.ARCHIVING))
+                .isTrue();
+
+        assertThat(worlds.abandonArchive(id, "node-1")).isTrue();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.READY);
+        assertThat(world.assignedNode()).isNull();
+        assertThat(world.leaseExpires()).isNull();
+
+        // Idempotent: a second call has nothing in ARCHIVING to roll back.
+        assertThat(worlds.abandonArchive(id, "node-1")).isFalse();
+    }
+
+    @Test
+    @DisplayName("abandonArchive will not rewrite a world whose lease another node now holds")
+    void abandonArchiveIsFencedOnTheAssignedNode() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        create(id, owner, "fenced-abandon", 1L);
+        database.inTransaction(connection -> worlds.markReady(connection, id));
+        assertThat(worlds.acquireLease(id, "node-2", 3953, Duration.ofMinutes(5)))
+                .isPresent();
+        assertThat(worlds.transitionState(id, WorldState.READY, WorldState.ARCHIVING))
+                .isTrue();
+
+        assertThat(worlds.abandonArchive(id, "node-1")).isFalse();
+
+        PlayerWorld world = worlds.findById(id).orElseThrow();
+        assertThat(world.state()).isEqualTo(WorldState.ARCHIVING);
+        assertThat(world.assignedNode()).isEqualTo("node-2");
+    }
+
+    @Test
     @DisplayName("transitionToRestoring acquires lease and advances state to RESTORING")
     void transitionToRestoringAcquiresLease() throws Exception {
         WorldId id = WorldId.random();
@@ -969,18 +1119,21 @@ class PlayerWorldRepositoryTest {
         boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
         assertThat(archived).isTrue();
 
-        boolean restoring = worlds.transitionToRestoring(id, "node-restore", Duration.ofMinutes(5));
-        assertThat(restoring).isTrue();
+        Optional<Long> restoring = worlds.transitionToRestoring(id, "node-restore", Duration.ofMinutes(5));
+        assertThat(restoring).isPresent();
 
         PlayerWorld world = worlds.findById(id).orElseThrow();
         assertThat(world.state()).isEqualTo(WorldState.RESTORING);
         assertThat(world.assignedNode()).isEqualTo("node-restore");
         assertThat(world.generation()).isGreaterThanOrEqualTo(1L);
         assertThat(world.leaseExpires()).isNotNull();
+        // R22: the granted generation comes back, because the restore's snapshot
+        // has to be written under it rather than under a hardcoded zero.
+        assertThat(restoring).contains(world.generation());
 
-        // Second transition while active lease is held returns false
-        boolean second = worlds.transitionToRestoring(id, "other-node", Duration.ofMinutes(5));
-        assertThat(second).isFalse();
+        // Second transition while active lease is held grants nothing
+        Optional<Long> second = worlds.transitionToRestoring(id, "other-node", Duration.ofMinutes(5));
+        assertThat(second).isEmpty();
     }
 
     @Test
@@ -992,15 +1145,18 @@ class PlayerWorldRepositoryTest {
         database.inTransaction(connection -> worlds.markReady(connection, id));
         boolean archived = worlds.transitionToArchived(id, "archive-key", 100L, "hash", 3953);
         assertThat(archived).isTrue();
-        boolean restoring = worlds.transitionToRestoring(id, "node-1", Duration.ofMinutes(5));
-        assertThat(restoring).isTrue();
+        long generation = worlds.transitionToRestoring(id, "node-1", Duration.ofMinutes(5))
+                .orElseThrow();
 
-        boolean completed = worlds.completeRestore(id, "worlds/" + id + "/manifest/0-1.json", 987654L, 3953, "1.21.4");
+        ProfileRepository profiles = new ProfileRepository(database);
+        ProfileRepository.Snapshot target = new ProfileRepository.Snapshot(generation, 1);
+        String manifestKey = "worlds/" + id + "/manifest/" + generation + "-1.json";
+        boolean completed = worlds.completeRestore(id, manifestKey, 987654L, 3953, "1.21.4", target, profiles);
         assertThat(completed).isTrue();
 
         PlayerWorld world = worlds.findById(id).orElseThrow();
         assertThat(world.state()).isEqualTo(WorldState.READY);
-        assertThat(world.manifestKey()).isEqualTo("worlds/" + id + "/manifest/0-1.json");
+        assertThat(world.manifestKey()).isEqualTo(manifestKey);
         assertThat(world.dataVersion()).isEqualTo(3953);
         assertThat(world.mcVersion()).isEqualTo("1.21.4");
         assertThat(world.assignedNode()).isNull();

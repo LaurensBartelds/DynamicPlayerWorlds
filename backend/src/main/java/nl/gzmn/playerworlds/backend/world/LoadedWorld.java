@@ -6,6 +6,7 @@ import java.util.EnumSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.core.db.DbClock;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -54,6 +55,18 @@ public final class LoadedWorld {
     private volatile boolean leaseDegraded;
 
     /**
+     * Local monotonic nanoTime of the last snapshot commit that succeeded (MN-11a).
+     *
+     * <p>Seeded at construction rather than left at zero: a world that has just loaded has
+     * nothing to be behind on, and MN-11a's window is measured from the last success, so an
+     * unseeded value would read as "failing since the epoch" and unload the world at once.
+     */
+    private volatile long lastCommitOkNanoTime;
+
+    /** Consecutive failed snapshot commits since the last success (MN-11a, 12.7's alert). */
+    private final AtomicInteger consecutiveCommitFailures = new AtomicInteger();
+
+    /**
      * Which of the three dimensions exist on disk and are loaded.
      *
      * <p>Copy-on-write behind {@code volatile} rather than a mutable set: the
@@ -73,7 +86,14 @@ public final class LoadedWorld {
     /** Sweeps still to wait before retrying a failed unload (FR-25a). Main-thread only. */
     private int retryWaitSweeps;
 
-    private final String settingsJson;
+    /**
+     * FR-9e settings JSON snapshot for the tick thread.
+     *
+     * <p>Volatile and updatable: {@code APPLY_SETTINGS} (R9) rewrites it when the
+     * owner changes settings on a loaded world, so a dimension materialised later
+     * (portal) applies the same values rather than the load-time snapshot.
+     */
+    private volatile String settingsJson;
 
     public LoadedWorld(WorldId id, UUID ownerUuid, String name, long seed, int borderRadius) {
         this(id, ownerUuid, name, seed, borderRadius, 0L, PlayerWorld.EMPTY_SETTINGS);
@@ -102,6 +122,7 @@ public final class LoadedWorld {
         this.generation = generation;
         this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
         this.lastHeartbeatNanoTime = System.nanoTime();
+        this.lastCommitOkNanoTime = this.lastHeartbeatNanoTime;
     }
 
     /** From a database row, keeping only what the tick thread cannot re-read. */
@@ -137,6 +158,16 @@ public final class LoadedWorld {
         return settingsJson;
     }
 
+    /**
+     * Replaces the FR-9e settings snapshot (R9 / {@code APPLY_SETTINGS}).
+     *
+     * <p>Called after the database row and {@link WorldSettingsCache} have already
+     * been updated, so a later dimension materialisation reads the same values.
+     */
+    public void updateSettingsJson(String settingsJson) {
+        this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
+    }
+
     /** Shared by all three dimensions, so one materialised later matches (FR-2). */
     public long seed() {
         return seed;
@@ -170,6 +201,44 @@ public final class LoadedWorld {
     /** Records that a lease heartbeat failed due to database unreachability (MN-10b). */
     public void recordHeartbeatFailure() {
         this.leaseDegraded = true;
+    }
+
+    /** Records a snapshot commit that reached object storage (MN-11a). */
+    public void recordCommitSuccess() {
+        this.lastCommitOkNanoTime = System.nanoTime();
+        this.consecutiveCommitFailures.set(0);
+    }
+
+    /**
+     * Records a snapshot commit that did not (MN-11a).
+     *
+     * @return how many have failed in a row, for 12.7's alert
+     */
+    public int recordCommitFailure() {
+        return this.consecutiveCommitFailures.incrementAndGet();
+    }
+
+    /** How many snapshot commits have failed in a row; zero when the last one worked. */
+    public int consecutiveCommitFailures() {
+        return consecutiveCommitFailures.get();
+    }
+
+    /**
+     * Whether MN-11a's forced unload is due: no commit has succeeded for {@code maxSyncFailure}.
+     *
+     * <p>Monotonic, like {@link #isFencedByDeadlineToDb}: this is a local decision about local
+     * work, so it must not move when the wall clock does (CONTRIBUTING.md rule 5).
+     *
+     * <p>A world whose commits have never failed is never due, however long it has been loaded —
+     * an idle world commits rarely, and "no commit for 30 minutes" is not "no commit worked for
+     * 30 minutes".
+     */
+    public boolean isSyncFailingFor(Duration maxSyncFailure) {
+        Objects.requireNonNull(maxSyncFailure, "maxSyncFailure");
+        if (consecutiveCommitFailures.get() == 0) {
+            return false;
+        }
+        return DbClock.elapsedSince(lastCommitOkNanoTime).compareTo(maxSyncFailure) >= 0;
     }
 
     /**

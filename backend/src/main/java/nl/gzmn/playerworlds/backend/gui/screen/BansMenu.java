@@ -5,13 +5,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -77,10 +77,17 @@ public final class BansMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        var messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
         int totalPages = Math.max(1, (int) Math.ceil((double) bans.size() / PAGE_SIZE));
-        String titleText = "Bans: " + world.name() + " (" + (page + 1) + "/" + totalPages + ")";
-        Inventory inventory = Bukkit.createInventory(holder, 54, Component.text(titleText, NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(
+                holder,
+                54,
+                messages.render(
+                        "messages.gui.bans-menu.title",
+                        Placeholders.text("world", world.name()),
+                        Placeholders.count("page", page + 1),
+                        Placeholders.count("pages", totalPages)));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 54; i++) {
@@ -92,8 +99,8 @@ public final class BansMenu implements GuiScreen {
                     22,
                     ItemUtil.create(
                             Material.IRON_BARS,
-                            Component.text("No Banned Players", NamedTextColor.GREEN, TextDecoration.BOLD),
-                            Component.text("No players are currently banned from this world.", NamedTextColor.GRAY)));
+                            messages.render("messages.gui.bans-menu.item.empty.name"),
+                            messages.renderLore("messages.gui.bans-menu.item.empty.lore")));
         } else {
             int startIndex = page * PAGE_SIZE;
             int endIndex = Math.min(bans.size(), startIndex + PAGE_SIZE);
@@ -112,37 +119,35 @@ public final class BansMenu implements GuiScreen {
         if (page > 0) {
             inventory.setItem(
                     SLOT_PREVIOUS_PAGE,
-                    ItemUtil.create(
-                            Material.ARROW,
-                            Component.text("◀ Previous Page", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                    ItemUtil.create(Material.ARROW, messages.render("messages.gui.bans-menu.item.previous-page.name")));
         }
 
         inventory.setItem(
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to World Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.bans-menu.item.back.name"),
+                        messages.renderLore("messages.gui.bans-menu.item.back.lore")));
 
         if ((page + 1) * PAGE_SIZE < bans.size()) {
             inventory.setItem(
                     SLOT_NEXT_PAGE,
-                    ItemUtil.create(
-                            Material.ARROW, Component.text("Next Page ▶", NamedTextColor.YELLOW, TextDecoration.BOLD)));
+                    ItemUtil.create(Material.ARROW, messages.render("messages.gui.bans-menu.item.next-page.name")));
         }
 
         return inventory;
     }
 
     private org.bukkit.inventory.ItemStack renderBanItem(BanEntry ban) {
-        Component name = Component.text(ban.name(), NamedTextColor.RED, TextDecoration.BOLD);
+        var messages = menuService.messages();
+        Component name =
+                messages.render("messages.gui.bans-menu.item.ban-entry.name", Placeholders.text("player", ban.name()));
 
-        List<Component> lore = new java.util.ArrayList<>();
-        lore.add(Component.text(
-                "Reason: " + (ban.reason() != null ? ban.reason() : "No reason provided"), NamedTextColor.GRAY));
-        lore.add(Component.text("Banned: " + ban.bannedAt().toString().substring(0, 10), NamedTextColor.DARK_GRAY));
-        lore.add(Component.empty());
-        lore.add(Component.text("▶ Click to unban", NamedTextColor.YELLOW));
+        String reasonText = ban.reason() != null ? ban.reason() : "No reason provided";
+        List<Component> lore = messages.renderLore(
+                "messages.gui.bans-menu.item.ban-entry.lore",
+                Placeholders.text("reason", reasonText),
+                Placeholders.raw("banned-at", ban.bannedAt().toString().substring(0, 10)));
 
         return ItemUtil.createPlayerHead(ban.uuid(), ban.name(), name, lore);
     }
@@ -161,8 +166,8 @@ public final class BansMenu implements GuiScreen {
                             .sendIntent(player, new MenuIntent.UnbanPlayer(ban.name(), world.id()))
                             .whenComplete((result, ex) -> {
                                 if (result instanceof MenuResult.Failed failed) {
-                                    player.sendMessage(Component.text(
-                                            "Could not unban player: " + failed.message(), NamedTextColor.RED));
+                                    player.sendMessage(
+                                            GsonComponentSerializer.gson().deserialize(failed.message()));
                                 }
                                 var _ = menuService.openBansMenu(player, world.id(), page);
                             });

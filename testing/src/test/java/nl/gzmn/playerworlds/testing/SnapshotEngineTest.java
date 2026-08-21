@@ -43,10 +43,14 @@ class SnapshotEngineTest {
 
             WorldId worldId = WorldFixture.materialize(scratch);
             List<String> expectedPaths = WorldFixture.syncedRelativePaths(scratch, worldId);
-            List<Path> dirty = expectedPaths.stream().map(Path::of).toList();
+            DirtyScanner.Scan scan = DirtyScanner.scan(
+                    scratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    Map.of(),
+                    List.of("session.lock", "uid.dat"));
 
             SnapshotEngine.SnapshotResult result =
-                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true);
+                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), scan, true);
 
             assertThat(result.dirtyCount()).isEqualTo(expectedPaths.size());
             assertThat(result.uploadedBytes()).isPositive();
@@ -100,11 +104,15 @@ class SnapshotEngineTest {
 
             WorldId worldId = WorldFixture.materialize(scratch);
             List<String> allPaths = WorldFixture.syncedRelativePaths(scratch, worldId);
-            List<Path> initialDirty = allPaths.stream().map(Path::of).toList();
+            DirtyScanner.Scan initial = DirtyScanner.scan(
+                    scratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    Map.of(),
+                    List.of("session.lock", "uid.dat"));
 
             // Initial full snapshot
             SnapshotEngine.SnapshotResult snap1 =
-                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), initialDirty, true);
+                    engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), initial, true);
 
             assertThat(snap1.dirtyCount()).isEqualTo(allPaths.size());
 
@@ -115,19 +123,18 @@ class SnapshotEngineTest {
             Files.write(paperWorldYml, newContent);
             Files.setLastModifiedTime(paperWorldYml, FileTime.fromMillis(9999999L));
 
-            List<Path> dimensionRoots = List.of(
-                    Path.of("world", "dimensions", "minecraft", worldId.folder()),
-                    Path.of("world", "dimensions", "minecraft", worldId.folder() + "_nether"),
-                    Path.of("world", "dimensions", "minecraft", worldId.folder() + "_the_end"));
-            List<Path> dirty2 = DirtyScanner.scanDirty(
-                    scratch, dimensionRoots, snap1.manifest().entries(), List.of("session.lock", "uid.dat"));
+            DirtyScanner.Scan scan2 = DirtyScanner.scan(
+                    scratch,
+                    WorldFixture.relativeDimensionFolders(worldId),
+                    snap1.manifest().entries(),
+                    List.of("session.lock", "uid.dat"));
 
             Path expectedDirty = Path.of("world", "dimensions", "minecraft", worldId.folder(), "paper-world.yml");
-            assertThat(dirty2).containsExactly(expectedDirty);
+            assertThat(scan2.dirty()).containsExactly(expectedDirty);
 
             // Incremental snapshot 2
             SnapshotEngine.SnapshotResult snap2 = engine.executeSnapshot(
-                    scratch, worldId, 0L, 2, 4903, "26.2", snap1.manifest().entries(), dirty2, true);
+                    scratch, worldId, 0L, 2, 4903, "26.2", snap1.manifest().entries(), scan2, true);
 
             assertThat(snap2.dirtyCount()).isEqualTo(1);
             assertThat(snap2.uploadedBytes()).isEqualTo(newContent.length);
@@ -179,11 +186,11 @@ class SnapshotEngineTest {
             corrupted[3] = 1; // 1 sector
             Files.write(mca, corrupted);
 
-            List<Path> dirty =
-                    List.of(Path.of("world", "dimensions", "minecraft", worldId.folder(), "region", "r.0.0.mca"));
+            String corruptedRel = "world/dimensions/minecraft/" + worldId.folder() + "/region/r.0.0.mca";
+            DirtyScanner.Scan scan = new DirtyScanner.Scan(List.of(Path.of(corruptedRel)), List.of(corruptedRel));
 
             assertThatThrownBy(
-                            () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), dirty, true))
+                            () -> engine.executeSnapshot(scratch, worldId, 0L, 1, 4903, "26.2", Map.of(), scan, true))
                     .isInstanceOf(RegionStructureException.class);
 
             // Verify manifest was not uploaded
@@ -196,6 +203,57 @@ class SnapshotEngineTest {
                         stream.map(p -> p.getFileName().toString()).toList();
                 assertThat(remaining).noneMatch(name -> name.startsWith(".snapshot-"));
             }
+        }
+    }
+
+    @Test
+    @DisplayName("a file deleted from the world leaves the next manifest (MN-3, D16)")
+    void aDeletedFileLeavesTheNextManifest_MN3(@TempDir Path tempDir) throws Exception {
+        Path scratch = tempDir.resolve("scratch");
+        Path cacheRoot = tempDir.resolve("cache");
+
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (S3ObjectStore store = S3ObjectStore.open(settings)) {
+            LocalObjectCache cache = new LocalObjectCache(cacheRoot, PlainFileCloner.INSTANCE);
+            SnapshotEngine engine = new SnapshotEngine(store, cache, new SnapshotCopier(PlainFileCloner.INSTANCE));
+
+            WorldId worldId = WorldFixture.materialize(scratch);
+            List<Path> roots = WorldFixture.relativeDimensionFolders(worldId);
+            List<String> excludes = List.of("session.lock", "uid.dat");
+
+            SnapshotEngine.SnapshotResult first = engine.executeSnapshot(
+                    scratch,
+                    worldId,
+                    0L,
+                    1,
+                    4903,
+                    "26.2",
+                    Map.of(),
+                    DirtyScanner.scan(scratch, roots, Map.of(), excludes),
+                    true);
+
+            // A region file the world trimmed away. Nothing else changes, so the
+            // dirty set is empty and only the observed set can notice.
+            String deletedRel = "world/dimensions/minecraft/" + worldId.folder() + "/region/r.0.0.mca";
+            Path deleted = scratch.resolve(deletedRel);
+            assertThat(Files.deleteIfExists(deleted)).isTrue();
+            assertThat(first.manifest().entries()).containsKey(deletedRel);
+
+            Map<String, ManifestEntry> baseline = first.manifest().entries();
+            DirtyScanner.Scan second = DirtyScanner.scan(scratch, roots, baseline, excludes);
+            assertThat(second.dirty()).isEmpty();
+
+            SnapshotEngine.SnapshotResult snap2 =
+                    engine.executeSnapshot(scratch, worldId, 0L, 2, 4903, "26.2", baseline, second, true);
+
+            // MN-3: the manifest describes the world, so a file that is gone is
+            // gone from it. Carried forward, it would be resurrected by the next
+            // cold load and its object could never be collected by MN-2b.
+            assertThat(snap2.manifest().entries()).doesNotContainKey(deletedRel);
+            assertThat(snap2.manifest().entries()).hasSize(baseline.size() - 1);
+            // Everything else is carried over untouched rather than re-uploaded.
+            assertThat(snap2.dirtyCount()).isZero();
+            assertThat(snap2.uploadedBytes()).isZero();
         }
     }
 
@@ -215,18 +273,18 @@ class SnapshotEngineTest {
             SnapshotEngine engine = new SnapshotEngine(store, cache, copier);
             WorldId worldId = WorldId.random();
 
-            assertThatNullPointerException()
-                    .isThrownBy(() ->
-                            engine.executeSnapshot(null, worldId, 0L, 1, 4903, "26.2", Map.of(), List.of(), true));
-            assertThatNullPointerException()
-                    .isThrownBy(() ->
-                            engine.executeSnapshot(tempDir, null, 0L, 1, 4903, "26.2", Map.of(), List.of(), true));
-            assertThatNullPointerException()
-                    .isThrownBy(() ->
-                            engine.executeSnapshot(tempDir, worldId, 0L, 1, 4903, null, Map.of(), List.of(), true));
+            DirtyScanner.Scan empty = new DirtyScanner.Scan(List.of(), List.of());
             assertThatNullPointerException()
                     .isThrownBy(
-                            () -> engine.executeSnapshot(tempDir, worldId, 0L, 1, 4903, "26.2", null, List.of(), true));
+                            () -> engine.executeSnapshot(null, worldId, 0L, 1, 4903, "26.2", Map.of(), empty, true));
+            assertThatNullPointerException()
+                    .isThrownBy(
+                            () -> engine.executeSnapshot(tempDir, null, 0L, 1, 4903, "26.2", Map.of(), empty, true));
+            assertThatNullPointerException()
+                    .isThrownBy(
+                            () -> engine.executeSnapshot(tempDir, worldId, 0L, 1, 4903, null, Map.of(), empty, true));
+            assertThatNullPointerException()
+                    .isThrownBy(() -> engine.executeSnapshot(tempDir, worldId, 0L, 1, 4903, "26.2", null, empty, true));
             assertThatNullPointerException()
                     .isThrownBy(
                             () -> engine.executeSnapshot(tempDir, worldId, 0L, 1, 4903, "26.2", Map.of(), null, true));

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -29,12 +30,15 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.obs.LogEvent;
+import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.profile.CommitQueue;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.storage.DirtyScanner;
 import nl.gzmn.playerworlds.core.storage.Manifest;
 import nl.gzmn.playerworlds.core.storage.ManifestEntry;
+import nl.gzmn.playerworlds.core.storage.QuiescenceWaiter;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
 import nl.gzmn.playerworlds.core.storage.StorageException;
 import org.bukkit.World;
@@ -68,9 +72,19 @@ public final class WorldCommitService {
     private final CommitQueue queue;
     private @Nullable WorldRegistry registry;
     private @Nullable SelfFencingHandler fencingHandler;
+    private @Nullable WorldsMetrics metrics;
 
     private final Map<WorldId, Manifest> cachedManifests = new ConcurrentHashMap<>();
     private final Map<WorldId, Map<UUID, byte[]>> pendingDepartures = new ConcurrentHashMap<>();
+
+    /**
+     * Worlds this node has self-fenced (MN-10a / R7).
+     *
+     * <p>{@link #forget} adds the id when the lease is lost; {@link #requestCommit}
+     * and {@link #commitDeparture} refuse while it is present. A later successful
+     * load calls {@link #allowCommits} so the world can commit again on this node.
+     */
+    private final Set<WorldId> fencedWorlds = ConcurrentHashMap.newKeySet();
 
     public WorldCommitService(
             ProfileRepository profiles,
@@ -110,6 +124,17 @@ public final class WorldCommitService {
 
     public void setFencingHandler(SelfFencingHandler fencingHandler) {
         this.fencingHandler = fencingHandler;
+    }
+
+    /**
+     * Where commit outcomes are metered (12.7's "alert").
+     *
+     * <p>Optional and set after construction, like {@link #setRegistry}: the commit service is
+     * built before the meters in several tests, and an unmetered commit is a missing graph rather
+     * than a broken one.
+     */
+    public void setMetrics(WorldsMetrics metrics) {
+        this.metrics = metrics;
     }
 
     public WorldCommitService(
@@ -172,14 +197,46 @@ public final class WorldCommitService {
      *     finished, so a caller that needs its own state durable can wait
      */
     public CompletableFuture<Void> requestCommit(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        if (fencedWorlds.contains(worldId)) {
+            // MN-10a / R7: selfFence already dropped this world. Do not re-upload
+            // a scratch directory QuarantineManager is moving, and do not fire
+            // COMMIT_FENCED again from a generation=0 fallback (see R8).
+            return CompletableFuture.failedFuture(
+                    new StorageException("refusing commit for fenced world " + worldId + " (MN-10a)"));
+        }
         return queue.request(worldId);
     }
 
-    /** Drops a world's commit queue, cached manifest, and pending departures once it has unloaded. */
+    /**
+     * Drops a world's commit queue, cached manifest, and pending departures, and
+     * marks it fenced so departures and periodic sync cannot start new work (R7).
+     *
+     * <p>Called from {@link SelfFencingHandler#selfFence} only — not from a clean unload.
+     */
     public void forget(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        fencedWorlds.add(worldId);
         queue.forget(worldId);
         cachedManifests.remove(worldId);
         pendingDepartures.remove(worldId);
+    }
+
+    /**
+     * Clears the MN-10a fence after a successful load so commits may run again.
+     *
+     * <p>A fenced world is quarantined; the next time this (or another) node loads
+     * it from the last good snapshot, commits are legitimate again.
+     */
+    public void allowCommits(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        fencedWorlds.remove(worldId);
+    }
+
+    /** Visible for tests and diagnostics: whether {@link #forget} has fenced this world. */
+    public boolean isFenced(WorldId worldId) {
+        Objects.requireNonNull(worldId, "worldId");
+        return fencedWorlds.contains(worldId);
     }
 
     /** Whether a commit is running, for the unload path and for tests. */
@@ -204,39 +261,131 @@ public final class WorldCommitService {
      * and DB executor.
      */
     private CompletableFuture<Void> runCommit(WorldId worldId) {
+        long startNanos = System.nanoTime();
+        return runCommitStages(worldId)
+                .whenComplete((ignored, failure) -> recordCommitOutcome(worldId, startNanos, failure));
+    }
+
+    /**
+     * Records what a commit did, for MN-11a's failure window and 12.7's alert.
+     *
+     * <p>On the {@link LoadedWorld} rather than in a map here, because the window has to die with
+     * the world: a reload starts a fresh one, and MN-11a is explicitly measured from the last
+     * commit that <em>succeeded</em>.
+     */
+    private void recordCommitOutcome(WorldId worldId, long startNanos, @Nullable Throwable failure) {
+        WorldsMetrics meters = metrics;
+        if (failure == null) {
+            if (meters != null) {
+                meters.commitSucceeded(Duration.ofNanos(System.nanoTime() - startNanos));
+            }
+        } else if (meters != null) {
+            meters.commitFailed(failure.getClass().getSimpleName());
+        }
+        WorldRegistry current = registry;
+        if (current == null) {
+            return;
+        }
+        current.find(worldId).ifPresent(loaded -> {
+            if (failure == null) {
+                loaded.recordCommitSuccess();
+                return;
+            }
+            int consecutive = loaded.recordCommitFailure();
+            log.warn(
+                    "event={} world_id={} consecutive_failures={} detail={}",
+                    LogEvent.SYNC_FAILED.key(),
+                    worldId,
+                    consecutive,
+                    failure.getMessage());
+        });
+    }
+
+    /** The commit itself; {@link #runCommit} wraps it to record the outcome. */
+    private CompletableFuture<Void> runCommitStages(WorldId worldId) {
         if (snapshotEngine == null || playerWorlds == null) {
-            CompletableFuture<Map<UUID, byte[]>> captured = new CompletableFuture<>();
+            CompletableFuture<Phase1Result> captured = new CompletableFuture<>();
             executors.main().execute(() -> {
                 try {
                     Map<UUID, byte[]> payloads = captureWorld(worldId);
-                    Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
-                    if (departures != null) {
-                        payloads.putAll(departures);
-                    }
-                    captured.complete(payloads);
+                    Map<UUID, byte[]> takenDepartures = takeDeparturesCopy(worldId);
+                    payloads.putAll(takenDepartures);
+                    captured.complete(new Phase1Result(worldId, payloads, takenDepartures, List.of(), List.of()));
                 } catch (RuntimeException e) {
                     captured.completeExceptionally(e);
                 }
             });
-            return captured.thenApplyAsync(
-                    payloads -> {
-                        try {
-                            profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, payloads);
-                        } catch (SQLException e) {
-                            throw new CompletionException(e);
+            return captured.thenCompose(phase1 -> CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    profiles.commit(worldId, 0L, ProfileCodec.FORMAT_VERSION, phase1.payloads());
+                                } catch (SQLException e) {
+                                    throw new CompletionException(e);
+                                }
+                                if (!phase1.payloads().isEmpty()) {
+                                    log.info(
+                                            "committed {} profile(s) for world {} (FR-15)",
+                                            phase1.payloads().size(),
+                                            worldId);
+                                }
+                                return phase1;
+                            },
+                            executors.db())
+                    .handle((ignored, failure) -> {
+                        if (failure != null) {
+                            restoreDepartures(worldId, phase1.takenDepartures());
+                            throw unwrapFailure(failure);
                         }
-                        if (!payloads.isEmpty()) {
-                            log.info("committed {} profile(s) for world {} (FR-15)", payloads.size(), worldId);
-                        }
+                        clearTakenDepartures(worldId, phase1.takenDepartures());
                         return null;
-                    },
-                    executors.db());
+                    }));
         }
 
+        // Snapshot path: departures taken in phase 1 are restored on any later failure (R6).
+        return runSnapshotCommit(worldId);
+    }
+
+    /**
+     * Full snapshot commit with departure recovery (R6 / FR-15).
+     *
+     * <p>Departures are copied out of {@link #pendingDepartures} in phase 1 so the
+     * commit can write them, but they are only cleared on success. A phase-2 or
+     * phase-3 failure merges them back ({@code putIfAbsent}) so a departure that
+     * landed during the failed commit wins.
+     */
+    private CompletableFuture<Void> runSnapshotCommit(WorldId worldId) {
         return phase1MainThread(worldId)
-                .thenApplyAsync(this::phase2IoThread, executors.io())
-                .thenApplyAsync(this::phase3DbThread, executors.db())
-                .thenAccept(this::phase4Completion);
+                .thenCompose(p1 -> CompletableFuture.completedFuture(p1)
+                        .thenApplyAsync(this::phase2IoThread, executors.io())
+                        .thenApplyAsync(this::phase3DbThread, executors.db())
+                        .handle((phase3, failure) -> {
+                            if (failure != null) {
+                                restoreDepartures(p1.worldId(), p1.takenDepartures());
+                                throw unwrapFailure(failure);
+                            }
+                            // Success — the payloads were written with the snapshot. Drop only
+                            // the ones this commit took; a newer departure keeps its entry.
+                            clearTakenDepartures(p1.worldId(), p1.takenDepartures());
+                            phase4Completion(phase3);
+                            return null;
+                        }));
+    }
+
+    /**
+     * Re-throw a stage failure without nesting {@link CompletionException}.
+     *
+     * <p>{@code thenApplyAsync} already wraps checked/runtime failures; wrapping
+     * again would make {@code join().getCause()} a CompletionException instead of
+     * the real {@link StorageException} (MN-3a / LeaseFencingTest).
+     */
+    private static RuntimeException unwrapFailure(Throwable failure) {
+        if (failure instanceof CompletionException ce) {
+            return ce;
+        }
+        if (failure instanceof RuntimeException re) {
+            return re;
+        }
+        return new CompletionException(failure);
     }
 
     private CompletableFuture<Phase1Result> phase1MainThread(WorldId worldId) {
@@ -267,12 +416,12 @@ public final class WorldCommitService {
                 }
 
                 Map<UUID, byte[]> payloads = captureWorld(worldId);
-                Map<UUID, byte[]> departures = pendingDepartures.remove(worldId);
-                if (departures != null) {
-                    payloads.putAll(departures);
-                }
+                // R6: copy-and-remove so the in-flight commit owns these payloads, but
+                // restoreDepartures can put them back if phase 2/3 fails.
+                Map<UUID, byte[]> takenDepartures = takeDeparturesCopy(worldId);
+                payloads.putAll(takenDepartures);
 
-                future.complete(new Phase1Result(worldId, payloads, quiesced, watchdogs));
+                future.complete(new Phase1Result(worldId, payloads, takenDepartures, quiesced, watchdogs));
             } catch (Exception e) {
                 future.completeExceptionally(e);
             }
@@ -280,17 +429,82 @@ public final class WorldCommitService {
         return future;
     }
 
+    /**
+     * Atomically takes the current departure map for {@code worldId}.
+     * Empty when nobody has left since the last successful commit.
+     */
+    private Map<UUID, byte[]> takeDeparturesCopy(WorldId worldId) {
+        Map<UUID, byte[]> removed = pendingDepartures.remove(worldId);
+        if (removed == null || removed.isEmpty()) {
+            return Map.of();
+        }
+        // Defensive copy: the map we removed is no longer shared, but callers may
+        // retain the reference across async boundaries.
+        return Map.copyOf(removed);
+    }
+
+    /**
+     * On commit failure, put taken departures back. {@code putIfAbsent} so a
+     * departure captured while this commit was failing keeps the newer payload (R6).
+     */
+    private void restoreDepartures(WorldId worldId, Map<UUID, byte[]> taken) {
+        if (taken.isEmpty()) {
+            return;
+        }
+        pendingDepartures.compute(worldId, (id, existing) -> {
+            Map<UUID, byte[]> map = existing != null ? existing : new ConcurrentHashMap<>();
+            for (Map.Entry<UUID, byte[]> entry : taken.entrySet()) {
+                map.putIfAbsent(entry.getKey(), entry.getValue());
+            }
+            return map;
+        });
+        log.warn(
+                "restored {} departing profile(s) for world {} after a failed commit (FR-15/R6)",
+                taken.size(),
+                worldId);
+    }
+
+    /**
+     * On commit success, drop any staged departure that still holds the payload
+     * this commit wrote. A newer departure for the same player (re-enter then leave
+     * during the commit) is left for the next cycle.
+     */
+    private void clearTakenDepartures(WorldId worldId, Map<UUID, byte[]> taken) {
+        if (taken.isEmpty()) {
+            return;
+        }
+        pendingDepartures.computeIfPresent(worldId, (id, existing) -> {
+            for (Map.Entry<UUID, byte[]> entry : taken.entrySet()) {
+                existing.remove(entry.getKey(), entry.getValue());
+            }
+            return existing.isEmpty() ? null : existing;
+        });
+    }
+
+    /** Visible for tests: whether a departure payload is still staged (R6). */
+    boolean hasPendingDeparture(WorldId worldId, UUID playerId) {
+        Map<UUID, byte[]> pending = pendingDepartures.get(worldId);
+        return pending != null && pending.containsKey(playerId);
+    }
+
     private record Phase1Result(
             WorldId worldId,
             Map<UUID, byte[]> payloads,
+            Map<UUID, byte[]> takenDepartures,
             List<World> quiescedWorlds,
             List<ScheduledFuture<?>> watchdogs) {}
 
     private record Phase2Result(
             WorldId worldId,
             Map<UUID, byte[]> profiles,
+            Map<UUID, byte[]> takenDepartures,
             @Nullable Manifest newManifest,
             @Nullable Manifest baselineManifest) {}
+
+    private record Phase3Result(
+            WorldId worldId,
+            Map<UUID, byte[]> takenDepartures,
+            @Nullable Manifest committedManifest) {}
 
     private Phase2Result phase2IoThread(Phase1Result phase1) {
         WorldId worldId = phase1.worldId();
@@ -300,34 +514,33 @@ public final class WorldCommitService {
             Manifest baseline = cachedManifests.get(worldId);
             Map<String, ManifestEntry> baselineEntries = baseline != null ? baseline.entries() : Map.of();
 
-            List<Path> dirty = DirtyScanner.scanDirty(
+            // R8 / MN-3a: resolve the lease generation before any SnapshotEngine work.
+            // Absence is not generation 0 — that is a real DB default for an unleased
+            // row. A missing registry entry aborts rather than falling through to
+            // commitSnapshot(false) → selfFence(COMMIT_FENCED).
+            long generation = resolveCommitGeneration(worldId, baseline);
+
+            DirtyScanner.Scan scan = DirtyScanner.scan(
                     scratchRoot,
                     folders.relativeDimensionFolders(primaryLevelName, worldId),
                     baselineEntries,
                     policy.excludeGlobs());
+            List<Path> dirty = scan.dirty();
 
-            long generation = 0L;
-            if (registry != null) {
-                LoadedWorld loaded = registry.find(worldId).orElse(null);
-                if (loaded != null) {
-                    generation = loaded.generation();
-                }
-            }
-            if (generation == 0L && baseline != null) {
-                generation = baseline.generation();
-            }
             int sequence = baseline != null ? baseline.sequence() + 1 : 1;
 
             SnapshotEngine.SnapshotResult snapshotResult = null;
-            if (!dirty.isEmpty() || baseline == null) {
-                Duration quiet = policy.snapshotQuiet();
-                if (!quiet.isZero() && !quiet.isNegative()) {
-                    try {
-                        Thread.sleep(quiet.toMillis());
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new CompletionException(e);
-                    }
+            // MN-3 / D16: a deletion is a change even though nothing is dirty.
+            // Comparing the observed set against the baseline is what notices it;
+            // before the manifest could express a deletion there was nothing for
+            // this branch to do about one.
+            boolean deletions = baseline != null && scan.observed().size() != baselineEntries.size();
+            if (!dirty.isEmpty() || deletions || baseline == null) {
+                try {
+                    QuiescenceWaiter.await(scratchRoot, dirty, policy.snapshotQuiet(), policy.snapshotQuiesceTimeout());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(e);
                 }
                 if (snapshotEngine != null) {
                     snapshotResult = snapshotEngine.executeSnapshot(
@@ -338,23 +551,51 @@ public final class WorldCommitService {
                             dataVersion,
                             mcVersion,
                             baselineEntries,
-                            dirty,
+                            scan,
                             policy.verifyRegionStructure());
                 }
             }
 
             Manifest newManifest = snapshotResult != null ? snapshotResult.manifest() : null;
-            return new Phase2Result(worldId, phase1.payloads(), newManifest, baseline);
+            return new Phase2Result(worldId, phase1.payloads(), phase1.takenDepartures(), newManifest, baseline);
         } finally {
             restoreAutoSave(phase1.quiescedWorlds(), phase1.watchdogs());
         }
     }
 
-    private @Nullable Manifest phase3DbThread(Phase2Result phase2) {
+    /**
+     * Lease generation for this commit (R8).
+     *
+     * <p>When a {@link WorldRegistry} is wired, the world must be registered: its
+     * {@link LoadedWorld#generation()} is the fencing token, including a legitimate
+     * {@code 0} for an unleased create. Missing registration is not treated as
+     * generation zero — that path used to reach {@code commitSnapshot} with a
+     * wrong token, get {@code false}, and raise {@code COMMIT_FENCED} for a benign
+     * cause (MN-3a only applies to a genuine lease/generation mismatch).
+     *
+     * <p>When no registry is wired (unit tests / early construction), fall back to
+     * the cached baseline generation, else {@code 0} matching the DB default.
+     */
+    private long resolveCommitGeneration(WorldId worldId, @Nullable Manifest baseline) {
+        if (registry != null) {
+            LoadedWorld loaded = registry.find(worldId).orElse(null);
+            if (loaded == null) {
+                throw new StorageException(
+                        "aborting commit for world " + worldId + ": not registered on this node (R8)");
+            }
+            return loaded.generation();
+        }
+        if (baseline != null) {
+            return baseline.generation();
+        }
+        return 0L;
+    }
+
+    private Phase3Result phase3DbThread(Phase2Result phase2) {
         WorldId worldId = phase2.worldId();
         Manifest manifestToCommit = phase2.newManifest() != null ? phase2.newManifest() : phase2.baselineManifest();
         if (manifestToCommit == null || playerWorlds == null) {
-            return null;
+            return new Phase3Result(worldId, phase2.takenDepartures(), null);
         }
 
         ProfileRepository.Snapshot snapshot =
@@ -375,20 +616,23 @@ public final class WorldCommitService {
                     profiles);
 
             if (!committed) {
+                // MN-3a: only a lease/generation mismatch (or missing row under the
+                // fencing predicate) reaches here. R8 aborts unregistered worlds in
+                // phase 2 so they never look like a fence.
                 if (fencingHandler != null) {
                     fencingHandler.selfFence(
                             worldId, nl.gzmn.playerworlds.backend.lease.SelfFencingHandler.FenceReason.COMMIT_FENCED);
                 }
-                throw new StorageException(
-                        "Failed to commit snapshot for world " + worldId + ": fenced or row missing");
+                throw new StorageException("Failed to commit snapshot for world " + worldId + ": lease fenced (MN-3a)");
             }
-            return manifestToCommit;
+            return new Phase3Result(worldId, phase2.takenDepartures(), manifestToCommit);
         } catch (SQLException e) {
             throw new CompletionException(e);
         }
     }
 
-    private void phase4Completion(@Nullable Manifest committedManifest) {
+    private void phase4Completion(Phase3Result phase3) {
+        Manifest committedManifest = phase3.committedManifest();
         if (committedManifest != null) {
             cachedManifests.put(committedManifest.worldId(), committedManifest);
             log.debug(
@@ -447,6 +691,14 @@ public final class WorldCommitService {
     public CompletableFuture<Void> commitDeparture(WorldId worldId, Player player, String dimensionName) {
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(player, "player");
+        // R7 / MN-10a: fence check before capture or staging. The eject teleport
+        // that follows selfFence raises PlayerChangedWorldEvent → this method;
+        // starting work here re-creates the queue entry forget just dropped and
+        // re-uploads a world directory already being quarantined.
+        if (fencedWorlds.contains(worldId)) {
+            return CompletableFuture.failedFuture(
+                    new StorageException("refusing departure commit for fenced world " + worldId + " (MN-10a)"));
+        }
         UUID uuid = player.getUniqueId();
         byte[] payload = ProfileCodec.encode(profileService.capture(player, dimensionName));
 

@@ -83,6 +83,22 @@ public final class WorldFixture {
         return overworld;
     }
 
+    /**
+     * The three dimension folders of {@code worldId}, relative to a scratch root.
+     *
+     * <p>What {@code DirtyScanner.scan} walks and what
+     * {@code WorldDownloader.materialize} is allowed to prune. Fixtures are
+     * written in the Paper 26 nested layout, so these are the nested paths.
+     */
+    public static List<Path> relativeDimensionFolders(WorldId worldId) {
+        String base = worldId.folder();
+        List<Path> roots = new ArrayList<>(3);
+        for (String bukkitName : List.of(base, base + "_nether", base + "_the_end")) {
+            roots.add(Path.of(PRIMARY_LEVEL_NAME, "dimensions", "minecraft", bukkitName));
+        }
+        return List.copyOf(roots);
+    }
+
     /** Absolute Paper 26 dimension folder under the world container. */
     public static Path dimensionFolder(Path scratchRoot, String bukkitWorldName) {
         return scratchRoot

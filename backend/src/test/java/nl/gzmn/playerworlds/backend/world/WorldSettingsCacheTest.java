@@ -23,7 +23,11 @@ class WorldSettingsCacheTest {
     void storesAndRetrieves() {
         WorldSettingsCache cache = new WorldSettingsCache();
         WorldId id = WorldId.random();
-        WorldSettings custom = new WorldSettings(true, true, false, false);
+        WorldSettings custom = WorldSettings.defaults()
+                .withPvp(true)
+                .withVisitorsMayOpenContainers(true)
+                .withVisitorsMayInteract(false)
+                .withMobGriefing(false);
 
         cache.put(id, custom);
         assertThat(cache.get(id)).isEqualTo(custom);

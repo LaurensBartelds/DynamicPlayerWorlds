@@ -9,7 +9,9 @@ import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -32,64 +34,184 @@ class QuarantineManagerTest {
         Files.createDirectories(quarantineRoot);
     }
 
+    /** Paper 26's nesting, which the caller owns now — this stands in for WorldLayout. */
+    private Path dimensionFolder(String bukkitWorldName) {
+        return scratchRoot
+                .resolve("world")
+                .resolve("dimensions")
+                .resolve("minecraft")
+                .resolve(bukkitWorldName);
+    }
+
+    private Path dimensionsRoot() {
+        return scratchRoot.resolve("world").resolve("dimensions").resolve("minecraft");
+    }
+
+    /** The three flat folder names of one world, as the layout would give them. */
+    private List<Path> dimensionFolders(WorldId worldId) {
+        String base = worldId.folder();
+        return List.of(dimensionFolder(base), dimensionFolder(base + "_nether"), dimensionFolder(base + "_the_end"));
+    }
+
+    /** Resolves a folder name back to its world, the inverse WorldFolders supplies. */
+    private static Function<String, Optional<WorldId>> resolverFor(WorldId... known) {
+        return name -> {
+            for (WorldId id : known) {
+                String base = id.folder();
+                if (name.equals(base) || name.equals(base + "_nether") || name.equals(base + "_the_end")) {
+                    return Optional.of(id);
+                }
+            }
+            return Optional.empty();
+        };
+    }
+
+    private QuarantineManager.StartupSweep sweep(
+            Function<String, Optional<WorldId>> resolver,
+            Set<WorldId> leasedHere,
+            Function<WorldId, Optional<String>> manifestKeys) {
+        return new QuarantineManager.StartupSweep(
+                scratchRoot, dimensionsRoot(), quarantineRoot, resolver, leasedHere, manifestKeys, "tag");
+    }
+
+    private Path materialiseWorld(WorldId worldId) throws IOException {
+        for (Path folder : dimensionFolders(worldId)) {
+            Files.createDirectories(folder);
+        }
+        Path overworld = dimensionFolder(worldId.folder());
+        Files.writeString(overworld.resolve("paper-world.yml"), "world data");
+        return overworld;
+    }
+
     @Test
-    @DisplayName("quarantineWorld moves overworld, nether, and the_end folders to quarantine")
+    @DisplayName("quarantineWorld moves every dimension folder it is given, and drops the marker")
     void quarantineWorldMovesAllDimensionFolders() throws IOException {
         WorldId worldId = WorldId.random();
-        String base = worldId.folder();
+        materialiseWorld(worldId);
+        CleanUnloadMarker.write(scratchRoot, worldId, "worlds/x/manifest/1-1.json");
 
-        Path overworld = QuarantineManager.dimensionFolder(scratchRoot, "world", base);
-        Path nether = QuarantineManager.dimensionFolder(scratchRoot, "world", base + "_nether");
-        Path end = QuarantineManager.dimensionFolder(scratchRoot, "world", base + "_the_end");
-
-        Files.createDirectories(overworld);
-        Files.writeString(overworld.resolve("paper-world.yml"), "test data");
-        Files.createDirectories(nether);
-        Files.createDirectories(end);
-
-        List<Path> quarantined = QuarantineManager.quarantineWorld(scratchRoot, quarantineRoot, worldId);
+        List<Path> quarantined =
+                QuarantineManager.quarantineWorld(scratchRoot, quarantineRoot, worldId, dimensionFolders(worldId));
 
         assertThat(quarantined).hasSize(3);
-        assertThat(Files.exists(overworld)).isFalse();
-        assertThat(Files.exists(nether)).isFalse();
-        assertThat(Files.exists(end)).isFalse();
-
+        for (Path folder : dimensionFolders(worldId)) {
+            assertThat(Files.exists(folder)).isFalse();
+        }
         for (Path q : quarantined) {
             assertThat(Files.exists(q)).isTrue();
             assertThat(q.getParent()).isEqualTo(quarantineRoot);
         }
+        // The marker vouched for files that are no longer there.
+        assertThat(CleanUnloadMarker.read(scratchRoot, worldId)).isEmpty();
     }
 
     @Test
-    @DisplayName("sweepStartup deletes snapshot directories and quarantines unleased world folders")
-    void sweepStartupDeletesSnapshotsAndQuarantinesUnleased() throws IOException {
-        WorldId leasedWorld = WorldId.random();
-        WorldId unleasedWorld = WorldId.random();
+    @DisplayName("a cleanly unloaded world survives a restart as a warm cache (MN-5, MN-4)")
+    void aCleanlyUnloadedWorldSurvivesRestartAsAWarmCache_MN5() throws IOException {
+        WorldId world = WorldId.random();
+        Path overworld = materialiseWorld(world);
+        String manifest = "worlds/" + world.value() + "/manifest/3-2.json";
+        // What a clean unload leaves behind: the commit landed, then the marker,
+        // then the lease was released — so at startup nothing is leased here.
+        CleanUnloadMarker.write(scratchRoot, world, manifest);
 
-        // Leased world in nested Paper 26 path (should be left untouched)
-        Path leasedFolder = QuarantineManager.dimensionFolder(scratchRoot, "world", leasedWorld.folder());
-        Files.createDirectories(leasedFolder);
+        List<Path> quarantined =
+                QuarantineManager.sweepStartup(sweep(resolverFor(world), Set.of(), id -> Optional.of(manifest)));
 
-        // Unleased world in nested path (should be moved to quarantine)
-        Path unleasedFolder = QuarantineManager.dimensionFolder(scratchRoot, "world", unleasedWorld.folder());
-        Files.createDirectories(unleasedFolder);
-        Files.writeString(unleasedFolder.resolve("data.txt"), "crash debris");
+        assertThat(quarantined).isEmpty();
+        assertThat(Files.exists(overworld)).isTrue();
+        assertThat(Files.readString(overworld.resolve("paper-world.yml"))).isEqualTo("world data");
+        // Still vouched for: nothing has touched it, so the next load is warm.
+        assertThat(CleanUnloadMarker.read(scratchRoot, world)).contains(manifest);
+    }
 
-        // Snapshot folders still sit at the world-container root (MN-5a)
+    @Test
+    @DisplayName("a world with no marker is quarantined as crash debris (MN-13)")
+    void aWorldWithNoMarkerIsQuarantined_MN13() throws IOException {
+        WorldId world = WorldId.random();
+        Path overworld = materialiseWorld(world);
+        String manifest = "worlds/" + world.value() + "/manifest/3-2.json";
+        // kill -9 while loaded: the load cleared the marker and nothing wrote one.
+
+        List<Path> quarantined =
+                QuarantineManager.sweepStartup(sweep(resolverFor(world), Set.of(), id -> Optional.of(manifest)));
+
+        assertThat(quarantined).hasSize(3);
+        assertThat(Files.exists(overworld)).isFalse();
+    }
+
+    @Test
+    @DisplayName("a marker naming an older manifest is debris, not a warm cache (D18)")
+    void aMarkerNamingADifferentManifestIsDebris() throws IOException {
+        WorldId world = WorldId.random();
+        Path overworld = materialiseWorld(world);
+        CleanUnloadMarker.write(scratchRoot, world, "worlds/" + world.value() + "/manifest/3-1.json");
+
+        // Another node has taken the world and committed since.
+        List<Path> quarantined = QuarantineManager.sweepStartup(sweep(
+                resolverFor(world), Set.of(), id -> Optional.of("worlds/" + world.value() + "/manifest/4-1.json")));
+
+        assertThat(quarantined).hasSize(3);
+        assertThat(Files.exists(overworld)).isFalse();
+        assertThat(CleanUnloadMarker.read(scratchRoot, world)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a world still leased to this node at startup is debris whatever its marker says")
+    void aWorldStillLeasedHereIsDebris() throws IOException {
+        WorldId world = WorldId.random();
+        Path overworld = materialiseWorld(world);
+        String manifest = "worlds/" + world.value() + "/manifest/3-2.json";
+        CleanUnloadMarker.write(scratchRoot, world, manifest);
+
+        // A live lease at startup means the previous process died holding it; a
+        // clean shutdown releases every lease before it exits (FR-28).
+        List<Path> quarantined =
+                QuarantineManager.sweepStartup(sweep(resolverFor(world), Set.of(world), id -> Optional.of(manifest)));
+
+        assertThat(quarantined).hasSize(3);
+        assertThat(Files.exists(overworld)).isFalse();
+    }
+
+    @Test
+    @DisplayName("sweepStartup deletes leftover snapshot directories and leaves foreign folders alone (MN-5a)")
+    void sweepStartupDeletesSnapshotsAndIgnoresForeignFolders() throws IOException {
+        WorldId world = WorldId.random();
+        materialiseWorld(world);
+        String manifest = "worlds/" + world.value() + "/manifest/1-1.json";
+        CleanUnloadMarker.write(scratchRoot, world, manifest);
+
+        // The lobby, sitting in the same directory. Nothing of ours.
+        Path lobby = dimensionFolder("overworld");
+        Files.createDirectories(lobby);
+
         Path snapshotTemp = scratchRoot.resolve("_snapshot_123");
         Path snapshotsDir = scratchRoot.resolve(".snapshots");
         Files.createDirectories(snapshotTemp);
         Files.createDirectories(snapshotsDir);
 
-        List<Path> quarantined = QuarantineManager.sweepStartup(scratchRoot, quarantineRoot, Set.of(leasedWorld));
+        List<Path> quarantined =
+                QuarantineManager.sweepStartup(sweep(resolverFor(world), Set.of(), id -> Optional.of(manifest)));
 
-        assertThat(Files.exists(leasedFolder)).isTrue();
-        assertThat(Files.exists(unleasedFolder)).isFalse();
+        assertThat(quarantined).isEmpty();
+        assertThat(Files.exists(lobby)).isTrue();
         assertThat(Files.exists(snapshotTemp)).isFalse();
         assertThat(Files.exists(snapshotsDir)).isFalse();
+    }
 
-        assertThat(quarantined).hasSize(1);
-        assertThat(Files.exists(quarantined.getFirst())).isTrue();
+    @Test
+    @DisplayName("a world whose row is gone is not kept on the strength of a marker")
+    void aWorldWithNoCurrentManifestIsDebris() throws IOException {
+        WorldId world = WorldId.random();
+        Path overworld = materialiseWorld(world);
+        CleanUnloadMarker.write(scratchRoot, world, CleanUnloadMarker.NO_MANIFEST);
+
+        // Hard-deleted elsewhere (FR-37), so there is no row and no manifest.
+        List<Path> quarantined =
+                QuarantineManager.sweepStartup(sweep(resolverFor(world), Set.of(), id -> Optional.empty()));
+
+        assertThat(quarantined).hasSize(3);
+        assertThat(Files.exists(overworld)).isFalse();
     }
 
     @Test
