@@ -384,13 +384,13 @@ class BackendControlHandlersTest {
     }
 
     /**
-     * R9 / FR-9e: {@code APPLY_SETTINGS} must re-assert PVP (and mob-griefing) on a
-     * loaded world — not only refresh {@link WorldSettingsCache}.
+     * R9 / FR-9e / FR-9i: {@code APPLY_SETTINGS} must re-assert every owner
+     * gamerule on a loaded world — not only refresh {@link WorldSettingsCache}.
      *
      * <p>Without the gamerule write, {@code /world set pvp on} reports success and
      * updates the row while the live dimensions keep the load-time gamerule. The
-     * containers/interact settings only need the cache; PVP and mob-griefing live
-     * in {@code level.dat} as well.
+     * containers/interact settings only need the cache; every FR-9e/FR-9i
+     * gamerule lives in {@code level.dat} as well.
      */
     @Test
     void applySettingsChangesPvpOnALoadedWorld_FR9e() throws Exception {
@@ -416,15 +416,49 @@ class BackendControlHandlersTest {
 
         String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
         WorldMock overworld = server.addSimpleWorld(overworldName);
-        // Load-time gamerules, matching the stale cache above.
+        // Load-time gamerules, matching the stale cache above: FR-9e's two at their
+        // non-default settings-cache value, every FR-9i addition at vanilla's own
+        // default (mirroring a world that loaded before its owner touched anything).
         platform.worldRuntime().setPvp(overworld, false);
         platform.worldRuntime().setMobGriefing(overworld, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.KEEP_INVENTORY, false);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FALL_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FIRE_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FREEZE_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.DROWNING_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.ADVANCE_TIME, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.ADVANCE_WEATHER, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.SPAWN_PHANTOMS, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.IMMEDIATE_RESPAWN, false);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.NATURAL_HEALTH_REGENERATION, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.PLAYERS_SLEEPING_PERCENTAGE, 100);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.MAX_ENTITY_CRAMMING, 24);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.RESPAWN_RADIUS, 10);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.MAX_SNOW_ACCUMULATION_HEIGHT, 1);
         assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PVP)).isFalse();
         assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MOB_GRIEFING))
                 .isTrue();
 
-        // Proxy half already committed: pvp on, mob-griefing off.
-        WorldSettings updated = WorldSettings.defaults().withPvp(true).withMobGriefing(false);
+        // Proxy half already committed: pvp on, mob-griefing off, and every FR-9i
+        // addition flipped away from its vanilla default so the assertions below
+        // cannot pass by coincidence.
+        WorldSettings updated = WorldSettings.defaults()
+                .withPvp(true)
+                .withMobGriefing(false)
+                .withKeepInventory(true)
+                .withFallDamage(false)
+                .withFireDamage(false)
+                .withFreezeDamage(false)
+                .withDrowningDamage(false)
+                .withAdvanceTime(false)
+                .withAdvanceWeather(false)
+                .withSpawnPhantoms(false)
+                .withImmediateRespawn(true)
+                .withNaturalHealthRegeneration(false)
+                .withPlayersSleepingPercentage(50)
+                .withMaxEntityCramming(10)
+                .withRespawnRadius(3)
+                .withMaxSnowAccumulationHeight(5);
         assertThat(offMain(() -> worlds.updateSettings(worldId, updated.toJson())))
                 .isTrue();
 
@@ -462,6 +496,33 @@ class BackendControlHandlersTest {
         assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MOB_GRIEFING))
                 .as("R9 / FR-9e: mob-griefing gamerule must change on the loaded overworld")
                 .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.KEEP_INVENTORY))
+                .as("R9 / FR-9i: keepInventory must change on the loaded overworld")
+                .isTrue();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FALL_DAMAGE)).isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FIRE_DAMAGE)).isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FREEZE_DAMAGE))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.DROWNING_DAMAGE))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.ADVANCE_TIME))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.ADVANCE_WEATHER))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.SPAWN_PHANTOMS))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.IMMEDIATE_RESPAWN))
+                .isTrue();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.NATURAL_HEALTH_REGENERATION))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PLAYERS_SLEEPING_PERCENTAGE))
+                .isEqualTo(50);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MAX_ENTITY_CRAMMING))
+                .isEqualTo(10);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.RESPAWN_RADIUS))
+                .isEqualTo(3);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MAX_SNOW_ACCUMULATION_HEIGHT))
+                .isEqualTo(5);
     }
 
     @Test

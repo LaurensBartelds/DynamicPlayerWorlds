@@ -19,18 +19,19 @@ import nl.gzmn.playerworlds.core.control.NodeCommand;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
 import org.bukkit.Bukkit;
+import org.bukkit.GameRules;
 import org.bukkit.World;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Handles {@link CommandKind#APPLY_SETTINGS} (FR-9e, CP-6, R9).
+ * Handles {@link CommandKind#APPLY_SETTINGS} (FR-9e, FR-9i, CP-6, R9).
  *
  * <p>{@code /world set} commits the new JSON to {@code player_world.settings} on
- * the proxy, then asks every relevant node to pick it up. PVP and the
- * mob-griefing gamerule live in {@code level.dat} as well as the database, so a
- * cache refresh alone is not enough on a world that is already loaded — the
+ * the proxy, then asks every relevant node to pick it up. Every FR-9e/FR-9i
+ * gamerule lives in {@code level.dat} as well as the database, so a cache
+ * refresh alone is not enough on a world that is already loaded — the
  * gamerules must be re-asserted on the main thread across every materialised
  * dimension. Container and interact rules only need the settings cache (see
  * {@link nl.gzmn.playerworlds.backend.world.RoleEnforcementListener}).
@@ -123,6 +124,23 @@ public final class ApplySettingsHandler implements CommandHandler {
                     }
                     runtime.setPvp(world, settings.pvp());
                     runtime.setMobGriefing(world, settings.mobGriefing());
+                    runtime.setGameRule(world, GameRules.KEEP_INVENTORY, settings.keepInventory());
+                    runtime.setGameRule(world, GameRules.FALL_DAMAGE, settings.fallDamage());
+                    runtime.setGameRule(world, GameRules.FIRE_DAMAGE, settings.fireDamage());
+                    runtime.setGameRule(world, GameRules.FREEZE_DAMAGE, settings.freezeDamage());
+                    runtime.setGameRule(world, GameRules.DROWNING_DAMAGE, settings.drowningDamage());
+                    runtime.setGameRule(world, GameRules.ADVANCE_TIME, settings.advanceTime());
+                    runtime.setGameRule(world, GameRules.ADVANCE_WEATHER, settings.advanceWeather());
+                    runtime.setGameRule(world, GameRules.SPAWN_PHANTOMS, settings.spawnPhantoms());
+                    runtime.setGameRule(world, GameRules.IMMEDIATE_RESPAWN, settings.immediateRespawn());
+                    runtime.setGameRule(
+                            world, GameRules.NATURAL_HEALTH_REGENERATION, settings.naturalHealthRegeneration());
+                    runtime.setGameRule(
+                            world, GameRules.PLAYERS_SLEEPING_PERCENTAGE, settings.playersSleepingPercentage());
+                    runtime.setGameRule(world, GameRules.MAX_ENTITY_CRAMMING, settings.maxEntityCramming());
+                    runtime.setGameRule(world, GameRules.RESPAWN_RADIUS, settings.respawnRadius());
+                    runtime.setGameRule(
+                            world, GameRules.MAX_SNOW_ACCUMULATION_HEIGHT, settings.maxSnowAccumulationHeight());
                 }
                 applied.complete(null);
             } catch (RuntimeException e) {
@@ -132,7 +150,7 @@ public final class ApplySettingsHandler implements CommandHandler {
         try {
             applied.get(APPLY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (Exception e) {
-            log.warn("APPLY_SETTINGS could not re-assert gamerules for world {} (FR-9e)", worldId, e);
+            log.warn("APPLY_SETTINGS could not re-assert gamerules for world {} (FR-9e, FR-9i)", worldId, e);
             throw e;
         }
     }

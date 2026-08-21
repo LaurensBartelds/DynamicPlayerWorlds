@@ -474,6 +474,105 @@ class WorldActionsTest {
     }
 
     @Test
+    @DisplayName("FR-9i: a new boolean gamerule setting persists and enqueues APPLY_SETTINGS")
+    void setSettingFr9iBooleanSucceeds() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+
+        ActionResult result = actions.setSetting(player, "keep-inventory", "on").get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("set keep-inventory = true");
+
+        PlayerWorld updated = worlds.findById(worldId).orElseThrow();
+        assertThat(WorldSettings.fromJson(updated.settingsJson()).keepInventory())
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("FR-9i: a numeric gamerule setting parses, validates its range, and persists")
+    void setSettingFr9iNumericSucceeds() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+        database.inTransaction(connection -> {
+            try (var stmt =
+                    connection.prepareStatement("UPDATE player_world SET assigned_node = 'node-1' WHERE id = ?")) {
+                stmt.setObject(1, worldId.value());
+                stmt.executeUpdate();
+            }
+            return null;
+        });
+
+        ActionResult result =
+                actions.setSetting(player, "sleep-percentage", "50").get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("set sleep-percentage = 50");
+
+        PlayerWorld updated = worlds.findById(worldId).orElseThrow();
+        assertThat(WorldSettings.fromJson(updated.settingsJson()).playersSleepingPercentage())
+                .isEqualTo(50);
+    }
+
+    @Test
+    @DisplayName("FR-9i: a non-numeric value for a numeric setting is rejected")
+    void setSettingFr9iNumericRejectsNonNumeric() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+
+        ActionResult result =
+                actions.setSetting(player, "sleep-percentage", "many").get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("must be a whole number");
+
+        PlayerWorld unchanged = worlds.findById(worldId).orElseThrow();
+        assertThat(WorldSettings.fromJson(unchanged.settingsJson()).playersSleepingPercentage())
+                .isEqualTo(100);
+    }
+
+    @Test
+    @DisplayName("FR-9i: an out-of-range value for a ranged numeric setting is rejected")
+    void setSettingFr9iNumericRejectsOutOfRange() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "myworld", 12345L, 5000, Visibility.PRIVATE);
+
+        ActionResult result =
+                actions.setSetting(player, "sleep-percentage", "150").get();
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("must be a whole number");
+
+        PlayerWorld unchanged = worlds.findById(worldId).orElseThrow();
+        assertThat(WorldSettings.fromJson(unchanged.settingsJson()).playersSleepingPercentage())
+                .isEqualTo(100);
+    }
+
+    @Test
     @DisplayName("R12: join that cannot route releases the lease it acquired (MN-12)")
     void joinNotRoutableReleasesAcquiredLease_R12() throws Exception {
         // Placement can select the node from the heartbeat table, but Velocity has

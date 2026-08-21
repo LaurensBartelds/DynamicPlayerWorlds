@@ -1152,7 +1152,7 @@ public final class WorldActions {
     }
 
     /**
-     * Updates world settings (FR-9e).
+     * Updates world settings (FR-9e, FR-9i).
      */
     public CompletableFuture<ActionResult> setSetting(
             Player caller, String settingName, String valueStr, @Nullable WorldId worldId) {
@@ -1177,17 +1177,65 @@ public final class WorldActions {
                                 || normVal.equals("allow")
                                 || normVal.equals("yes")
                                 || normVal.equals("enable");
+                        String displayValue = String.valueOf(boolVal);
 
                         switch (normKey) {
                             case "pvp" -> updated = settings.withPvp(boolVal);
                             case "containers" -> updated = settings.withVisitorsMayOpenContainers(boolVal);
                             case "interact", "redstone", "doors" -> updated = settings.withVisitorsMayInteract(boolVal);
                             case "mob-griefing", "mobgriefing" -> updated = settings.withMobGriefing(boolVal);
+                            case "keep-inventory", "keepinventory" -> updated = settings.withKeepInventory(boolVal);
+                            case "fall-damage" -> updated = settings.withFallDamage(boolVal);
+                            case "fire-damage" -> updated = settings.withFireDamage(boolVal);
+                            case "freeze-damage" -> updated = settings.withFreezeDamage(boolVal);
+                            case "drowning-damage" -> updated = settings.withDrowningDamage(boolVal);
+                            case "daylight-cycle", "advance-time" -> updated = settings.withAdvanceTime(boolVal);
+                            case "weather-cycle", "advance-weather" -> updated = settings.withAdvanceWeather(boolVal);
+                            case "insomnia", "phantoms" -> updated = settings.withSpawnPhantoms(boolVal);
+                            case "immediate-respawn" -> updated = settings.withImmediateRespawn(boolVal);
+                            case "natural-regeneration", "regeneration" ->
+                                updated = settings.withNaturalHealthRegeneration(boolVal);
+                            case "sleep-percentage", "sleeping-percentage" -> {
+                                Integer parsed = parseRangedInt(valueStr, 0, 100);
+                                if (parsed == null) {
+                                    return invalidIntResult(settingName, 0, 100);
+                                }
+                                updated = settings.withPlayersSleepingPercentage(parsed);
+                                displayValue = String.valueOf(parsed);
+                            }
+                            case "entity-cramming", "max-entity-cramming" -> {
+                                Integer parsed = parseRangedInt(valueStr, 0, Integer.MAX_VALUE);
+                                if (parsed == null) {
+                                    return invalidIntResult(settingName, 0, Integer.MAX_VALUE);
+                                }
+                                updated = settings.withMaxEntityCramming(parsed);
+                                displayValue = String.valueOf(parsed);
+                            }
+                            case "respawn-radius" -> {
+                                Integer parsed = parseRangedInt(valueStr, 0, Integer.MAX_VALUE);
+                                if (parsed == null) {
+                                    return invalidIntResult(settingName, 0, Integer.MAX_VALUE);
+                                }
+                                updated = settings.withRespawnRadius(parsed);
+                                displayValue = String.valueOf(parsed);
+                            }
+                            case "snow-height", "max-snow-height" -> {
+                                Integer parsed = parseRangedInt(valueStr, 0, Integer.MAX_VALUE);
+                                if (parsed == null) {
+                                    return invalidIntResult(settingName, 0, Integer.MAX_VALUE);
+                                }
+                                updated = settings.withMaxSnowAccumulationHeight(parsed);
+                                displayValue = String.valueOf(parsed);
+                            }
                             default -> {
                                 return ActionResult.failure(
                                         FailureCode.INVALID_NAME,
                                         error("unknown setting '" + settingName
-                                                + "'; valid settings: pvp, containers, interact, mob-griefing"));
+                                                + "'; valid settings: pvp, containers, interact, mob-griefing, "
+                                                + "keep-inventory, fall-damage, fire-damage, freeze-damage, "
+                                                + "drowning-damage, daylight-cycle, weather-cycle, insomnia, "
+                                                + "immediate-respawn, natural-regeneration, sleep-percentage, "
+                                                + "entity-cramming, respawn-radius, snow-height"));
                             }
                         }
 
@@ -1195,12 +1243,13 @@ public final class WorldActions {
                             return ActionResult.failure(
                                     FailureCode.GENERIC_ERROR, error("could not update world settings; try again"));
                         }
-                        // R9 / FR-9e: APPLY_SETTINGS refreshes the settings cache and
-                        // re-asserts PVP / mob-griefing gamerules on loaded dimensions.
-                        // INVALIDATE_CACHE alone left those gamerules stuck at load time.
+                        // R9 / FR-9e / FR-9i: APPLY_SETTINGS refreshes the settings cache
+                        // and re-asserts every gamerule on loaded dimensions. INVALIDATE_CACHE
+                        // alone left those gamerules stuck at load time.
                         enqueueToWorldOrAliveNodes(
                                 world, CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
-                        Component msg = success("set " + normKey + " = " + boolVal + " for '" + world.name() + "'");
+                        Component msg =
+                                success("set " + normKey + " = " + displayValue + " for '" + world.name() + "'");
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world set failed for {}", caller.getUsername(), e);
@@ -1211,12 +1260,31 @@ public final class WorldActions {
                 executors.db());
     }
 
+    /** Parses a whole number within {@code [min, max]}, or {@code null} if it does not parse or is out of range. */
+    private static @Nullable Integer parseRangedInt(String valueStr, int min, int max) {
+        try {
+            int parsed = Integer.parseInt(valueStr.trim());
+            if (parsed < min || parsed > max) {
+                return null;
+            }
+            return parsed;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private static ActionResult invalidIntResult(String settingName, int min, int max) {
+        String range = max == Integer.MAX_VALUE ? (min + " or greater") : (min + "-" + max);
+        return ActionResult.failure(
+                FailureCode.INVALID_NAME, error("'" + settingName + "' must be a whole number " + range));
+    }
+
     public CompletableFuture<ActionResult> showSettings(Player caller) {
         return showSettings(caller, null);
     }
 
     /**
-     * Displays settings for a world (FR-9e).
+     * Displays settings for a world (FR-9e, FR-9i).
      */
     public CompletableFuture<ActionResult> showSettings(Player caller, @Nullable WorldId worldId) {
         Objects.requireNonNull(caller, "caller");
@@ -1239,7 +1307,26 @@ public final class WorldActions {
                                 caller,
                                 info("  Visitors may interact (doors/buttons/redstone): "
                                         + (settings.visitorsMayInteract() ? "on" : "off")));
-                        Component msg = info("  Mob griefing: " + (settings.mobGriefing() ? "on" : "off"));
+                        tell(caller, info("  Mob griefing: " + (settings.mobGriefing() ? "on" : "off")));
+                        tell(caller, info("  Keep inventory: " + (settings.keepInventory() ? "on" : "off")));
+                        tell(caller, info("  Fall damage: " + (settings.fallDamage() ? "on" : "off")));
+                        tell(caller, info("  Fire damage: " + (settings.fireDamage() ? "on" : "off")));
+                        tell(caller, info("  Freeze damage: " + (settings.freezeDamage() ? "on" : "off")));
+                        tell(caller, info("  Drowning damage: " + (settings.drowningDamage() ? "on" : "off")));
+                        tell(caller, info("  Daylight cycle: " + (settings.advanceTime() ? "on" : "off")));
+                        tell(caller, info("  Weather cycle: " + (settings.advanceWeather() ? "on" : "off")));
+                        tell(caller, info("  Insomnia (phantoms): " + (settings.spawnPhantoms() ? "on" : "off")));
+                        tell(caller, info("  Immediate respawn: " + (settings.immediateRespawn() ? "on" : "off")));
+                        tell(
+                                caller,
+                                info("  Natural regeneration: "
+                                        + (settings.naturalHealthRegeneration() ? "on" : "off")));
+                        tell(
+                                caller,
+                                info("  Players sleeping percentage: " + settings.playersSleepingPercentage() + "%"));
+                        tell(caller, info("  Max entity cramming: " + settings.maxEntityCramming()));
+                        tell(caller, info("  Respawn radius: " + settings.respawnRadius()));
+                        Component msg = info("  Max snow accumulation height: " + settings.maxSnowAccumulationHeight());
                         return ActionResult.success(msg);
                     } catch (SQLException e) {
                         log.error("/world settings failed for {}", caller.getUsername(), e);

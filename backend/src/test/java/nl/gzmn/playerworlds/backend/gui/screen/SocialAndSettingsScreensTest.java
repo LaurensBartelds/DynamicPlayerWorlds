@@ -1,6 +1,7 @@
 package nl.gzmn.playerworlds.backend.gui.screen;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -269,11 +270,15 @@ class SocialAndSettingsScreensTest {
         onDb(() -> worldRepository.create(worldId, player.getUniqueId(), "eve-world", 111L, 5000, Visibility.PRIVATE));
         PlayerWorld world = createTestWorld(worldId, player.getUniqueId(), "eve-world");
 
-        WorldSettings settings = new WorldSettings(false, false, true, true);
+        WorldSettings settings = WorldSettings.defaults()
+                .withPvp(false)
+                .withVisitorsMayOpenContainers(false)
+                .withVisitorsMayInteract(true)
+                .withMobGriefing(true);
         SettingsMenu menu = new SettingsMenu(menuService, channel, world, settings);
         Inventory inv = menu.render(player);
 
-        assertThat(inv.getSize()).isEqualTo(27);
+        assertThat(inv.getSize()).isEqualTo(54);
         assertThat(inv.getItem(SettingsMenu.SLOT_INFO).getType()).isEqualTo(Material.BEACON);
         assertThat(inv.getItem(SettingsMenu.SLOT_PVP).getType()).isEqualTo(Material.DIAMOND_SWORD);
         assertThat(inv.getItem(SettingsMenu.SLOT_CONTAINERS).getType()).isEqualTo(Material.CHEST);
@@ -281,31 +286,59 @@ class SocialAndSettingsScreensTest {
         assertThat(inv.getItem(SettingsMenu.SLOT_MOB_GRIEFING).getType()).isEqualTo(Material.CREEPER_HEAD);
         assertThat(inv.getItem(SettingsMenu.SLOT_BACK).getType()).isEqualTo(Material.OAK_DOOR);
 
-        // Toggle PvP (slot 10: false -> true)
+        // FR-9i additions render too (representative sample).
+        assertThat(inv.getItem(SettingsMenu.SLOT_KEEP_INVENTORY).getType()).isEqualTo(Material.TOTEM_OF_UNDYING);
+        assertThat(inv.getItem(SettingsMenu.SLOT_NATURAL_REGENERATION).getType())
+                .isEqualTo(Material.GOLDEN_APPLE);
+        assertThat(inv.getItem(SettingsMenu.SLOT_SLEEP_PERCENTAGE_VALUE).getType())
+                .isEqualTo(Material.RED_BED);
+        assertThat(inv.getItem(SettingsMenu.SLOT_SLEEP_PERCENTAGE_DOWN).getType())
+                .isEqualTo(Material.ARROW);
+        assertThat(inv.getItem(SettingsMenu.SLOT_SLEEP_PERCENTAGE_UP).getType()).isEqualTo(Material.ARROW);
+
+        // Toggle PvP (false -> true)
         menu.handleClick(player, SettingsMenu.SLOT_PVP, ClickType.LEFT);
         byte[] pvpMsg = player.nextSentMessage();
         IntentEnvelope pvpEnv = (IntentEnvelope) MenuCodec.decode(pvpMsg);
         assertThat(pvpEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "pvp", "true"));
 
-        // Toggle Containers (slot 12: false -> true)
+        // Toggle Containers (false -> true)
         menu.handleClick(player, SettingsMenu.SLOT_CONTAINERS, ClickType.LEFT);
         byte[] contMsg = player.nextSentMessage();
         IntentEnvelope contEnv = (IntentEnvelope) MenuCodec.decode(contMsg);
         assertThat(contEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "containers", "true"));
 
-        // Toggle Interact (slot 14: true -> false)
+        // Toggle Interact (true -> false)
         menu.handleClick(player, SettingsMenu.SLOT_INTERACT, ClickType.LEFT);
         byte[] intMsg = player.nextSentMessage();
         IntentEnvelope intEnv = (IntentEnvelope) MenuCodec.decode(intMsg);
         assertThat(intEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "interact", "false"));
 
-        // Toggle Mob Griefing (slot 16: true -> false)
+        // Toggle Mob Griefing (true -> false)
         menu.handleClick(player, SettingsMenu.SLOT_MOB_GRIEFING, ClickType.LEFT);
         byte[] mobMsg = player.nextSentMessage();
         IntentEnvelope mobEnv = (IntentEnvelope) MenuCodec.decode(mobMsg);
         assertThat(mobEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "mob-griefing", "false"));
 
-        // Back button (slot 22) -> openWorldMenu
+        // FR-9i: a new boolean toggle (Keep Inventory: false -> true).
+        menu.handleClick(player, SettingsMenu.SLOT_KEEP_INVENTORY, ClickType.LEFT);
+        byte[] keepInvMsg = player.nextSentMessage();
+        IntentEnvelope keepInvEnv = (IntentEnvelope) MenuCodec.decode(keepInvMsg);
+        assertThat(keepInvEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "keep-inventory", "true"));
+
+        // FR-9i: numeric stepper, up from the default 100.
+        menu.handleClick(player, SettingsMenu.SLOT_SLEEP_PERCENTAGE_UP, ClickType.LEFT);
+        assertThatThrownBy(player::nextSentMessage)
+                .as("sleep-percentage is already at its GUI max (100); clicking + must not send an intent")
+                .isInstanceOf(IllegalStateException.class);
+
+        // FR-9i: numeric stepper, down from the default 100.
+        menu.handleClick(player, SettingsMenu.SLOT_SLEEP_PERCENTAGE_DOWN, ClickType.LEFT);
+        byte[] sleepDownMsg = player.nextSentMessage();
+        IntentEnvelope sleepDownEnv = (IntentEnvelope) MenuCodec.decode(sleepDownMsg);
+        assertThat(sleepDownEnv.intent()).isEqualTo(new MenuIntent.SetSetting(worldId, "sleep-percentage", "90"));
+
+        // Back button -> openWorldMenu
         menu.handleClick(player, SettingsMenu.SLOT_BACK, ClickType.LEFT);
         awaitCondition(() -> {
             drainMain();
