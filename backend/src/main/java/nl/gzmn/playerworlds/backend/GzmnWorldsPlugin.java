@@ -91,10 +91,12 @@ import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
 import nl.gzmn.playerworlds.core.obs.PrometheusEndpoint;
+import nl.gzmn.playerworlds.core.obs.StorageHealthCheck;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.storage.FileCloner;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.ObjectStore;
+import nl.gzmn.playerworlds.core.storage.ObjectStoreHealthCheck;
 import nl.gzmn.playerworlds.core.storage.QuarantineManager;
 import nl.gzmn.playerworlds.core.storage.ReflinkFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
@@ -298,9 +300,21 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         WorldsMetrics worldsMetrics = WorldsMetrics.create();
         this.metrics = worldsMetrics;
 
-        // The probe does a database round trip, a free-space stat and a reflink
-        // trial copy — all three are work NFR-2 keeps off the tick thread, so it
-        // runs on the io pool and enable waits for it under a budget.
+        // Opened here, ahead of startWorldLifecycle, so the probe below can round-trip
+        // it rather than skip storage entirely: startWorldLifecycle needs the probe's
+        // reflink verdict as an input, so it necessarily runs after this point, and by
+        // then it is too late for the probe to see whether object storage even works.
+        // The client itself does no network I/O until first used, so opening it early
+        // costs nothing when object storage is not configured for this node.
+        ObjectStore earlyStore = node.objectStorage().map(S3ObjectStore::open).orElse(null);
+        StorageHealthCheck storageHealthCheck = earlyStore != null
+                ? new ObjectStoreHealthCheck(earlyStore, "_health/" + node.nodeId() + ".ping")
+                : null;
+
+        // The probe does a database round trip, a free-space stat, a reflink trial
+        // copy, and — when object storage is configured — a put/get against it. All
+        // four are work NFR-2 keeps off the tick thread, so it runs on the io pool and
+        // enable waits for it under a budget.
         final CapabilityReport report;
         try {
             report = BoundedOperations.call(
@@ -312,14 +326,16 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             identity.minecraftVersion(),
                             identity.dataVersion(),
                             openedDatabase,
-                            null)));
+                            storageHealthCheck)));
         } catch (TimeoutException | ExecutionException e) {
             getLogger().severe(() -> "capability probe did not complete: " + e);
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             getLogger().severe("interrupted during the capability probe");
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         }
@@ -327,6 +343,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         worldsMetrics.setScratchFreeBytes(Math.max(0L, report.freeBytes()));
         if (!report.safeToEnable()) {
             getLogger().severe("capability probe failed; refusing enable");
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         }
@@ -344,7 +361,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + "); meters remain in-process only");
         }
 
-        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report);
+        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report, earlyStore);
 
         // Concatenation rather than a format string: %d formats through the
         // default locale, which forbidden-apis bans and which would render the
@@ -504,12 +521,20 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             PluginExecutors pools,
             WorldsMetrics worldsMetrics,
             NodeConfig node,
-            CapabilityReport report) {
+            CapabilityReport report,
+            @Nullable ObjectStore preopenedStore) {
         FileCloner cloner = new ReflinkFileCloner(report.reflink());
         LocalObjectCache objectCache = new LocalObjectCache(node.cachePath(), cloner);
 
-        ObjectStore store = node.objectStorage().map(S3ObjectStore::open).orElse(null);
+        // Already opened ahead of the capability probe (onEnable) so the probe could
+        // round-trip it; reused here rather than opened a second time.
+        ObjectStore store = preopenedStore;
         this.objectStore = store;
+        // Same key the capability probe used: one small object per node, not one per
+        // check, and an operator who goes looking for it in the bucket finds it in one
+        // place regardless of which check last wrote it.
+        StorageHealthCheck storageHealthCheck =
+                store != null ? new ObjectStoreHealthCheck(store, "_health/" + node.nodeId() + ".ping") : null;
 
         SnapshotEngine snapshotEngine = store != null
                 ? new SnapshotEngine(store, objectCache, new SnapshotCopier(cloner, this.policy.snapshotCopyRetries()))
@@ -717,9 +742,15 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
 
-        // MN-6: schedule periodic incremental snapshot commits
-        PeriodicSyncTask syncTask =
-                new PeriodicSyncTask(worldRegistry, worldCommitService, this::policy, () -> this.worldHandoff);
+        // MN-6: schedule periodic incremental snapshot commits, and an object storage
+        // ping independent of them (plan section 10.4).
+        PeriodicSyncTask syncTask = new PeriodicSyncTask(
+                worldRegistry,
+                worldCommitService,
+                this::policy,
+                () -> this.worldHandoff,
+                storageHealthCheck,
+                worldsMetrics);
         long syncIntervalSeconds = Math.max(1, this.policy.syncInterval().toSeconds());
         var _ = pools.sched()
                 .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
@@ -1162,5 +1193,15 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
     private void disableSelf() {
         getServer().getPluginManager().disablePlugin(this);
+    }
+
+    /**
+     * Closes a store opened early for the capability probe when enable aborts
+     * before {@link #startWorldLifecycle} would otherwise have taken ownership of it.
+     */
+    private static void closeQuietly(@Nullable ObjectStore store) {
+        if (store != null) {
+            store.close();
+        }
     }
 }

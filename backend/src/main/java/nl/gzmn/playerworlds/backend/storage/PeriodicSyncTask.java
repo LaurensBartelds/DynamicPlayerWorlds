@@ -13,13 +13,21 @@ import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.obs.EventLogger;
 import nl.gzmn.playerworlds.core.obs.LogEvent;
+import nl.gzmn.playerworlds.core.obs.StorageHealthCheck;
+import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Periodically triggers incremental snapshot commits for all loaded worlds (MN-6), and enforces
- * MN-11a's bound on how long a world may go on being played while those commits fail.
+ * Periodically triggers incremental snapshot commits for all loaded worlds (MN-6), enforces
+ * MN-11a's bound on how long a world may go on being played while those commits fail, and pings
+ * object storage independently of any world commit.
+ *
+ * <p>The ping matters on its own: {@link LoadedWorld#isSyncFailingFor} only starts counting once
+ * a commit has actually been attempted and failed, so a network with few, infrequent commits could
+ * otherwise go a long time before anything noticed a broken bucket. This sweep already runs on
+ * every node on a timer regardless of what worlds are loaded, so it is where that gap closes.
  *
  * <p>Single-flight commit throttling is enforced by {@link WorldCommitService}'s
  * commit queue, so an active commit safely absorbs redundant triggers.
@@ -37,6 +45,8 @@ public final class PeriodicSyncTask implements Runnable {
     private final Supplier<NetworkPolicy> policySupplier;
     private final Supplier<@Nullable WorldHandoff> handoffSupplier;
     private final int unloadCountdownSeconds;
+    private final @Nullable StorageHealthCheck storageHealthCheck;
+    private final @Nullable WorldsMetrics metrics;
 
     /**
      * Worlds whose MN-11a unload is in flight.
@@ -57,7 +67,25 @@ public final class PeriodicSyncTask implements Runnable {
             WorldCommitService commits,
             Supplier<NetworkPolicy> policySupplier,
             Supplier<@Nullable WorldHandoff> handoffSupplier) {
-        this(registry, commits, policySupplier, handoffSupplier, DEFAULT_UNLOAD_COUNTDOWN_SECONDS);
+        this(registry, commits, policySupplier, handoffSupplier, DEFAULT_UNLOAD_COUNTDOWN_SECONDS, null, null);
+    }
+
+    /** Production wiring with an object-storage ping (plan section 10.4, MN-11a). */
+    public PeriodicSyncTask(
+            WorldRegistry registry,
+            WorldCommitService commits,
+            Supplier<NetworkPolicy> policySupplier,
+            Supplier<@Nullable WorldHandoff> handoffSupplier,
+            @Nullable StorageHealthCheck storageHealthCheck,
+            @Nullable WorldsMetrics metrics) {
+        this(
+                registry,
+                commits,
+                policySupplier,
+                handoffSupplier,
+                DEFAULT_UNLOAD_COUNTDOWN_SECONDS,
+                storageHealthCheck,
+                metrics);
     }
 
     /** Visible for tests, which cannot afford to wait out MN-21's countdown. */
@@ -67,11 +95,25 @@ public final class PeriodicSyncTask implements Runnable {
             Supplier<NetworkPolicy> policySupplier,
             Supplier<@Nullable WorldHandoff> handoffSupplier,
             int unloadCountdownSeconds) {
+        this(registry, commits, policySupplier, handoffSupplier, unloadCountdownSeconds, null, null);
+    }
+
+    /** Visible for tests: the same, plus the object-storage ping. */
+    PeriodicSyncTask(
+            WorldRegistry registry,
+            WorldCommitService commits,
+            Supplier<NetworkPolicy> policySupplier,
+            Supplier<@Nullable WorldHandoff> handoffSupplier,
+            int unloadCountdownSeconds,
+            @Nullable StorageHealthCheck storageHealthCheck,
+            @Nullable WorldsMetrics metrics) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.commits = Objects.requireNonNull(commits, "commits");
         this.policySupplier = Objects.requireNonNull(policySupplier, "policySupplier");
         this.handoffSupplier = Objects.requireNonNull(handoffSupplier, "handoffSupplier");
         this.unloadCountdownSeconds = unloadCountdownSeconds;
+        this.storageHealthCheck = storageHealthCheck;
+        this.metrics = metrics;
     }
 
     public WorldRegistry registry() {
@@ -88,6 +130,7 @@ public final class PeriodicSyncTask implements Runnable {
 
     @Override
     public void run() {
+        pingObjectStorage();
         Duration maxSyncFailure = policySupplier.get().maxSyncFailure();
         for (LoadedWorld world : registry.loadedWorlds()) {
             // Checked before the request, not after: the outcome of the commit started here
@@ -107,6 +150,32 @@ public final class PeriodicSyncTask implements Runnable {
             } catch (Exception e) {
                 log.warn("Periodic incremental sync failed to request commit for world {}", world.id(), e);
             }
+        }
+    }
+
+    /**
+     * A round trip against object storage independent of any world commit (plan section 10.4).
+     *
+     * <p>Runs even with zero worlds loaded, and even for a world whose own commits have not
+     * failed yet — that is the point: {@link LoadedWorld#isSyncFailingFor} cannot see a problem
+     * before the first commit attempt hits it, and on a quiet network that could be a long time
+     * after storage actually broke.
+     */
+    private void pingObjectStorage() {
+        StorageHealthCheck check = storageHealthCheck;
+        if (check == null) {
+            return;
+        }
+        try {
+            check.ping();
+            if (metrics != null) {
+                metrics.setObjectStorageUp(true);
+            }
+        } catch (Exception e) {
+            if (metrics != null) {
+                metrics.setObjectStorageUp(false);
+            }
+            log.error("periodic object storage health check failed", e);
         }
     }
 

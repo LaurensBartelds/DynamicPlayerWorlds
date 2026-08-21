@@ -24,6 +24,7 @@ public final class MetricNames {
     public static final String QUARANTINE_BYTES = "quarantine.bytes";
     public static final String SCRATCH_FREE_BYTES = "scratch.free.bytes";
     public static final String DB_POOL_WAIT = "db.pool.wait";
+    public static final String OBJECT_STORAGE_UP = "object.storage.up";
 
     public static final String TAG_RESULT = "result";
     public static final String TAG_REASON = "reason";

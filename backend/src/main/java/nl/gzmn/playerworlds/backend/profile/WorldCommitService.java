@@ -38,6 +38,7 @@ import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.storage.DirtyScanner;
 import nl.gzmn.playerworlds.core.storage.Manifest;
 import nl.gzmn.playerworlds.core.storage.ManifestEntry;
+import nl.gzmn.playerworlds.core.storage.QuiescenceWaiter;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
 import nl.gzmn.playerworlds.core.storage.StorageException;
 import org.bukkit.World;
@@ -535,14 +536,11 @@ public final class WorldCommitService {
             // this branch to do about one.
             boolean deletions = baseline != null && scan.observed().size() != baselineEntries.size();
             if (!dirty.isEmpty() || deletions || baseline == null) {
-                Duration quiet = policy.snapshotQuiet();
-                if (!quiet.isZero() && !quiet.isNegative()) {
-                    try {
-                        Thread.sleep(quiet.toMillis());
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        throw new CompletionException(e);
-                    }
+                try {
+                    QuiescenceWaiter.await(scratchRoot, dirty, policy.snapshotQuiet(), policy.snapshotQuiesceTimeout());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new CompletionException(e);
                 }
                 if (snapshotEngine != null) {
                     snapshotResult = snapshotEngine.executeSnapshot(

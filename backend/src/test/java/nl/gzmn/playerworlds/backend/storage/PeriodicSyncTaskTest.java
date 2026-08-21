@@ -37,8 +37,10 @@ import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
+import nl.gzmn.playerworlds.core.obs.StorageHealthCheck;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
+import nl.gzmn.playerworlds.core.storage.ObjectStoreHealthCheck;
 import nl.gzmn.playerworlds.core.storage.PlainFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
@@ -320,6 +322,57 @@ class PeriodicSyncTaskTest {
         // Even at a zero-minute bound: the window opens on a failure, and there has not been one.
         assertThat(world.consecutiveCommitFailures()).isZero();
         assertThat(registry.isLoaded(id)).isTrue();
+    }
+
+    @Test
+    @DisplayName("a successful object storage ping records object.storage.up, independent of any world (plan 10.4)")
+    void pingSucceedsAndRecordsObjectStorageUp() throws Exception {
+        StorageClientSettings settings = TestObjectStore.settingsForNewBucket();
+        try (var pingStore = S3ObjectStore.open(settings);
+                WorldsMetrics metrics = WorldsMetrics.create()) {
+            StorageHealthCheck check = new ObjectStoreHealthCheck(pingStore, "_health/test-node.ping");
+            PeriodicSyncTask task =
+                    new PeriodicSyncTask(registry, commitService, NetworkPolicy::defaults, () -> null, check, metrics);
+
+            task.run();
+            flushExecutors();
+
+            assertThat(metrics.objectStorageUp()).isTrue();
+        }
+    }
+
+    @Test
+    @DisplayName("a failed object storage ping records object.storage.up=false without touching world commits")
+    void pingFailureRecordsObjectStorageDownAndDoesNotBlockCommits() throws Exception {
+        WorldId id = WorldId.random();
+        UUID owner = UUID.randomUUID();
+        WorldFixture.materialize(scratchDir, id, WorldFixture.DimensionSet.ALL_THREE);
+        onDb(() -> {
+            worldRepo.create(id, owner, "healthy", 111L, 5000, Visibility.PRIVATE);
+            worldRepo.markReadyAndPlayed(id);
+            return null;
+        });
+        server.addSimpleWorld(folders.bukkitWorldName(id, DimensionKind.OVERWORLD));
+        registry.register(new LoadedWorld(id, owner, "healthy", 111L, 5000));
+
+        StorageHealthCheck alwaysFails = () -> {
+            throw new java.io.IOException("simulated bucket outage");
+        };
+        try (WorldsMetrics metrics = WorldsMetrics.create()) {
+            PeriodicSyncTask task = new PeriodicSyncTask(
+                    registry, commitService, NetworkPolicy::defaults, () -> null, alwaysFails, metrics);
+
+            task.run();
+            flushExecutors();
+
+            assertThat(metrics.objectStorageUp())
+                    .as("a broken ping must flip the gauge even though nothing here is actually committing to S3")
+                    .isFalse();
+            assertThat(commitService.cachedManifest(id))
+                    .as("the ping is independent of the commit path; a fake, unrelated ping failure must not "
+                            + "stop the world's own (unrelated, real) commit from proceeding")
+                    .isPresent();
+        }
     }
 
     /** A registered world whose snapshot commits fail: its row is not in the database. */

@@ -357,7 +357,9 @@ public final class PlayerWorldRepository extends Repository {
      * <p>Updates the manifest pointer, version tags, and {@code last_played} timestamp
      * conditionally on the lease generation and assigned node matching. If the fencing
      * check passes and profiles are non-empty, saves all profile rows within the same
-     * database transaction.
+     * database transaction, then re-keys every other player's newest surviving profile
+     * onto this snapshot (R10) so {@code manifest_key} and {@code player_world_profile}
+     * never diverge, whether or not this particular commit captured them.
      *
      * @return true if the commit succeeded, false if fenced by lease expiration or generation bump
      */
@@ -430,6 +432,17 @@ public final class PlayerWorldRepository extends Repository {
             if (firstManifestCommit) {
                 profileRepository.rekeyLatestGenerationZero(connection, id, snapshot);
             }
+            // R10 widened: a commit this snapshot's payload skipped a player for
+            // (asleep, or the world's own dirty files moved with nobody online) must
+            // not leave their row behind. Without this, ProfileListener.enter finds no
+            // row at the exact (generation, sequence) manifest_key now names, sees an
+            // older one, and refuses rather than granting a fresh profile it should
+            // never have offered — every returning player, not an edge case, once a
+            // commit has ever landed while they were away. rekeyLatestSnapshot already
+            // carries every player's newest surviving row forward for the restore path
+            // (D17, FR-36); running it here keeps player_world_profile in lockstep with
+            // manifest_key on every commit, not just those two transitions.
+            profileRepository.rekeyLatestSnapshot(connection, id, snapshot);
             return true;
         });
     }

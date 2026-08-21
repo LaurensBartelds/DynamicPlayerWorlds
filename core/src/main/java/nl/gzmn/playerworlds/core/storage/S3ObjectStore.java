@@ -67,11 +67,21 @@ public final class S3ObjectStore implements ObjectStore {
 
     @Override
     public void putObject(String key, Path sourceFile) {
+        putObject(key, sourceFile, null);
+    }
+
+    @Override
+    public void putObject(String key, Path sourceFile, @Nullable String expectedMd5Base64) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(sourceFile, "sourceFile");
         try {
             client.putObject(
-                    PutObjectRequest.builder().bucket(bucket).key(key).build(), RequestBody.fromFile(sourceFile));
+                    PutObjectRequest.builder()
+                            .bucket(bucket)
+                            .key(key)
+                            .contentMD5(expectedMd5Base64)
+                            .build(),
+                    RequestBody.fromFile(sourceFile));
         } catch (Exception e) {
             throw new StorageException("Failed to upload object: " + key, e);
         }
@@ -79,6 +89,11 @@ public final class S3ObjectStore implements ObjectStore {
 
     @Override
     public void putBytes(String key, byte[] bytes, @Nullable String contentType) {
+        putBytes(key, bytes, contentType, null);
+    }
+
+    @Override
+    public void putBytes(String key, byte[] bytes, @Nullable String contentType, @Nullable String expectedMd5Base64) {
         Objects.requireNonNull(key, "key");
         Objects.requireNonNull(bytes, "bytes");
         try {
@@ -87,6 +102,7 @@ public final class S3ObjectStore implements ObjectStore {
                             .bucket(bucket)
                             .key(key)
                             .contentType(contentType != null ? contentType : "application/octet-stream")
+                            .contentMD5(expectedMd5Base64)
                             .build(),
                     RequestBody.fromBytes(bytes));
         } catch (Exception e) {

@@ -21,6 +21,25 @@ public interface ObjectStore extends Closeable {
     void putObject(String key, Path sourceFile);
 
     /**
+     * {@link #putObject(String, Path)}, but the server is told what it should receive.
+     *
+     * <p>An implementation that can act on {@code expectedMd5Base64} (an S3-compatible
+     * store, via the standard {@code Content-MD5} header) rejects a corrupted upload
+     * itself, server-side, rather than trusting whatever bytes arrived (CONTRIBUTING
+     * rule 8). The default ignores it and behaves exactly like {@link
+     * #putObject(String, Path)} — verification is an enhancement callers opt into by
+     * supplying a hash they already have, not something every implementation owes.
+     *
+     * @param expectedMd5Base64 standard base64 MD5 of {@code sourceFile}'s bytes (see
+     *     {@link HashedContent#md5Base64()}), or {@code null} to skip verification
+     * @throws StorageException if the upload fails, including a checksum mismatch the
+     *     server detected
+     */
+    default void putObject(String key, Path sourceFile, @Nullable String expectedMd5Base64) {
+        putObject(key, sourceFile);
+    }
+
+    /**
      * Uploads in-memory bytes to the given object key with an optional content type.
      *
      * @param key target object storage key
@@ -29,6 +48,17 @@ public interface ObjectStore extends Closeable {
      * @throws StorageException if the upload fails
      */
     void putBytes(String key, byte[] bytes, @Nullable String contentType);
+
+    /**
+     * {@link #putBytes(String, byte[], String)} with the same server-side verification
+     * as {@link #putObject(String, Path, String)}.
+     *
+     * @param expectedMd5Base64 standard base64 MD5 of {@code bytes}, or {@code null} to
+     *     skip verification
+     */
+    default void putBytes(String key, byte[] bytes, @Nullable String contentType, @Nullable String expectedMd5Base64) {
+        putBytes(key, bytes, contentType);
+    }
 
     /**
      * Downloads an object to the specified destination path atomically.

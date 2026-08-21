@@ -295,7 +295,10 @@ class PlayerWorldRepositoryTest {
                 .as("R10: departed player's newest gen-0 profile must be re-keyed onto the first snapshot")
                 .containsExactly(40, 50);
 
-        // Second commit must not re-copy gen-0 (would resurrect stale data).
+        // Second commit captures nobody (bob never came back). R10 widened: every
+        // commit re-keys each player's newest surviving row forward, not just the
+        // gen-0 transition, so bob is not orphaned the moment the manifest moves
+        // past the snapshot his row is keyed to.
         ProfileRepository.Snapshot second = new ProfileRepository.Snapshot(1L, 2);
         assertThat(worlds.commitSnapshot(
                         id,
@@ -310,9 +313,9 @@ class PlayerWorldRepositoryTest {
                         Map.of(),
                         profiles))
                 .isTrue();
-        assertThat(profiles.load(id, bob, second))
-                .as("R10: re-key is one-shot on first manifest only")
-                .isEmpty();
+        assertThat(profiles.load(id, bob, second).orElseThrow().data())
+                .as("R10 widened: a player absent from this commit is still carried forward, not orphaned")
+                .containsExactly(40, 50);
     }
 
     @Test

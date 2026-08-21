@@ -136,7 +136,9 @@ public final class SnapshotEngine {
 
                 String s3Key = "worlds/" + worldId.value() + "/data/" + sha256;
                 if (!objectStore.exists(s3Key)) {
-                    objectStore.putObject(s3Key, file.snapshotPath());
+                    // Server-side verified against the digest already computed above (MN-2,
+                    // CONTRIBUTING rule 8) — no second read of the file to get it.
+                    objectStore.putObject(s3Key, file.snapshotPath(), hashed.md5Base64());
                     uploadedBytes += hashed.sizeBytes();
                 }
 
@@ -153,8 +155,12 @@ public final class SnapshotEngine {
             Manifest manifest =
                     new Manifest(worldId, generation, sequence, dataVersion, mcVersion, clock.instant(), newEntries);
             String manifestJson = ManifestCodec.encode(manifest);
+            byte[] manifestBytes = manifestJson.getBytes(StandardCharsets.UTF_8);
             objectStore.putBytes(
-                    manifest.manifestKey(), manifestJson.getBytes(StandardCharsets.UTF_8), "application/json");
+                    manifest.manifestKey(),
+                    manifestBytes,
+                    "application/json",
+                    ContentHasher.hashBytes(manifestBytes).md5Base64());
 
             log.debug(
                     "Snapshot complete for world {}: gen={}, seq={}, dirty={}, uploadedBytes={}, manifestKey={}",

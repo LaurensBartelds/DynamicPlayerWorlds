@@ -20,16 +20,20 @@ class ContentHasherTest {
     Path temp;
 
     @Test
-    @DisplayName("hashBytes matches MessageDigest SHA-256")
+    @DisplayName("hashBytes matches MessageDigest SHA-256 and MD5")
     void hashMatchesJdk() throws Exception {
         byte[] data = "content-addressed".getBytes(StandardCharsets.UTF_8);
         HashedContent hashed = ContentHasher.hashBytes(data);
 
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        String expected = HexFormat.of().formatHex(md.digest(data));
-        assertThat(hashed.sha256Hex()).isEqualTo(expected);
+        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
+        String expectedSha256 = HexFormat.of().formatHex(sha256.digest(data));
+        assertThat(hashed.sha256Hex()).isEqualTo(expectedSha256);
         assertThat(hashed.sizeBytes()).isEqualTo(data.length);
-        assertThat(hashed.objectKeySuffix()).isEqualTo(expected);
+        assertThat(hashed.objectKeySuffix()).isEqualTo(expectedSha256);
+
+        MessageDigest md5 = MessageDigest.getInstance("MD5");
+        String expectedMd5 = java.util.Base64.getEncoder().encodeToString(md5.digest(data));
+        assertThat(hashed.md5Base64()).isEqualTo(expectedMd5);
     }
 
     @Test
