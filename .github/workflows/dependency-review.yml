@@ -26,11 +26,12 @@ jobs:
         uses: actions/dependency-review-action@v4
         with:
           fail-on-severity: high
-          # AGPL-3.0-or-later project. GPL family is fine; network-copyleft
-          # traps (SSPL, BUSL) are denied explicitly below. Proprietary,
-          # commercial, and Commons-Clause-encumbered deps have no SPDX id
-          # to deny by name, so they are excluded by omission: allow-licenses
-          # is an exhaustive allow-list and anything not on it already fails.
+          # AGPL-3.0-or-later project. GPL family is fine. Proprietary,
+          # commercial, and Commons-Clause-encumbered deps have no SPDX id to
+          # name, and network-copyleft traps (SSPL, BUSL) need none either:
+          # allow-licenses is an exhaustive allow-list, everything not on it
+          # fails, and the action rejects combining it with deny-licenses —
+          # so all of these are excluded by omission.
           allow-licenses: >-
             Apache-2.0,
             MIT,
@@ -62,7 +63,4 @@ jobs:
             AGPL-3.0-or-later,
             Unlicense,
             WTFPL
-          deny-licenses: >-
-            SSPL-1.0,
-            BUSL-1.1
           comment-summary-in-pr: on-failure
