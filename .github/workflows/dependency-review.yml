@@ -5,14 +5,11 @@
 # licensee Gradle gate on ./gradlew check, which covers the resolved runtime
 # graph on every push — this action covers the diff GitHub sees on the PR.
 name: dependency-review
-
 on:
   pull_request:
-
 permissions:
   contents: read
   pull-requests: write
-
 jobs:
   dependency-review:
     name: review
@@ -21,7 +18,6 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
-
       - name: Dependency review
         uses: actions/dependency-review-action@v4
         with:
@@ -38,7 +34,6 @@ jobs:
             0BSD,
             CC0-1.0,
             CC-BY-4.0,
-            Public Domain,
             EPL-1.0,
             EPL-2.0,
             MPL-2.0,
