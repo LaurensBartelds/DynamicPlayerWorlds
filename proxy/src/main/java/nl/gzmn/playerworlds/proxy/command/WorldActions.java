@@ -662,6 +662,20 @@ public final class WorldActions {
     }
 
     private ActionResult doJoin(Player caller, PlayerWorld world, NetworkPolicy current) throws SQLException {
+        // Joining the world you are standing in must not run the sequence below.
+        // It would write a pending_transfer the node's poll answers by teleporting
+        // you to spawn and leaving you there: FR-14 and FR-15b's restore rides
+        // PlayerChangedWorldEvent, and FR-11 notes that event does not fire for
+        // somebody who is already there. Presence answers before anything is
+        // written; TransferJoinListener holds the authoritative check for when
+        // this entry is stale. worldOf already insists the caller is still
+        // connected to the node that reported it, so an entry outliving a dead
+        // node cannot refuse a join asked from the lobby.
+        Optional<WorldId> standingIn = presence.worldOf(caller);
+        if (standingIn.isPresent() && standingIn.get().equals(world.id())) {
+            return ActionResult.success(
+                    info("messages.command.join.already-here", Placeholders.text("world", world.name())));
+        }
         if (bans.isBanned(world.id(), caller.getUniqueId())) {
             Optional<WorldBan> ban = bans.findBan(world.id(), caller.getUniqueId());
             String reason = ban.flatMap(b -> Optional.ofNullable(b.reason()))

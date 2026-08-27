@@ -573,6 +573,28 @@ class WorldActionsTest {
     }
 
     @Test
+    @DisplayName("joining the world you are standing in answers and writes nothing (FR-10)")
+    void joiningTheWorldYouAreStandingInIsANoOp() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerOn(owner, "Alice", "node-1");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "hereworld", 12345L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        actions.presence().entered(owner, "node-1", worldId);
+
+        ActionResult result = actions.join(player, worldId).get();
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("you are already in 'hereworld'");
+
+        assertThat(transfers.claim(owner, Duration.ofMinutes(1)))
+                .as("no pending_transfer may reach the node: its arrival sequence would move the player")
+                .isEmpty();
+    }
+
+    @Test
     @DisplayName("R12: join that cannot route releases the lease it acquired (MN-12)")
     void joinNotRoutableReleasesAcquiredLease_R12() throws Exception {
         // Placement can select the node from the heartbeat table, but Velocity has

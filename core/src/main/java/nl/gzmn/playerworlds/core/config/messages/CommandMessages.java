@@ -192,6 +192,8 @@ public final class CommandMessages {
                     "messages.command.join.lease-conflict",
                     "<red>that world is being opened elsewhere right now; try again in a moment</red>"),
             MessageKey.of("messages.command.join.started", "<gray>sending you to '<world>'...</gray>", Set.of("world")),
+            MessageKey.of(
+                    "messages.command.join.already-here", "<gray>you are already in '<world>'</gray>", Set.of("world")),
 
             // --- invite (FR-6) ----------------------------------------------------
             MessageKey.of(

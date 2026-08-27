@@ -43,6 +43,7 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.testing.TestDatabase;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
@@ -401,6 +402,43 @@ class TransferJoinListenerTest {
         assertEquals(worldMock, player.getWorld());
         List<Long> ids = onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10));
         assertThat(ids).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a transfer for the world the player already stands in moves nobody")
+    void joiningTheWorldYouAreStandingInLeavesYouWhereYouAre() throws Exception {
+        PlayerMock player = server.addPlayer();
+        WorldId worldId = WorldId.random();
+
+        LoadedWorld loaded = new LoadedWorld(worldId, player.getUniqueId(), "AlreadyHere", 12345L, 5000, 0L);
+        loaded.markMaterialised(DimensionKind.OVERWORLD);
+        registry.register(loaded);
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        WorldMock overworld = server.addSimpleWorld(overworldName);
+
+        // Clicking your own world while playing in it: they are inside the target
+        // world when the poll claims the transfer their join wrote.
+        Location before = new Location(overworld, 16.5, 64.0, -32.5, 90.0f, 20.0f);
+        player.teleport(before);
+
+        onDb(() -> {
+            PlayerWorld world =
+                    worldRepo.create(worldId, player.getUniqueId(), "AlreadyHere", 12345L, 5000, Visibility.PRIVATE);
+            transferRepo.route(player.getUniqueId(), worldId, "node-1", world.generation());
+            return null;
+        });
+
+        // What the 10-tick poll calls for every online player.
+        listener.processPlayer(player);
+        flushExecutors();
+
+        assertThat(player.getWorld()).isEqualTo(overworld);
+        assertThat(player.getLocation())
+                .as("the arrival sequence must not run for somebody already in the world")
+                .isEqualTo(before);
+        assertThat(onDb(() -> nodeCommands.findClaimableIds("proxy", Duration.ofMinutes(1), 10)))
+                .isEmpty();
     }
 
     /** Two seconds: long enough that the enqueued eject is still claimable when asserted on. */

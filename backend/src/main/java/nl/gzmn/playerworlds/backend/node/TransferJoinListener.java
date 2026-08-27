@@ -185,6 +185,26 @@ public final class TransferJoinListener implements Listener {
                 return;
             }
 
+            // A transfer can name the world the player is standing in right now:
+            // clicking your own world while playing in it writes one like any
+            // other join, and the proxy does not even reconnect first when the
+            // target node is the one they are on. The arrival sequence must not
+            // run for them. sendIn would put them at spawn, and nothing would
+            // move them back afterwards: FR-14 and FR-15b's restore rides
+            // PlayerChangedWorldEvent, which fires neither for a teleport inside
+            // one Bukkit world nor -- across a world's dimensions -- when the
+            // world id did not change (FR-2 treats the three as one unit). They
+            // asked to go where they already are; the claim above has consumed
+            // the row either way, so the next poll tick sees nothing.
+            Optional<WorldId> standingIn = folders.worldIdOf(player.getWorld().getName());
+            if (standingIn.isPresent() && standingIn.get().equals(transfer.worldId())) {
+                log.debug(
+                        "player {} claimed a transfer into world {} but is already standing in it; leaving them in place",
+                        player.getUniqueId(),
+                        transfer.worldId());
+                return;
+            }
+
             follow(player, transfer, arrivedAtNanos, current.holdingTimeout());
         });
     }
