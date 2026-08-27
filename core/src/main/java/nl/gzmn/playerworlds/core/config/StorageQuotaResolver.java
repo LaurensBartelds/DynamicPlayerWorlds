@@ -160,7 +160,7 @@ public final class StorageQuotaResolver {
      * Evaluates a {@link StorageQuota} against a permission backend that can only be asked about
      * one node at a time, such as Velocity's own.
      *
-     * <p>Velocity's {@code PermissionSubject} answers {@code hasPermission} per node and cannot
+     * <p>Velocity's {@code PermissionSubject} answers {@code holdsPermission} per node and cannot
      * list what a player holds, so a tier that is neither configured nor asked about is invisible
      * here. Prefer {@link #evaluate(UUID, long, Collection, boolean, long)} wherever the granted
      * permissions can be enumerated — LuckPerms can, and through that overload every tier works

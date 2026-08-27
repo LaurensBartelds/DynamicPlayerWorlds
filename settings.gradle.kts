@@ -1,5 +1,3 @@
-rootProject.name = "dynamicplayerworlds"
-
 pluginManagement {
     includeBuild("build-logic")
     repositories {
@@ -7,6 +5,12 @@ pluginManagement {
         mavenCentral()
     }
 }
+
+plugins {
+    id("org.gradle.toolchains.foojay-resolver-convention") version("0.8.0")
+}
+
+rootProject.name = "dynamicplayerworlds"
 
 dependencyResolutionManagement {
     repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS

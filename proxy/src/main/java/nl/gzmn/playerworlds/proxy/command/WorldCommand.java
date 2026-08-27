@@ -3,6 +3,7 @@ package nl.gzmn.playerworlds.proxy.command;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.suggestion.Suggestions;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.proxy.Player;
@@ -1027,7 +1028,7 @@ public final class WorldCommand {
         return null;
     }
 
-    private CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestOnlinePlayers(
+    private CompletableFuture<Suggestions> suggestOnlinePlayers(
             CommandContext<CommandSource> context, com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
         for (Player player : proxy.getAllPlayers()) {
             if (player.getUsername()
@@ -1039,7 +1040,7 @@ public final class WorldCommand {
         return builder.buildFuture();
     }
 
-    private CompletableFuture<com.mojang.brigadier.suggestion.Suggestions> suggestNodes(
+    private CompletableFuture<Suggestions> suggestNodes(
             CommandContext<CommandSource> context, com.mojang.brigadier.suggestion.SuggestionsBuilder builder) {
         try {
             String prefix = builder.getRemaining().toLowerCase(Locale.ROOT);
