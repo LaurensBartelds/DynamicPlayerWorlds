@@ -38,7 +38,7 @@ jobs:
             0BSD,
             CC0-1.0,
             CC-BY-4.0,
-            Public Domain,
+            Unlicense,
             EPL-1.0,
             EPL-2.0,
             MPL-2.0,
@@ -60,10 +60,4 @@ jobs:
             AGPL-3.0-or-later,
             Unlicense,
             WTFPL
-          deny-licenses: >-
-            SSPL-1.0,
-            BUSL-1.1,
-            Commons-Clause,
-            Proprietary,
-            Commercial
           comment-summary-in-pr: on-failure
