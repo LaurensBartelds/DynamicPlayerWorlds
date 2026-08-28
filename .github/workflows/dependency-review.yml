@@ -60,7 +60,4 @@ jobs:
             AGPL-3.0-or-later,
             Unlicense,
             WTFPL
-          deny-licenses: >-
-            SSPL-1.0,
-            BUSL-1.1
           comment-summary-in-pr: on-failure
