@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.ParseResults;
 import com.velocitypowered.api.command.BrigadierCommand;
 import com.velocitypowered.api.command.CommandSource;
+import com.velocitypowered.api.permission.Tristate;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
@@ -53,6 +55,7 @@ import nl.gzmn.playerworlds.proxy.node.Placement;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 class WorldCommandTest {
@@ -112,6 +115,7 @@ class WorldCommandTest {
                 registry,
                 new Placement(nodeRepo, worlds),
                 nodeCommands,
+                database,
                 () -> policy);
         BrigadierCommand brigadierCommand = worldCommand.build();
         dispatcher = new CommandDispatcher<>();
@@ -1319,6 +1323,94 @@ class WorldCommandTest {
         assertThat(worlds.findById(worldId)).isEmpty();
     }
 
+    @Test
+    @DisplayName("/world invite <player> <world> reaches the world named (section 6, FR-1)")
+    void inviteTakesAWorldNameWhenTheOwnerHasTwo() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player ownerPlayer = registerPlayer(ownerUuid, "Alice");
+        UUID targetUuid = UUID.randomUUID();
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        worlds.create(WorldId.random(), ownerUuid, "first", 1L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        WorldId second = WorldId.random();
+        worlds.create(second, ownerUuid, "second", 2L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+
+        dispatcher.execute("world invite Bob second", ownerPlayer);
+
+        awaitCondition(() -> membership.findLiveInvite(second, targetUuid).isPresent());
+    }
+
+    @Test
+    @DisplayName("naming no world with two of them is refused with the syntax that works")
+    void inviteWithoutAWorldNameSaysHowToNameOne() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player ownerPlayer = registerPlayer(ownerUuid, "Alice");
+        List<Component> messages = messagesByPlayer.get(ownerUuid);
+        UUID targetUuid = UUID.randomUUID();
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        worlds.create(WorldId.random(), ownerUuid, "first", 1L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        worlds.create(WorldId.random(), ownerUuid, "second", 2L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+
+        dispatcher.execute("world invite Bob", ownerPlayer);
+
+        awaitCondition(() -> messages.stream()
+                .map(component -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(component))
+                .anyMatch(text -> text.contains("/world invite <player> <world>")));
+    }
+
+    @Test
+    @DisplayName("a world name the caller does not own is refused before the action runs")
+    void inviteToAWorldTheCallerDoesNotOwnIsRefused() throws Exception {
+        UUID ownerUuid = UUID.randomUUID();
+        Player ownerPlayer = registerPlayer(ownerUuid, "Alice");
+        List<Component> messages = messagesByPlayer.get(ownerUuid);
+        UUID targetUuid = UUID.randomUUID();
+        registerPlayer(targetUuid, "Bob");
+        names.remember(targetUuid, "Bob");
+
+        worlds.create(WorldId.random(), ownerUuid, "mine", 1L, policy.defaultBorderRadius(), Visibility.PRIVATE);
+        WorldId theirs = WorldId.random();
+        worlds.create(theirs, UUID.randomUUID(), "theirs", 2L, policy.defaultBorderRadius(), Visibility.PUBLIC);
+
+        dispatcher.execute("world invite Bob theirs", ownerPlayer);
+
+        awaitCondition(() -> messages.stream()
+                .map(component -> net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText()
+                        .serialize(component))
+                .anyMatch(text -> text.contains("you own no world called 'theirs'")));
+        assertThat(membership.findLiveInvite(theirs, targetUuid)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("every owner subcommand that takes a trailing world name parses with one")
+    void ownerSubcommandsParseWithATrailingWorldName() {
+        Player player = registerPlayer(UUID.randomUUID(), "Alice");
+        List<String> commands = List.of(
+                "world invite Bob second",
+                "world kick Bob second",
+                "world promote Bob second",
+                "world unban Bob second",
+                "world members second",
+                "world bans second",
+                "world settings second",
+                "world set pvp on second",
+                "world transfer Bob second",
+                "world transfer Bob second confirm",
+                // The literal still wins over the world argument, so the form
+                // that existed before keeps meaning what it meant.
+                "world transfer Bob confirm");
+
+        for (String command : commands) {
+            ParseResults<CommandSource> parsed = dispatcher.parse(command, player);
+            assertThat(parsed.getReader().canRead()).as(command).isFalse();
+            assertThat(parsed.getContext().getCommand()).as(command).isNotNull();
+        }
+    }
+
     private Player registerPlayer(UUID uuid, String username) {
         return registerPlayer(uuid, username, permission -> true);
     }
@@ -1415,6 +1507,9 @@ class WorldCommandTest {
                             receivedMessages.add(comp);
                         }
                         return null;
+                    }
+                    if ("getPermissionValue".equals(method.getName()) && args != null && args.length == 1) {
+                        return permissions.test((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;
                     }
                     if ("hasPermission".equals(method.getName()) && args != null && args.length == 1) {
                         return permissions.test((String) args[0]);

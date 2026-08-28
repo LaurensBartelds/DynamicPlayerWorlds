@@ -104,6 +104,30 @@ class ProfileRepositoryTest {
         // FR-15b: they have never played in the world and get a fresh profile per
         // FR-5 — which is the caller's job, not this repository's.
         assertThat(profiles.load(worldId, bob, new Snapshot(0L, 0))).isEmpty();
+        assertThat(profiles.hasAnyProfile(worldId, bob)).isFalse();
+        assertThat(profiles.hasAnyProfile(worldId, alice)).isTrue();
+    }
+
+    @Test
+    @DisplayName("R10: rekeyLatestGenerationZero copies newest gen-0 row per player")
+    void rekeyLatestGenerationZeroCopiesNewestPerPlayer() throws Exception {
+        commit(new Snapshot(0L, 0), Map.of(alice, new byte[] {1}, bob, new byte[] {9}));
+        commit(new Snapshot(0L, 1), Map.of(alice, new byte[] {2}));
+
+        Snapshot target = new Snapshot(3L, 1);
+        int inserted =
+                database.inTransaction(connection -> profiles.rekeyLatestGenerationZero(connection, worldId, target));
+
+        assertThat(inserted).isEqualTo(2);
+        assertThat(profiles.load(worldId, alice, target).orElseThrow().data()).containsExactly(2);
+        assertThat(profiles.load(worldId, bob, target).orElseThrow().data()).containsExactly(9);
+
+        // Live payload already at target wins.
+        commit(target, Map.of(alice, new byte[] {7}));
+        int again =
+                database.inTransaction(connection -> profiles.rekeyLatestGenerationZero(connection, worldId, target));
+        assertThat(again).isZero();
+        assertThat(profiles.load(worldId, alice, target).orElseThrow().data()).containsExactly(7);
     }
 
     @Test

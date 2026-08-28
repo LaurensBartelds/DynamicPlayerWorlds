@@ -3,13 +3,11 @@ package nl.gzmn.playerworlds.backend.gui.screen;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
@@ -51,9 +49,9 @@ public final class StorageMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        var messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
-        Inventory inventory =
-                Bukkit.createInventory(holder, 36, Component.text("Storage Breakdown", NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(holder, 36, messages.render("messages.gui.storage-menu.title"));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 36; i++) {
@@ -65,22 +63,21 @@ public final class StorageMenu implements GuiScreen {
                 SLOT_OVERVIEW,
                 ItemUtil.create(
                         Material.ENDER_CHEST,
-                        Component.text("Storage Allowance", NamedTextColor.GOLD, TextDecoration.BOLD),
-                        Component.text(
-                                "Used: " + StorageQuotaResolver.formatBytes(quota.usedBytes()), NamedTextColor.GRAY),
-                        Component.text(
-                                "Limit: "
-                                        + (quota.unlimited()
+                        messages.render("messages.gui.storage-menu.item.overview.name"),
+                        messages.renderLore(
+                                "messages.gui.storage-menu.item.overview.lore",
+                                Placeholders.bytes("used", quota.usedBytes()),
+                                Placeholders.raw(
+                                        "limit",
+                                        quota.unlimited()
                                                 ? "Unlimited"
                                                 : StorageQuotaResolver.formatBytes(quota.limitBytes())),
-                                NamedTextColor.GRAY),
-                        Component.text(
-                                "Usage: "
-                                        + (quota.unlimited()
+                                Placeholders.raw(
+                                        "usage",
+                                        quota.unlimited()
                                                 ? "Unlimited"
                                                 : String.format(Locale.ROOT, "%.1f%%", quota.percentage())),
-                                NamedTextColor.AQUA),
-                        Component.text(renderProgressBar(quota.percentage()), NamedTextColor.DARK_AQUA)));
+                                Placeholders.raw("bar", renderProgressBar(quota.percentage())))));
 
         // Middle slots: owned worlds
         int maxItems = Math.min(ownedWorlds.size(), WORLDS_END_SLOT - WORLDS_START_SLOT + 1);
@@ -93,13 +90,13 @@ public final class StorageMenu implements GuiScreen {
                     slot,
                     ItemUtil.create(
                             mat,
-                            Component.text(world.name(), NamedTextColor.YELLOW, TextDecoration.BOLD),
-                            Component.text(
-                                    "Size: " + StorageQuotaResolver.formatBytes(world.storageBytes()),
-                                    NamedTextColor.GRAY),
-                            Component.text("State: " + world.state().name(), NamedTextColor.DARK_GRAY),
-                            Component.empty(),
-                            Component.text("▶ Click to manage", NamedTextColor.YELLOW)));
+                            messages.render(
+                                    "messages.gui.storage-menu.item.world-entry.name",
+                                    Placeholders.text("world", world.name())),
+                            messages.renderLore(
+                                    "messages.gui.storage-menu.item.world-entry.lore",
+                                    Placeholders.bytes("size", world.storageBytes()),
+                                    Placeholders.raw("state", world.state().name()))));
         }
 
         // Slot 31: Back
@@ -107,8 +104,8 @@ public final class StorageMenu implements GuiScreen {
                 SLOT_BACK,
                 ItemUtil.create(
                         Material.OAK_DOOR,
-                        Component.text("Back to Main Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to return", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.storage-menu.item.back.name"),
+                        messages.renderLore("messages.gui.storage-menu.item.back.lore")));
 
         return inventory;
     }

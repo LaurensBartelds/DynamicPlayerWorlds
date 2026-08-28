@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -82,12 +83,11 @@ class ControlPlaneTest {
         int claimed = plane.pollOnce();
 
         assertThat(claimed).isEqualTo(1);
-        assertThat(seen).hasSize(1);
-        assertThat(seen.getFirst().id()).isEqualTo(id);
-        assertThat(commands.findById(id))
-                .get()
+        assertThat(awaitCompleted(id))
                 .extracting(NodeCommand::result, NodeCommand::isCompleted)
                 .containsExactly(CommandResult.OK, true);
+        assertThat(seen).hasSize(1);
+        assertThat(seen.getFirst().id()).isEqualTo(id);
     }
 
     @Test
@@ -133,11 +133,10 @@ class ControlPlaneTest {
         pool.shutdown();
         assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
 
-        assertThat(executions.get()).isEqualTo(1);
-        assertThat(commands.findById(id))
-                .get()
+        assertThat(awaitCompleted(id))
                 .extracting(NodeCommand::attempts, NodeCommand::result)
                 .containsExactly(1, CommandResult.OK);
+        assertThat(executions.get()).isEqualTo(1);
     }
 
     @Test
@@ -222,11 +221,8 @@ class ControlPlaneTest {
         bumpGeneration(worldId, 1L);
 
         assertThat(plane.pollOnce()).isEqualTo(1);
+        assertThat(awaitCompleted(id)).extracting(NodeCommand::result).isEqualTo(CommandResult.STALE_GENERATION);
         assertThat(executions.get()).isZero();
-        assertThat(commands.findById(id))
-                .get()
-                .extracting(NodeCommand::result)
-                .isEqualTo(CommandResult.STALE_GENERATION);
     }
 
     @Test
@@ -237,8 +233,7 @@ class ControlPlaneTest {
 
         ControlPlane plane = plane(NODE_A);
         assertThat(plane.pollOnce()).isEqualTo(1);
-        assertThat(commands.findById(id))
-                .get()
+        assertThat(awaitCompleted(id))
                 .extracting(NodeCommand::result, NodeCommand::isCompleted)
                 .containsExactly(CommandResult.unknownCommand("FUTURE_COMMAND").wire(), true);
     }
@@ -274,11 +269,10 @@ class ControlPlaneTest {
         });
 
         assertThat(plane.pollOnce()).isEqualTo(1);
-        assertThat(executions.get()).isEqualTo(1);
-        assertThat(commands.findById(id))
-                .get()
+        assertThat(awaitCompleted(id))
                 .extracting(NodeCommand::attempts, NodeCommand::result)
                 .containsExactly(2, CommandResult.OK);
+        assertThat(executions.get()).isEqualTo(1);
     }
 
     @Test
@@ -306,10 +300,88 @@ class ControlPlaneTest {
         assertThat(owner.pollOnce()).isEqualTo(1);
     }
 
+    @Test
+    @DisplayName("a blocking handler dispatched by the poll does not stall the scheduler (CP-3, D15)")
+    void aBlockingHandlerDispatchedByThePollDoesNotStallTheScheduler() throws Exception {
+        ScheduledExecutorService sched = Executors.newSingleThreadScheduledExecutor();
+        toClose.add(sched::shutdownNow);
+
+        ControlPlane plane = plane(NODE_A);
+        // MigrateWorldHandler's exact shape: wait for a countdown that the very
+        // scheduler running the poll is the one to complete. Run inline on that
+        // scheduler and the wait can never end, and the lease heartbeat, fencing
+        // watchdog and periodic sync sharing it stop with it.
+        CompletableFuture<Void> countdown = new CompletableFuture<>();
+        plane.register(CommandKind.MIGRATE_WORLD, command -> {
+            var ignored = sched.schedule(() -> countdown.complete(null), 200, TimeUnit.MILLISECONDS);
+            countdown.get(5, TimeUnit.SECONDS);
+            return CommandResult.ok();
+        });
+
+        long id = plane.enqueue(null, null, CommandKind.MIGRATE_WORLD, NodeCommand.EMPTY_PAYLOAD, TTL);
+        // Claimed by the poll, on the scheduler, exactly as ControlPlane.start does.
+        assertThat(sched.submit(plane::pollOnce).get(5, TimeUnit.SECONDS)).isEqualTo(1);
+
+        assertThat(awaitCompleted(id)).extracting(NodeCommand::result).isEqualTo(CommandResult.OK);
+
+        // And the scheduler took other work throughout rather than being held by
+        // the handler: this is the heartbeat's seat.
+        assertThat(sched.submit(() -> "beat").get(2, TimeUnit.SECONDS)).isEqualTo("beat");
+    }
+
+    @Test
+    @DisplayName("an explicit executor still dispatches inline, for callers that want it")
+    void anExplicitExecutorIsHonoured() throws Exception {
+        ControlPlane inline = new ControlPlane(
+                NODE_A, ControlChannels.forNode(NODE_A), settings, commands, POLL, CLAIM_TIMEOUT, Runnable::run);
+        toClose.add(inline);
+        AtomicInteger executions = new AtomicInteger();
+        inline.register(CommandKind.INVALIDATE_CACHE, command -> {
+            executions.incrementAndGet();
+            return CommandResult.ok();
+        });
+
+        long id = inline.enqueue(null, null, CommandKind.INVALIDATE_CACHE, NodeCommand.EMPTY_PAYLOAD, TTL);
+        assertThat(inline.pollOnce()).isEqualTo(1);
+
+        // No await: an inline executor means the effect has already happened.
+        assertThat(executions.get()).isEqualTo(1);
+        assertThat(commands.findById(id))
+                .get()
+                .extracting(NodeCommand::isCompleted)
+                .isEqualTo(true);
+    }
+
     private ControlPlane plane(String nodeId) {
         ControlPlane plane = ControlPlane.forNode(nodeId, settings, commands, POLL, CLAIM_TIMEOUT);
         toClose.add(plane);
         return plane;
+    }
+
+    /**
+     * Waits for the row to be completed.
+     *
+     * <p>Handlers run on the plane's own executor now (R15), so {@code pollOnce}
+     * returning means the command was claimed, not that its effect has landed.
+     * CP-5's guarantee is about the completed row, and this waits for that.
+     */
+    private NodeCommand awaitCompleted(long id) {
+        awaitUntil(
+                () -> {
+                    try {
+                        return commands.findById(id)
+                                .filter(NodeCommand::isCompleted)
+                                .isPresent();
+                    } catch (SQLException e) {
+                        throw new AssertionError(e);
+                    }
+                },
+                Duration.ofSeconds(10));
+        try {
+            return commands.findById(id).orElseThrow();
+        } catch (SQLException e) {
+            throw new AssertionError(e);
+        }
     }
 
     private WorldId insertWorld(long generation) throws SQLException {

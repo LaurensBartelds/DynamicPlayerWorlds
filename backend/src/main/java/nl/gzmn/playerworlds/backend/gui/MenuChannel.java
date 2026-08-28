@@ -15,6 +15,8 @@ import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.menu.OpenMenu;
+import nl.gzmn.playerworlds.core.menu.WorldPresenceNotice;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.messaging.PluginMessageListener;
@@ -94,6 +96,23 @@ public final class MenuChannel implements PluginMessageListener {
         byte[] bytes = MenuCodec.encodeIntent(correlationId, intent);
         player.sendPluginMessage(plugin, MenuChannels.CHANNEL_NAME, bytes);
         return future;
+    }
+
+    /**
+     * Tells the proxy which player world this player is standing in (FR-6).
+     *
+     * <p>Fire and forget: there is no reply and nothing to correlate. The proxy
+     * routes every entry into a world, but a move <em>between</em> worlds on this
+     * node is invisible to it, and section 6's owner commands all run there.
+     *
+     * @param player the player whose location changed
+     * @param worldId the world they are now in, or {@code null} for anywhere that
+     *     is not a player world
+     */
+    public void sendPresence(Player player, @Nullable WorldId worldId) {
+        Objects.requireNonNull(player, "player");
+        player.sendPluginMessage(
+                plugin, MenuChannels.CHANNEL_NAME, MenuCodec.encodePresence(new WorldPresenceNotice(worldId)));
     }
 
     @Override

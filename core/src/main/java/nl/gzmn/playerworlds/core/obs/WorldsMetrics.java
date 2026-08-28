@@ -27,6 +27,11 @@ public final class WorldsMetrics implements AutoCloseable {
     private final AtomicInteger worldsLoaded = new AtomicInteger();
     private final AtomicLong quarantineBytes = new AtomicLong();
     private final AtomicLong scratchFreeBytes = new AtomicLong();
+    // 1 until a check actually fails: a node with no object storage configured, or
+    // one that has not run its first periodic ping yet, is not "down" — it is
+    // unknown, and reading a fresh node as an outage would be a false alert at
+    // every boot.
+    private final AtomicInteger objectStorageUp = new AtomicInteger(1);
 
     private final Counter fenceEvents;
     private final Counter holdingTimeouts;
@@ -49,6 +54,9 @@ public final class WorldsMetrics implements AutoCloseable {
         Gauge.builder(MetricNames.SCRATCH_FREE_BYTES, scratchFreeBytes, AtomicLong::get)
                 .description("Usable free bytes on the scratch volume (NFR-3)")
                 .baseUnit("bytes")
+                .register(registry);
+        Gauge.builder(MetricNames.OBJECT_STORAGE_UP, objectStorageUp, AtomicInteger::get)
+                .description("1 if the last object storage health check round-tripped, 0 if it failed (MN-11a)")
                 .register(registry);
 
         this.fenceEvents = Counter.builder(MetricNames.FENCE_EVENTS)
@@ -129,6 +137,15 @@ public final class WorldsMetrics implements AutoCloseable {
             throw new IllegalArgumentException("scratchFreeBytes must not be negative, was: " + bytes);
         }
         scratchFreeBytes.set(bytes);
+    }
+
+    /** Records the outcome of a periodic object-storage round trip (MN-11a). */
+    public void setObjectStorageUp(boolean up) {
+        objectStorageUp.set(up ? 1 : 0);
+    }
+
+    public boolean objectStorageUp() {
+        return objectStorageUp.get() != 0;
     }
 
     public void leaseAcquireOk() {

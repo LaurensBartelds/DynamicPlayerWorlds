@@ -12,36 +12,76 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Stream;
-import nl.gzmn.playerworlds.core.model.WorldId;
 
 /**
- * Scans local world directories for new or modified files against a baseline snapshot manifest (MN-5a step 3).
+ * Walks a world's dimension folders and reports what is there and what has
+ * changed since the baseline manifest (MN-5a step 3).
  *
- * <p>Excludes node-local files (e.g. {@code session.lock}, {@code uid.dat}) configured via {@code excludeGlobs}.
- * Compares file length and last-modified time against {@link ManifestEntry} metadata to identify dirty files.
+ * <p>Excludes node-local files ({@code session.lock}, {@code uid.dat}, whatever
+ * else {@code storage.exclude-globs} names). A file is dirty when its length or
+ * last-modified time differs from the baseline {@link ManifestEntry}; unreadable
+ * counts as dirty, because copying a file that turns out not to have changed is
+ * cheap and skipping one that has is not.
  *
- * <p>Callers supply the dimension folder paths (relative to {@code scratchRoot}) because on-disk layout
- * is version-sensitive — Paper 26 nests Bukkit worlds under
- * {@code <level-name>/dimensions/minecraft/<name>/}, while cold archives still unpack to flat
- * {@code <name>/} folders. {@link #scanDirty(Path, WorldId, Map, List)} keeps the flat layout for
- * archive extract trees and tests.
+ * <h2>Why the observed set comes back too</h2>
+ *
+ * <p>The dirty subset alone cannot express a deletion, and MN-3 says a world's
+ * state <em>is</em> its manifest. Building the next manifest by adding the dirty
+ * files to the previous one means an entry can never leave it: a file deleted
+ * from a world folder is resurrected by the next cold load, and MN-2b's garbage
+ * collection can never reclaim its object because a retained manifest still
+ * points at it. The walk already visits every file, so returning the full set it
+ * saw costs nothing and lets {@link SnapshotEngine} build the manifest from what
+ * is on disk rather than from what used to be (plan 05, D16).
+ *
+ * <p>Callers supply the dimension folder paths, relative to {@code scratchRoot},
+ * because on-disk layout is version-sensitive: Paper 26 nests Bukkit worlds under
+ * {@code <level-name>/dimensions/minecraft/<name>/} while an archive's extract
+ * tree is flat. {@code :core} may not see {@code WorldLayout} (CONTRIBUTING rule
+ * 2), so it is told rather than deriving folder names from string suffixes.
  */
 public final class DirtyScanner {
 
     private DirtyScanner() {}
 
     /**
-     * Scans the given dimension folders under {@code scratchRoot} for files that are new or modified
-     * compared to {@code baselineEntries}.
+     * What one walk saw.
+     *
+     * @param dirty relative paths that are new or modified, sorted; what gets
+     *     copied, hashed and uploaded
+     * @param observed every relative path the walk saw, as unix-separated
+     *     manifest keys, sorted and duplicate-free; the complete file set the next
+     *     manifest should describe. A list rather than a set so manifest entry
+     *     order is stable across runs and two manifests of the same tree diff
+     *     cleanly.
+     */
+    public record Scan(List<Path> dirty, List<String> observed) {
+
+        public Scan {
+            Objects.requireNonNull(dirty, "dirty");
+            Objects.requireNonNull(observed, "observed");
+            dirty = List.copyOf(dirty);
+            observed = List.copyOf(observed);
+        }
+
+        /** Nothing on disk, which for a world with a baseline means everything was deleted. */
+        public boolean isEmpty() {
+            return observed.isEmpty();
+        }
+    }
+
+    /**
+     * Walks {@code relativeDimensionRoots} under {@code scratchRoot}.
      *
      * @param scratchRoot root directory that relative paths are resolved against
      * @param relativeDimensionRoots dimension folder paths relative to {@code scratchRoot}
-     * @param baselineEntries map of relative unix path to baseline manifest entry
-     * @param excludeGlobs list of file names or glob patterns to omit from the dirty set
-     * @return sorted list of relative paths that are new or modified
-     * @throws StorageException if scanning the directory hierarchy fails with an IO error
+     * @param baselineEntries relative unix path to baseline manifest entry
+     * @param excludeGlobs file names or glob patterns to omit
+     * @throws StorageException if the walk fails with an IO error — a partial
+     *     result would read as "these files were deleted" and take their objects
+     *     with it
      */
-    public static List<Path> scanDirty(
+    public static Scan scan(
             Path scratchRoot,
             Collection<Path> relativeDimensionRoots,
             Map<String, ManifestEntry> baselineEntries,
@@ -52,6 +92,7 @@ public final class DirtyScanner {
         Objects.requireNonNull(excludeGlobs, "excludeGlobs");
 
         List<Path> dirty = new ArrayList<>();
+        List<String> observed = new ArrayList<>();
 
         for (Path relativeRoot : relativeDimensionRoots) {
             Objects.requireNonNull(relativeRoot, "relativeDimensionRoot");
@@ -71,6 +112,7 @@ public final class DirtyScanner {
                         .forEach(path -> {
                             Path relative = scratchRoot.relativize(path);
                             String unixRel = relative.toString().replace('\\', '/');
+                            observed.add(unixRel);
                             ManifestEntry baseEntry = baselineEntries.get(unixRel);
                             boolean isDirty = true;
                             if (baseEntry != null) {
@@ -93,26 +135,8 @@ public final class DirtyScanner {
             }
         }
         dirty.sort(Comparator.naturalOrder());
-        return List.copyOf(dirty);
-    }
-
-    /**
-     * Scans flat Bukkit world folders ({@code <folder>}, {@code <folder>_nether},
-     * {@code <folder>_the_end}) under {@code scratchRoot}.
-     *
-     * <p>Used for cold-archive extract trees and synthetic fixtures that still use the
-     * classic multi-folder layout. Live Paper 26 nodes must pass layout-resolved roots
-     * via {@link #scanDirty(Path, Collection, Map, List)} instead.
-     */
-    public static List<Path> scanDirty(
-            Path scratchRoot, WorldId worldId, Map<String, ManifestEntry> baselineEntries, List<String> excludeGlobs) {
-        Objects.requireNonNull(worldId, "worldId");
-        String base = worldId.folder();
-        return scanDirty(
-                scratchRoot,
-                List.of(Path.of(base), Path.of(base + "_nether"), Path.of(base + "_the_end")),
-                baselineEntries,
-                excludeGlobs);
+        observed.sort(Comparator.naturalOrder());
+        return new Scan(dirty, observed);
     }
 
     private static boolean isExcluded(String fileName, List<String> excludeGlobs) {

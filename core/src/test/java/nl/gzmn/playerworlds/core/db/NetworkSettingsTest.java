@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.Optional;
 import nl.gzmn.playerworlds.core.config.ConfigException;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -110,5 +111,36 @@ class NetworkSettingsTest {
     void getReturnsEmptyForUnknownKey() throws Exception {
         Optional<String> value = settings.get("does.not.exist");
         assertThat(value).isEmpty();
+    }
+
+    @Test
+    @DisplayName("messages() surfaces an admin-written override the same way policy() does (NFR-5)")
+    void messagesSurfacesTheNewValue() throws Exception {
+        String key = "messages.notice.invite";
+        settings.putAndReload(key, "\"<red>overridden</red>\"", "staff");
+
+        MessageCatalog catalog = settings.messages();
+
+        assertThat(catalog.get(key)).isEqualTo("<red>overridden</red>");
+    }
+
+    @Test
+    @DisplayName("messages() and policy() share the same cache, invalidated together")
+    void messagesAndPolicyShareTheCache() throws Exception {
+        settings.putAndReload(NetworkPolicy.KEY_MAX_WORLDS_PER_PLAYER, "7", "staff");
+        settings.putAndReload("messages.notice.invite", "\"<red>overridden</red>\"", "staff");
+
+        assertThat(settings.policy().maxWorldsPerPlayer()).isEqualTo(7);
+        assertThat(settings.messages().get("messages.notice.invite")).isEqualTo("<red>overridden</red>");
+
+        database.inTransaction(connection -> {
+            settings.put(connection, "messages.notice.invite", "\"<green>updated</green>\"", "other-node");
+            return null;
+        });
+        // Cache still holds the old value until invalidated, same as policy().
+        assertThat(settings.messages().get("messages.notice.invite")).isEqualTo("<red>overridden</red>");
+
+        settings.invalidate();
+        assertThat(settings.messages().get("messages.notice.invite")).isEqualTo("<green>updated</green>");
     }
 }

@@ -357,7 +357,9 @@ public final class PlayerWorldRepository extends Repository {
      * <p>Updates the manifest pointer, version tags, and {@code last_played} timestamp
      * conditionally on the lease generation and assigned node matching. If the fencing
      * check passes and profiles are non-empty, saves all profile rows within the same
-     * database transaction.
+     * database transaction, then re-keys every other player's newest surviving profile
+     * onto this snapshot (R10) so {@code manifest_key} and {@code player_world_profile}
+     * never diverge, whether or not this particular commit captured them.
      *
      * @return true if the commit succeeded, false if fenced by lease expiration or generation bump
      */
@@ -385,6 +387,13 @@ public final class PlayerWorldRepository extends Repository {
         }
 
         return database.inTransaction(connection -> {
+            // R10: detect the no-storage → object-storage transition before we
+            // overwrite manifest_key. Gen-0 profile rows must ride with the first
+            // real snapshot or FR-15b issues every absent player a fresh inventory.
+            boolean firstManifestCommit = findById(connection, id)
+                    .map(row -> row.manifestKey() == null)
+                    .orElse(false);
+
             // storage_bytes moves with manifest_key, in one statement. The figure describes the
             // manifest, so a commit that wrote one without the other would leave a player's
             // quota measured against a snapshot that is no longer the current one (§4).
@@ -418,6 +427,22 @@ public final class PlayerWorldRepository extends Repository {
             if (!profiles.isEmpty()) {
                 profileRepository.saveAll(connection, id, snapshot, profileFormatVersion, profiles);
             }
+            // Same transaction as the manifest pointer (FR-15a / D17-shaped): live
+            // payloads already written win via ON CONFLICT DO NOTHING inside rekey.
+            if (firstManifestCommit) {
+                profileRepository.rekeyLatestGenerationZero(connection, id, snapshot);
+            }
+            // R10 widened: a commit this snapshot's payload skipped a player for
+            // (asleep, or the world's own dirty files moved with nobody online) must
+            // not leave their row behind. Without this, ProfileListener.enter finds no
+            // row at the exact (generation, sequence) manifest_key now names, sees an
+            // older one, and refuses rather than granting a fresh profile it should
+            // never have offered — every returning player, not an edge case, once a
+            // commit has ever landed while they were away. rekeyLatestSnapshot already
+            // carries every player's newest surviving row forward for the restore path
+            // (D17, FR-36); running it here keeps player_world_profile in lockstep with
+            // manifest_key on every commit, not just those two transitions.
+            profileRepository.rekeyLatestSnapshot(connection, id, snapshot);
             return true;
         });
     }
@@ -469,6 +494,34 @@ public final class PlayerWorldRepository extends Repository {
                 connection,
                 "SELECT " + SELECT_COLUMNS + " FROM player_world WHERE owner_uuid = ? ORDER BY created_at DESC",
                 statement -> statement.setObject(1, ownerUuid),
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Every world this player is a member of but does not own, newest first.
+     *
+     * <p>The menu's "My Worlds" list is the only place a player who accepted an
+     * invite (FR-7) can find the world again, so it has to show more than
+     * {@link #listOwnedBy}. Ownership is filtered on {@code owner_uuid} rather
+     * than on {@code player_world_member.role}, because the role column is a
+     * denormalised convenience and loses every disagreement (FR-31a) — filtering
+     * on it would drop an owner's own world out of both lists the moment the two
+     * fell out of step.
+     */
+    public List<PlayerWorld> listSharedWith(UUID uuid) throws SQLException {
+        Objects.requireNonNull(uuid, "uuid");
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                         FROM player_world
+                         WHERE owner_uuid <> ?
+                           AND id IN (SELECT world_id FROM player_world_member WHERE uuid = ?)
+                         ORDER BY created_at DESC
+                        """,
+                statement -> {
+                    statement.setObject(1, uuid);
+                    statement.setObject(2, uuid);
+                },
                 PlayerWorldRepository::mapRow));
     }
 
@@ -661,7 +714,11 @@ public final class PlayerWorldRepository extends Repository {
         Objects.requireNonNull(id, "id");
         return execute(
                         connection,
-                        "UPDATE player_world SET last_played = now() WHERE id = ?",
+                        // archive_warned_days goes with it (FR-34): a world that is
+                        // played again and then goes quiet again earns its warnings
+                        // a second time, rather than being archived in silence
+                        // because it was warned about a year ago.
+                        "UPDATE player_world SET last_played = now(), archive_warned_days = NULL WHERE id = ?",
                         statement -> statement.setObject(1, id.value()))
                 == 1;
     }
@@ -715,6 +772,96 @@ public final class PlayerWorldRepository extends Repository {
     public boolean deleteHard(WorldId id) throws SQLException {
         Objects.requireNonNull(id, "id");
         return database.inTransaction(connection -> deleteHard(connection, id));
+    }
+
+    /**
+     * Worlds to visit for MN-2b's collection, oldest-touched first.
+     *
+     * <p>Ordered by {@code last_played} so a sweep that only gets through
+     * {@code limit} worlds keeps moving round the network rather than collecting
+     * the same busy handful every five minutes.
+     *
+     * <p>Unleased only: a world a node is holding may be uploading objects for a
+     * snapshot whose manifest has not committed yet, and those are exactly the
+     * objects that look like orphans while being the opposite.
+     */
+    public List<PlayerWorld> findCollectable(int limit) throws SQLException {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE assigned_node IS NULL
+                   AND manifest_key IS NOT NULL
+                 ORDER BY COALESCE(last_played, created_at)
+                 LIMIT ?
+                """,
+                statement -> statement.setInt(1, limit),
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Worlds close enough to auto-archival to warn their owner about (FR-34).
+     *
+     * <p>"Close enough" is {@code afterDays - warnDays} of silence: at the
+     * defaults, a world untouched for 76 days is 14 days from being archived.
+     * A world already warned at this threshold or a tighter one is skipped, which
+     * is what stops the sweep re-sending every five minutes for a fortnight.
+     *
+     * @param afterDays {@code archive.after-days}
+     * @param warnDays the threshold being checked, from {@code archive.warn-days}
+     * @param limit most worlds to return in one sweep
+     */
+    public List<PlayerWorld> findDueForArchiveWarning(int afterDays, int warnDays, int limit) throws SQLException {
+        if (afterDays < 1) {
+            throw new IllegalArgumentException("afterDays must be at least 1, was: " + afterDays);
+        }
+        if (warnDays < 1 || warnDays >= afterDays) {
+            throw new IllegalArgumentException("warnDays must be in 1.." + (afterDays - 1) + ", was: " + warnDays);
+        }
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was: " + limit);
+        }
+        return database.withConnection(connection -> queryList(
+                connection,
+                "SELECT " + SELECT_COLUMNS + """
+                  FROM player_world
+                 WHERE state = 'READY'
+                   AND COALESCE(last_played, created_at) < now() - (? * interval '1 day')
+                   AND (archive_warned_days IS NULL OR archive_warned_days > ?)
+                 ORDER BY COALESCE(last_played, created_at)
+                 LIMIT ?
+                """,
+                statement -> {
+                    statement.setInt(1, afterDays - warnDays);
+                    statement.setInt(2, warnDays);
+                    statement.setInt(3, limit);
+                },
+                PlayerWorldRepository::mapRow));
+    }
+
+    /**
+     * Records that this world's owner has been warned at {@code warnDays} (FR-34).
+     *
+     * <p>Conditional on the stored value, so two nodes racing the sweep cannot
+     * walk the threshold backwards and re-warn.
+     */
+    public boolean recordArchiveWarning(Connection connection, WorldId id, int warnDays) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(id, "id");
+        return execute(connection, """
+                        UPDATE player_world
+                           SET archive_warned_days = ?
+                         WHERE id = ?
+                           AND (archive_warned_days IS NULL OR archive_warned_days > ?)
+                        """, statement -> {
+                    statement.setInt(1, warnDays);
+                    statement.setObject(2, id.value());
+                    statement.setInt(3, warnDays);
+                })
+                == 1;
     }
 
     /**
@@ -1047,34 +1194,94 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
-     * Acquires a lease on an archived world and moves its state to {@link WorldState#RESTORING} (FR-36).
+     * Returns a failed archival to {@link WorldState#READY} and releases the lease (FR-35).
      *
-     * @return true if the world was transitioned and the lease granted to {@code node}
+     * <p>The twin of {@link #abandonRestore(Connection, WorldId, String)}, and for the same
+     * reason. FR-35 leaves a <em>crashed</em> archival at ARCHIVING with an expired lease, which
+     * the FR-40 sweep retries; an archival that fails cleanly — object storage unreachable, no
+     * dimensions to pack, a checksum that did not verify — is a failure this node has already
+     * diagnosed, so the world goes back to READY and the lease is dropped at once. Left at
+     * ARCHIVING it is neither loadable (FR-25c refuses any state but READY or CREATING) nor
+     * deletable (FR-37 refuses any state but ARCHIVED) until the lease runs out.
+     *
+     * <p>Safe at any point in the flow, because FR-35 deletes nothing before the checksum of the
+     * written archive verifies.
+     *
+     * <p>Fenced on {@code assigned_node}: a node whose lease has already been taken over must not
+     * rewrite the state underneath whoever holds it now.
+     *
+     * @return true when this node held the world and the rollback was applied
      */
-    public boolean transitionToRestoring(Connection connection, WorldId worldId, String node, Duration leaseDuration)
-            throws SQLException {
+    public boolean abandonArchive(Connection connection, WorldId worldId, String node) throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(worldId, "worldId");
         Objects.requireNonNull(node, "node");
-        Objects.requireNonNull(leaseDuration, "leaseDuration");
         return execute(connection, """
-                        UPDATE player_world
-                           SET state = 'RESTORING',
-                               assigned_node = ?,
-                               lease_expires = now() + (? * interval '1 second'),
-                               generation = generation + 1
-                         WHERE id = ?
-                           AND state IN ('ARCHIVED', 'RESTORING')
-                           AND (assigned_node IS NULL OR lease_expires < now())
-                        """, statement -> {
-                    statement.setString(1, node);
-                    statement.setLong(2, leaseDuration.toSeconds());
-                    statement.setObject(3, worldId.value());
+                UPDATE player_world
+                   SET state = 'READY',
+                       assigned_node = NULL,
+                       lease_expires = NULL
+                 WHERE id = ?
+                   AND state = 'ARCHIVING'
+                   AND assigned_node = ?
+                """, statement -> {
+                    statement.setObject(1, worldId.value());
+                    statement.setString(2, node);
                 })
                 == 1;
     }
 
-    public boolean transitionToRestoring(WorldId worldId, String node, Duration leaseDuration) throws SQLException {
+    /** {@link #abandonArchive(Connection, WorldId, String)} in its own transaction. */
+    public boolean abandonArchive(WorldId worldId, String node) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        return database.inTransaction(connection -> abandonArchive(connection, worldId, node));
+    }
+
+    /**
+     * Acquires a lease on an archived world and moves its state to {@link WorldState#RESTORING} (FR-36).
+     *
+     * @return true if the world was transitioned and the lease granted to {@code node}
+     */
+    public Optional<Long> transitionToRestoring(
+            Connection connection, WorldId worldId, String node, Duration leaseDuration) throws SQLException {
+        Objects.requireNonNull(connection, "connection");
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(node, "node");
+        Objects.requireNonNull(leaseDuration, "leaseDuration");
+        return queryOne(
+                connection,
+                """
+                UPDATE player_world
+                   SET state = 'RESTORING',
+                       assigned_node = ?,
+                       lease_expires = now() + (? * interval '1 second'),
+                       generation = generation + 1
+                 WHERE id = ?
+                   AND state IN ('ARCHIVED', 'RESTORING')
+                   AND (assigned_node IS NULL OR lease_expires < now())
+                RETURNING generation
+                """,
+                statement -> {
+                    statement.setString(1, node);
+                    statement.setLong(2, leaseDuration.toSeconds());
+                    statement.setObject(3, worldId.value());
+                },
+                row -> row.getLong("generation"));
+    }
+
+    /**
+     * Takes a world into RESTORING and returns the generation it was granted.
+     *
+     * <p>The generation is returned rather than discarded because the restore's
+     * snapshot has to be written under it (R22). Written at a hardcoded
+     * generation 0 it violated MN-3's write-once manifest key — a second restore
+     * rewrote the same {@code 0-1.json} with different content — and FR-15b then
+     * looked for profiles at {@code (0, 1)}, found none, and issued every member a
+     * fresh inventory.
+     */
+    public Optional<Long> transitionToRestoring(WorldId worldId, String node, Duration leaseDuration)
+            throws SQLException {
         return database.inTransaction(connection -> transitionToRestoring(connection, worldId, node, leaseDuration));
     }
 
@@ -1127,19 +1334,22 @@ public final class PlayerWorldRepository extends Repository {
     public boolean completeRestore(
             Connection connection,
             WorldId worldId,
-            String manifestKey,
+            @Nullable String manifestKey,
             long storageBytes,
             int dataVersion,
-            String mcVersion)
+            String mcVersion,
+            ProfileRepository.Snapshot restoreSnapshot,
+            ProfileRepository profileRepository)
             throws SQLException {
         Objects.requireNonNull(connection, "connection");
         Objects.requireNonNull(worldId, "worldId");
-        Objects.requireNonNull(manifestKey, "manifestKey");
         Objects.requireNonNull(mcVersion, "mcVersion");
+        Objects.requireNonNull(restoreSnapshot, "restoreSnapshot");
+        Objects.requireNonNull(profileRepository, "profileRepository");
         if (storageBytes < 0) {
             throw new IllegalArgumentException("storageBytes must not be negative: " + storageBytes);
         }
-        return execute(connection, """
+        boolean advanced = execute(connection, """
                         UPDATE player_world
                            SET state = 'READY',
                                manifest_key = ?,
@@ -1159,13 +1369,37 @@ public final class PlayerWorldRepository extends Repository {
                     statement.setObject(5, worldId.value());
                 })
                 == 1;
+        if (!advanced) {
+            return false;
+        }
+        // D17 / FR-36: the profiles ride with the manifest pointer, in the one
+        // transaction, for the same reason MN-3a's commit does. A restore that
+        // moved manifest_key without them would return the world and leave every
+        // member's inventory keyed to a snapshot nothing points at any more.
+        profileRepository.rekeyLatestSnapshot(connection, worldId, restoreSnapshot);
+        return true;
     }
 
+    /** {@link #completeRestore(Connection, WorldId, String, long, int, String,
+     * ProfileRepository.Snapshot, ProfileRepository)} in its own transaction. */
     public boolean completeRestore(
-            WorldId worldId, String manifestKey, long storageBytes, int dataVersion, String mcVersion)
+            WorldId worldId,
+            @Nullable String manifestKey,
+            long storageBytes,
+            int dataVersion,
+            String mcVersion,
+            ProfileRepository.Snapshot restoreSnapshot,
+            ProfileRepository profileRepository)
             throws SQLException {
-        return database.inTransaction(
-                connection -> completeRestore(connection, worldId, manifestKey, storageBytes, dataVersion, mcVersion));
+        return database.inTransaction(connection -> completeRestore(
+                connection,
+                worldId,
+                manifestKey,
+                storageBytes,
+                dataVersion,
+                mcVersion,
+                restoreSnapshot,
+                profileRepository));
     }
 
     private static PlayerWorld mapRow(ResultSet row) throws SQLException {

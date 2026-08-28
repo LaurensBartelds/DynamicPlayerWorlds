@@ -6,6 +6,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import org.jspecify.annotations.Nullable;
 
@@ -70,6 +71,17 @@ public final class NetworkSettings extends Repository {
      */
     public NetworkPolicy policy() throws SQLException {
         return NetworkPolicy.fromRaw(snapshot());
+    }
+
+    /**
+     * Current message catalog (NFR-5), with defaults for any key that has no row.
+     *
+     * <p>Same cache, same reload/invalidate lifecycle as {@link #policy()} — a {@code
+     * messages.*} row is picked up by the same {@code INVALIDATE_CACHE} handling, since {@link
+     * #invalidate()} and {@link #reload()} know nothing about which logical config they serve.
+     */
+    public MessageCatalog messages() throws SQLException {
+        return MessageCatalog.fromRaw(snapshot());
     }
 
     /**

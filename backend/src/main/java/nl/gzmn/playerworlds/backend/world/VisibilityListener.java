@@ -2,7 +2,10 @@ package nl.gzmn.playerworlds.backend.world;
 
 import io.papermc.paper.event.player.AsyncChatEvent;
 import java.util.Objects;
+import java.util.Optional;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -32,6 +35,11 @@ import org.jspecify.annotations.Nullable;
  */
 public final class VisibilityListener implements Listener {
 
+    /** Vanilla's own key, so the line reads identically in every client language. */
+    private static final String JOINED_MESSAGE = "multiplayer.player.joined";
+
+    private static final String LEFT_MESSAGE = "multiplayer.player.left";
+
     private final Plugin plugin;
     private final VisibilityGroups groups;
     private final @Nullable GroupChatBuffer chatBuffer;
@@ -54,6 +62,14 @@ public final class VisibilityListener implements Listener {
     public void onJoin(PlayerJoinEvent event) {
         // Suppressed globally and re-emitted to the group (FR-19). A join
         // message is presence and a name, which is exactly what must not cross.
+        //
+        // A connection is not an arrival in a world. HoldingAreaLoginListener
+        // puts every login outside the player worlds, so this normally reaches
+        // nobody but the joining player; the world they are being routed to
+        // hears about them from onChangedWorld, once they are actually in it.
+        // Routing it by the landing world instead is what used to announce a
+        // player to the world they had logged out of while the transfer was
+        // taking them somewhere else.
         Component message = event.joinMessage();
         event.joinMessage(null);
         recomputeVisibility(event.getPlayer());
@@ -79,7 +95,37 @@ public final class VisibilityListener implements Listener {
      */
     @EventHandler(priority = EventPriority.MONITOR)
     public void onChangedWorld(PlayerChangedWorldEvent event) {
-        recomputeVisibility(event.getPlayer());
+        Player player = event.getPlayer();
+        Optional<WorldId> from = groups.groupOf(event.getFrom().getName());
+        Optional<WorldId> to = groups.groupOf(player);
+        recomputeVisibility(player);
+
+        if (from.equals(to)) {
+            // Within one world's three dimensions, or between two worlds that are
+            // neither. FR-2 treats a world's dimensions as one unit, so a nether
+            // portal is not an arrival any more than it is a change of group.
+            return;
+        }
+        from.ifPresent(group -> announce(group, player, LEFT_MESSAGE));
+        to.ifPresent(group -> announce(group, player, JOINED_MESSAGE));
+    }
+
+    /**
+     * Tells one group that a player entered or left it (FR-19).
+     *
+     * <p>The vanilla translation keys rather than text of our own: a player
+     * walking into a world should read exactly like a player walking onto a
+     * server, in whatever language their client is set to.
+     *
+     * <p>Only the others are told. The player who moved has a loading screen and
+     * a new sky to tell them what happened, and a line saying they joined the
+     * game while they are the one joining is noise.
+     */
+    private void announce(WorldId group, Player player, String translationKey) {
+        Component message = Component.translatable(translationKey, NamedTextColor.YELLOW, player.displayName());
+        for (Player recipient : groups.inGroup(group, plugin.getServer().getOnlinePlayers(), player)) {
+            recipient.sendMessage(message);
+        }
     }
 
     /**

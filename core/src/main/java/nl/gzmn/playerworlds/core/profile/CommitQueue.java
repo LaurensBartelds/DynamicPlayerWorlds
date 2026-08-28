@@ -107,7 +107,7 @@ public final class CommitQueue {
         }
         // Not retained: finish() is what advances the queue, and nothing waits
         // on this handle — callers wait on the future request() handed them.
-        var _ = running.whenComplete((ignored, failure) -> finish(worldId, state, failure));
+        var unused = running.whenComplete((ignored, failure) -> finish(worldId, state, failure));
     }
 
     private void finish(WorldId worldId, State state, @Nullable Throwable failure) {

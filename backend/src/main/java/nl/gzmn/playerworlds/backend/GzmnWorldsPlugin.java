@@ -3,8 +3,10 @@ package nl.gzmn.playerworlds.backend;
 import java.nio.file.Path;
 import java.sql.SQLException;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -15,11 +17,13 @@ import java.util.concurrent.TimeoutException;
 import nl.gzmn.playerworlds.backend.command.BackendWorldCommand;
 import nl.gzmn.playerworlds.backend.command.PworldCommand;
 import nl.gzmn.playerworlds.backend.config.BackendConfig;
+import nl.gzmn.playerworlds.backend.control.ApplySettingsHandler;
 import nl.gzmn.playerworlds.backend.control.BackendControlHandlers;
 import nl.gzmn.playerworlds.backend.control.DrainNodeHandler;
 import nl.gzmn.playerworlds.backend.control.EjectPlayerHandler;
 import nl.gzmn.playerworlds.backend.control.InvalidateCacheHandler;
 import nl.gzmn.playerworlds.backend.control.MigrateWorldHandler;
+import nl.gzmn.playerworlds.backend.control.NodeShutdown;
 import nl.gzmn.playerworlds.backend.control.UnloadWorldHandler;
 import nl.gzmn.playerworlds.backend.control.WorldHandoff;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
@@ -27,6 +31,7 @@ import nl.gzmn.playerworlds.backend.gui.MenuListener;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
 import nl.gzmn.playerworlds.backend.lease.LeaseCoordinator;
 import nl.gzmn.playerworlds.backend.lease.SelfFencingHandler;
+import nl.gzmn.playerworlds.backend.node.HoldingAreaLoginListener;
 import nl.gzmn.playerworlds.backend.node.NodeHeartbeat;
 import nl.gzmn.playerworlds.backend.node.TransferJoinListener;
 import nl.gzmn.playerworlds.backend.platform.Platform;
@@ -39,13 +44,15 @@ import nl.gzmn.playerworlds.backend.storage.ArchiveStorage;
 import nl.gzmn.playerworlds.backend.storage.MaintenanceTask;
 import nl.gzmn.playerworlds.backend.storage.PeriodicSyncTask;
 import nl.gzmn.playerworlds.backend.storage.WorldArchiver;
+import nl.gzmn.playerworlds.backend.storage.WorldEraser;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
+import nl.gzmn.playerworlds.backend.world.HoldingArea;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
-import nl.gzmn.playerworlds.backend.world.LoadedWorld;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
 import nl.gzmn.playerworlds.backend.world.PortalListener;
+import nl.gzmn.playerworlds.backend.world.PresenceReporter;
 import nl.gzmn.playerworlds.backend.world.RoleEnforcementListener;
 import nl.gzmn.playerworlds.backend.world.VisibilityGroups;
 import nl.gzmn.playerworlds.backend.world.VisibilityListener;
@@ -55,10 +62,12 @@ import nl.gzmn.playerworlds.backend.world.WorldLifecycleService;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.concurrent.BoundedOperations;
+import nl.gzmn.playerworlds.core.concurrent.DrainableMainScheduler;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.ConfigException;
 import nl.gzmn.playerworlds.core.config.ConfigValidator;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.NodeConfig;
 import nl.gzmn.playerworlds.core.config.NodeMode;
@@ -70,6 +79,7 @@ import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.NetworkSettings;
 import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.NodeRepository;
+import nl.gzmn.playerworlds.core.db.NoticeRepository;
 import nl.gzmn.playerworlds.core.db.PendingTransferRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
@@ -78,17 +88,22 @@ import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
 import nl.gzmn.playerworlds.core.obs.CapabilityReport;
 import nl.gzmn.playerworlds.core.obs.MetricsSettings;
 import nl.gzmn.playerworlds.core.obs.PrometheusEndpoint;
+import nl.gzmn.playerworlds.core.obs.StorageHealthCheck;
 import nl.gzmn.playerworlds.core.obs.WorldsMetrics;
 import nl.gzmn.playerworlds.core.storage.FileCloner;
 import nl.gzmn.playerworlds.core.storage.LocalObjectCache;
 import nl.gzmn.playerworlds.core.storage.ObjectStore;
+import nl.gzmn.playerworlds.core.storage.ObjectStoreHealthCheck;
 import nl.gzmn.playerworlds.core.storage.QuarantineManager;
 import nl.gzmn.playerworlds.core.storage.ReflinkFileCloner;
 import nl.gzmn.playerworlds.core.storage.S3ObjectStore;
+import nl.gzmn.playerworlds.core.storage.SnapshotCollector;
 import nl.gzmn.playerworlds.core.storage.SnapshotCopier;
 import nl.gzmn.playerworlds.core.storage.SnapshotEngine;
 import nl.gzmn.playerworlds.core.storage.WorldDownloader;
@@ -134,21 +149,37 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
     private static final long TICKS_PER_SECOND = 20L;
 
+    /**
+     * What FR-28's shutdown budget adds to {@code storage.commit-timeout-seconds}
+     * for the unload and the lease release that follow the commit. Both are short
+     * and neither touches object storage; this is slack, not a target.
+     */
+    private static final Duration SHUTDOWN_UNLOAD_MARGIN = Duration.ofSeconds(5);
+
+    /**
+     * How long enable waits for the MN-13 startup sweep. It walks the scratch
+     * volume, so it scales with how many worlds this node was holding, and it has
+     * to finish before anything can load.
+     */
+    private static final Duration STARTUP_SWEEP_TIMEOUT = Duration.ofSeconds(60);
+
     private @Nullable Platform platform;
     private @Nullable PluginExecutors executors;
+    private @Nullable DrainableMainScheduler mainScheduler;
     private @Nullable WorldsMetrics metrics;
     private @Nullable PrometheusEndpoint metricsEndpoint;
     private @Nullable Database database;
     private @Nullable ObjectStore objectStore;
     private @Nullable WorldRegistry registry;
-    private @Nullable IdleUnloadTask idleUnload;
     private @Nullable WorldCommitService commitService;
+    /** FR-28's shutdown drives the same give-up sequence as the control plane. */
+    private @Nullable WorldHandoff worldHandoff;
+
     private @Nullable NodeHeartbeat nodeHeartbeat;
     private @Nullable LeaseCoordinator leaseCoordinator;
     private @Nullable SelfFencingHandler fencingHandler;
     private @Nullable ControlPlane controlPlane;
     private @Nullable ExecutorService listenExecutor;
-    private @Nullable NodeConfig nodeConfig;
     private @Nullable WorldArchiver archiver;
     private @Nullable WorldRestorer restorer;
     private @Nullable MenuChannel menuChannel;
@@ -165,6 +196,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
      * immutable record and readers take whichever one is current.
      */
     private volatile NetworkPolicy policy = NetworkPolicy.defaults();
+
+    /** Admin-configurable player-facing text (NFR-5). Refreshed alongside {@link #policy}. */
+    private volatile MessageCatalog messages = MessageCatalog.defaults();
 
     @Override
     public void onEnable() {
@@ -220,17 +254,19 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             return;
         }
 
+        // Drainable, because Paper marks a plugin disabled before calling
+        // onDisable and its scheduler then refuses tasks: without this, nothing
+        // inside onDisable can hop back to the tick thread and FR-28's shutdown
+        // cannot use the ordinary give-up path (R14).
+        DrainableMainScheduler mainThread = new DrainableMainScheduler(getServer()::isPrimaryThread, task -> {
+            getServer().getScheduler().runTask(this, task);
+        });
+        this.mainScheduler = mainThread;
+
         PluginExecutors pools =
-                PluginExecutors.create(node.database().poolSize(), loadedPolicy.parallelTransfers(), task -> {
-                    if (getServer().isPrimaryThread()) {
-                        task.run();
-                    } else {
-                        getServer().getScheduler().runTask(this, task);
-                    }
-                });
+                PluginExecutors.create(node.database().poolSize(), loadedPolicy.parallelTransfers(), mainThread);
         this.executors = pools;
 
-        this.nodeConfig = node;
         schedulePolicyRefresh(openedDatabase, pools);
 
         PlayerWorldRepository menuWorldRepo = new PlayerWorldRepository(openedDatabase);
@@ -248,7 +284,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 menuNameRepo,
                 channel,
                 pools,
-                this::policy);
+                this::policy,
+                this::messages);
         channel.setMenuService(service);
         channel.register();
         this.menuChannel = channel;
@@ -270,9 +307,21 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         WorldsMetrics worldsMetrics = WorldsMetrics.create();
         this.metrics = worldsMetrics;
 
-        // The probe does a database round trip, a free-space stat and a reflink
-        // trial copy — all three are work NFR-2 keeps off the tick thread, so it
-        // runs on the io pool and enable waits for it under a budget.
+        // Opened here, ahead of startWorldLifecycle, so the probe below can round-trip
+        // it rather than skip storage entirely: startWorldLifecycle needs the probe's
+        // reflink verdict as an input, so it necessarily runs after this point, and by
+        // then it is too late for the probe to see whether object storage even works.
+        // The client itself does no network I/O until first used, so opening it early
+        // costs nothing when object storage is not configured for this node.
+        ObjectStore earlyStore = node.objectStorage().map(S3ObjectStore::open).orElse(null);
+        StorageHealthCheck storageHealthCheck = earlyStore != null
+                ? new ObjectStoreHealthCheck(earlyStore, "_health/" + node.nodeId() + ".ping")
+                : null;
+
+        // The probe does a database round trip, a free-space stat, a reflink trial
+        // copy, and — when object storage is configured — a put/get against it. All
+        // four are work NFR-2 keeps off the tick thread, so it runs on the io pool and
+        // enable waits for it under a budget.
         final CapabilityReport report;
         try {
             report = BoundedOperations.call(
@@ -284,14 +333,16 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             identity.minecraftVersion(),
                             identity.dataVersion(),
                             openedDatabase,
-                            null)));
+                            storageHealthCheck)));
         } catch (TimeoutException | ExecutionException e) {
             getLogger().severe(() -> "capability probe did not complete: " + e);
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             getLogger().severe("interrupted during the capability probe");
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         }
@@ -299,6 +350,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         worldsMetrics.setScratchFreeBytes(Math.max(0L, report.freeBytes()));
         if (!report.safeToEnable()) {
             getLogger().severe("capability probe failed; refusing enable");
+            closeQuietly(earlyStore);
             disableSelf();
             return;
         }
@@ -316,7 +368,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             + "); meters remain in-process only");
         }
 
-        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report);
+        startWorldLifecycle(selected, openedDatabase, pools, worldsMetrics, node, report, earlyStore);
 
         // Concatenation rather than a format string: %d formats through the
         // default locale, which forbidden-apis bans and which would render the
@@ -396,6 +448,79 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         }
     }
 
+    /**
+     * MN-13 and MN-5a: quarantines crash debris and deletes leftover snapshot
+     * directories, before any world can load.
+     *
+     * <p>Off the tick thread, because it reads the lease table and walks the
+     * scratch volume, and enable waits for it: a world that loads first would be
+     * swept out from under itself.
+     *
+     * <p>Skipped entirely on a node with no object storage. There, quarantine has
+     * nothing to restore from — moving a world's directory aside <em>is</em>
+     * losing the world, which turns MN-13's recoverable fault into an
+     * unrecoverable one and is the opposite of what it is for.
+     */
+    private void sweepStartupScratch(
+            Database openedDatabase,
+            PluginExecutors pools,
+            NodeConfig node,
+            WorldFolders worldFolders,
+            String primaryLevelName,
+            boolean hasObjectStorage) {
+        if (!hasObjectStorage) {
+            getLogger()
+                    .info("no object storage configured; skipping the MN-13 startup sweep, which would move the "
+                            + "only copy of every world into quarantine");
+            return;
+        }
+        try {
+            var _ = pools.db()
+                    .submit(() -> {
+                        PlayerWorldRepository sweepWorlds = new PlayerWorldRepository(openedDatabase);
+                        var quarantined = QuarantineManager.sweepStartup(new QuarantineManager.StartupSweep(
+                                node.scratchPath(),
+                                worldFolders.dimensionsRoot(node.scratchPath(), primaryLevelName),
+                                node.quarantinePath(),
+                                worldFolders::worldIdOf,
+                                Set.copyOf(sweepWorlds.worldsLeasedTo(node.nodeId())),
+                                id -> currentManifestKey(sweepWorlds, id),
+                                UUID.randomUUID().toString()));
+                        if (!quarantined.isEmpty()) {
+                            getLogger()
+                                    .warning(() -> "startup sweep quarantined " + quarantined.size()
+                                            + " directory/directories as crash debris (MN-13)");
+                        }
+                        return null;
+                    })
+                    .get(STARTUP_SWEEP_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            getLogger().warning("interrupted during the startup quarantine sweep");
+        } catch (Exception e) {
+            getLogger().warning(() -> "could not complete startup quarantine sweep: " + e.getMessage());
+        }
+    }
+
+    /**
+     * A world's current {@code manifest_key}, or empty when it has none or the row
+     * is gone.
+     *
+     * <p>A read that fails also answers empty, which quarantines. Losing a warm
+     * copy costs one cold load; keeping a directory nothing could vouch for costs
+     * whatever diverged in it.
+     */
+    private Optional<String> currentManifestKey(PlayerWorldRepository worlds, WorldId worldId) {
+        try {
+            return worlds.findById(worldId).map(PlayerWorld::manifestKey);
+        } catch (SQLException e) {
+            getLogger()
+                    .warning(() -> "could not read manifest_key for " + worldId
+                            + " during the startup sweep; treating its scratch copy as debris");
+            return Optional.empty();
+        }
+    }
+
     /** Wires the world lifecycle, storage, and registers listeners, commands and sweeps. */
     private void startWorldLifecycle(
             Platform selected,
@@ -403,19 +528,20 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             PluginExecutors pools,
             WorldsMetrics worldsMetrics,
             NodeConfig node,
-            CapabilityReport report) {
-        // MN-13 & MN-5a: Startup quarantine sweep for crash debris and stale snapshot directories
-        try {
-            QuarantineManager.sweepStartup(node.scratchPath(), node.quarantinePath(), java.util.Set.of());
-        } catch (Exception e) {
-            getLogger().warning(() -> "could not complete startup quarantine sweep: " + e.getMessage());
-        }
-
+            CapabilityReport report,
+            @Nullable ObjectStore preopenedStore) {
         FileCloner cloner = new ReflinkFileCloner(report.reflink());
         LocalObjectCache objectCache = new LocalObjectCache(node.cachePath(), cloner);
 
-        ObjectStore store = node.objectStorage().map(S3ObjectStore::open).orElse(null);
+        // Already opened ahead of the capability probe (onEnable) so the probe could
+        // round-trip it; reused here rather than opened a second time.
+        ObjectStore store = preopenedStore;
         this.objectStore = store;
+        // Same key the capability probe used: one small object per node, not one per
+        // check, and an operator who goes looking for it in the bucket finds it in one
+        // place regardless of which check last wrote it.
+        StorageHealthCheck storageHealthCheck =
+                store != null ? new ObjectStoreHealthCheck(store, "_health/" + node.nodeId() + ".ping") : null;
 
         SnapshotEngine snapshotEngine = store != null
                 ? new SnapshotEngine(store, objectCache, new SnapshotCopier(cloner, this.policy.snapshotCopyRetries()))
@@ -431,6 +557,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         ProfileService profileService = new ProfileService(selected.itemCodec());
         // Paper 26 nests every Bukkit world under the primary save (level-name).
         String primaryLevelName = primaryLevelName();
+
+        sweepStartupScratch(openedDatabase, pools, node, worldFolders, primaryLevelName, store != null);
 
         WorldCommitService worldCommitService = new WorldCommitService(
                 profileRepository,
@@ -455,11 +583,13 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 new NodeCommandRepository(openedDatabase),
                 worldsMetrics,
                 node.scratchPath(),
+                primaryLevelName,
                 node.quarantinePath(),
                 this::policy);
         this.fencingHandler = fencing;
         worldCommitService.setRegistry(worldRegistry);
         worldCommitService.setFencingHandler(fencing);
+        worldCommitService.setMetrics(worldsMetrics);
 
         LeaseCoordinator leases = new LeaseCoordinator(
                 node.nodeId(), worldRegistry, worldRepository, fencing, pools, this::policy, node.heartbeatInterval());
@@ -511,13 +641,27 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .registerEvents(new RoleEnforcementListener(worldFolders, membershipCache, settingsCache), this);
         // FR-18/19/20: Visibility and group chat buffer
         getServer().getPluginManager().registerEvents(new VisibilityListener(this, visibilityGroups, chatBuffer), this);
+        // FR-6 and the rest of section 6: the proxy sees the node a player is on
+        // but not the world, and one node holds many. Without this the owner
+        // commands can only guess, which with FR-1's cap of two is a refusal.
+        MenuChannel presenceChannel = this.menuChannel;
+        if (presenceChannel != null) {
+            getServer().getPluginManager().registerEvents(new PresenceReporter(worldFolders, presenceChannel), this);
+        }
         // FR-21/FR-22: the command allow-list inside a player world. Without this
         // registration the class is dead code and vanilla /list and /tell leak
         // presence between two worlds on one node, which is the whole of §5.5.
         getServer().getPluginManager().registerEvents(new CommandGuardListener(visibilityGroups, this::policy), this);
-        // FR-11: routed join listener
+        // FR-11: a login lands in the holding area, never inside the world the
+        // player logged out of. Registered before the routed join listener
+        // because everything below assumes the arrival is a world change.
+        getServer()
+                .getPluginManager()
+                .registerEvents(new HoldingAreaLoginListener(worldFolders, new HoldingArea(worldFolders)), this);
+        // FR-11: routed join listener. R13: worldsMetrics so the holding-area
+        // deadline moves holding_timeouts_total when it fires.
         TransferJoinListener transferListener = new TransferJoinListener(
-                node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy);
+                node, transferRepository, lifecycle, worldFolders, pools, nodeCommands, this::policy, worldsMetrics);
         getServer().getPluginManager().registerEvents(transferListener, this);
 
         getServer()
@@ -525,16 +669,20 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .runTaskTimer(
                         this,
                         () -> {
+                            // Every online player, not only ones standing in the
+                            // holding area: a player switching from one of this
+                            // node's worlds to another (MN-15) never fires a fresh
+                            // PlayerJoinEvent, so this poll is the only thing that
+                            // claims the pending_transfer their /world join wrote.
+                            // claim() is a no-op DELETE for anyone without one.
                             for (org.bukkit.entity.Player player : getServer().getOnlinePlayers()) {
-                                if (!worldFolders.isPlayerWorld(
-                                        player.getWorld().getName())) {
-                                    transferListener.processPlayer(player);
-                                }
+                                transferListener.processPlayer(player);
                             }
                         },
                         10L,
                         10L);
-        // FR-15: profile commit triggers & manifest snapshot restores
+        // FR-15: profile commit triggers & manifest snapshot restores.
+        // R11: nodeCommands + policy so FR-16 refusals eject via EJECT_PLAYER.
         getServer()
                 .getPluginManager()
                 .registerEvents(
@@ -544,7 +692,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                                 profileRepository,
                                 worldRepository,
                                 worldCommitService,
-                                pools),
+                                pools,
+                                nodeCommands,
+                                this::policy),
                         this);
 
         PluginCommand command = getCommand("pworld");
@@ -605,23 +755,38 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 this::policy,
                 worldCommitService::requestCommit,
                 pools.main());
-        this.idleUnload = sweep;
         long periodTicks = IdleUnloadTask.SWEEP_INTERVAL.toSeconds() * TICKS_PER_SECOND;
         getServer().getScheduler().runTaskTimer(this, sweep, periodTicks, periodTicks);
 
-        // MN-6: schedule periodic incremental snapshot commits
-        PeriodicSyncTask syncTask = new PeriodicSyncTask(worldRegistry, worldCommitService, this::policy);
+        // MN-6: schedule periodic incremental snapshot commits, and an object storage
+        // ping independent of them (plan section 10.4).
+        PeriodicSyncTask syncTask = new PeriodicSyncTask(
+                worldRegistry,
+                worldCommitService,
+                this::policy,
+                () -> this.worldHandoff,
+                storageHealthCheck,
+                worldsMetrics);
         long syncIntervalSeconds = Math.max(1, this.policy.syncInterval().toSeconds());
         var _ = pools.sched()
                 .scheduleWithFixedDelay(syncTask, syncIntervalSeconds, syncIntervalSeconds, TimeUnit.SECONDS);
 
         // FR-40: inactivity archival and recovery of interrupted archival and restore. Every
         // node schedules it; the advisory lock inside decides which one actually sweeps.
+        // R17: the warm cache and the quarantine directory are node-local and are
+        // pruned on every node, outside FR-40's election.
         MaintenanceTask maintenance = new MaintenanceTask(
                 openedDatabase,
                 new PlayerWorldRepository(openedDatabase),
+                new ProfileRepository(openedDatabase),
+                new MembershipRepository(openedDatabase),
+                new PendingTransferRepository(openedDatabase),
+                new NoticeRepository(openedDatabase),
                 new TransferRequestRepository(openedDatabase),
                 new NodeCommandRepository(openedDatabase),
+                objectCache,
+                node.quarantinePath(),
+                store != null ? new SnapshotCollector(store) : null,
                 this::policy,
                 node.nodeId());
         long maintenanceSeconds = Math.max(1, this.policy.maintenanceInterval().toSeconds());
@@ -637,6 +802,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 lifecycle,
                 worldFolders,
                 worldCaches,
+                settingsCache,
                 openedDatabase,
                 nodeCommands,
                 pools,
@@ -688,6 +854,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
             WorldLifecycleService lifecycle,
             WorldFolders worldFolders,
             WorldCacheLoader worldCaches,
+            WorldSettingsCache settingsCache,
             Database openedDatabase,
             NodeCommandRepository nodeCommands,
             PluginExecutors pools,
@@ -718,6 +885,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // all three commands that give a world up.
         WorldHandoff handoff =
                 new WorldHandoff(worldRegistry, lifecycle, worldFolders, pools, commits, nodeCommands, this::policy);
+        this.worldHandoff = handoff;
 
         plane.register(CommandKind.UNLOAD_WORLD, new UnloadWorldHandler(handoff, this::policy));
         plane.register(CommandKind.MIGRATE_WORLD, new MigrateWorldHandler(handoff, this::policy));
@@ -726,6 +894,9 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 CommandKind.INVALIDATE_CACHE,
                 new InvalidateCacheHandler(
                         new NetworkSettings(openedDatabase), worldCaches, worldRegistry, pools.db()));
+        plane.register(
+                CommandKind.APPLY_SETTINGS,
+                new ApplySettingsHandler(worldCaches, settingsCache, worldRegistry, worldFolders, platform, pools));
         EjectPlayerHandler ejectHandler =
                 new EjectPlayerHandler(worldCaches, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);
@@ -749,18 +920,34 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 identity.dataVersion());
         WorldRestorer worldRestorer = new WorldRestorer(
                 new PlayerWorldRepository(openedDatabase),
+                new ProfileRepository(openedDatabase),
                 new ArchiveRepository(openedDatabase),
                 archiveStorage,
                 snapshotEngine,
                 store,
                 node.scratchPath(),
+                worldFolders,
                 this::policy,
                 node.nodeId(),
                 identity.dataVersion(),
                 identity.minecraftVersion());
+        // FR-37: hard deletion runs here rather than on the proxy, because the
+        // archive objects and the world's snapshot prefix are only reachable from
+        // a node (R23).
+        WorldEraser worldEraser = new WorldEraser(
+                new PlayerWorldRepository(openedDatabase),
+                new ArchiveRepository(openedDatabase),
+                archiveStorage,
+                store,
+                worldRegistry,
+                handoff,
+                worldFolders,
+                node.scratchPath(),
+                primaryLevelName,
+                this::policy);
         this.archiver = worldArchiver;
         this.restorer = worldRestorer;
-        BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer);
+        BackendControlHandlers.registerStorageHandlers(plane, worldArchiver, worldRestorer, worldEraser);
 
         plane.start(pools.sched(), listen);
         this.controlPlane = plane;
@@ -783,6 +970,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                             try {
                                 settings.reload();
                                 this.policy = settings.policy();
+                                this.messages = settings.messages();
                             } catch (SQLException e) {
                                 // Keep the last good policy. A database blip must not
                                 // reset every cap to its default mid-session.
@@ -841,6 +1029,11 @@ public class GzmnWorldsPlugin extends JavaPlugin {
     /** Network policy as last read from {@code network_setting}. */
     public NetworkPolicy policy() {
         return policy;
+    }
+
+    /** Admin-configurable player-facing text (NFR-5), as last read from {@code network_setting}. */
+    public MessageCatalog messages() {
+        return messages;
     }
 
     /** World archiver service, or {@code null} when enable refused. */
@@ -916,61 +1109,33 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         // still accept it, then drain the pools, then close the database, then
         // drop the main-thread mark so a late callback cannot look like main.
 
-        // FR-28 & MN-12: commit final snapshot and release lease for all loaded worlds synchronously
-        WorldRegistry reg = this.registry;
-        WorldCommitService commits = this.commitService;
-        PluginExecutors pools = this.executors;
-        Database db = this.database;
-        NodeConfig cfg = this.nodeConfig;
-        if (commits != null && reg != null) {
-            List<LoadedWorld> loadedList = List.copyOf(reg.loadedWorlds());
-            List<CompletableFuture<Void>> futures = new ArrayList<>();
-            for (LoadedWorld loaded : loadedList) {
-                try {
-                    futures.add(commits.requestCommit(loaded.id()));
-                } catch (Exception e) {
-                    getLogger()
-                            .warning(() -> "could not request shutdown commit for world " + loaded.id() + ": "
-                                    + e.getMessage());
-                }
-            }
-            if (!futures.isEmpty()) {
-                Duration commitTimeout = policy.commitTimeout();
-                try {
-                    CompletableFuture.allOf(futures.toArray(CompletableFuture<?>[]::new))
-                            .get(commitTimeout.toMillis(), TimeUnit.MILLISECONDS);
-                } catch (TimeoutException e) {
-                    getLogger().warning(() -> "shutdown commits timed out after " + commitTimeout);
-                } catch (Exception e) {
-                    getLogger().warning(() -> "shutdown commit failed: " + e.getMessage());
-                }
-            }
-
-            // Cleanly release held leases in DB (MN-12)
-            if (db != null && pools != null && cfg != null) {
-                PlayerWorldRepository repo = new PlayerWorldRepository(db);
-                for (LoadedWorld loaded : loadedList) {
-                    try {
-                        BoundedOperations.run(pools.db(), Duration.ofSeconds(2), () -> {
-                            try {
-                                repo.releaseLease(loaded.id(), cfg.nodeId(), loaded.generation());
-                            } catch (SQLException e) {
-                                getLogger()
-                                        .warning(() -> "could not release lease for world " + loaded.id() + ": "
-                                                + e.getMessage());
-                            }
-                        });
-                    } catch (Exception e) {
-                        getLogger().warning(() -> "timeout or error releasing lease for world " + loaded.id());
-                    }
-                }
-            }
+        // Paper has already marked this plugin disabled, so its scheduler will not
+        // take a task any more. From here the main thread runs its own queued work
+        // (R14) — without which nothing below that hops to main can complete.
+        DrainableMainScheduler mainThread = this.mainScheduler;
+        if (mainThread != null) {
+            mainThread.beginShutdown();
         }
 
-        IdleUnloadTask sweep = this.idleUnload;
-        this.idleUnload = null;
-        if (sweep != null && MainThread.isMain()) {
-            sweep.unloadAllForShutdown();
+        // FR-28, FR-25, MN-12: commit, unload, release — in that order, and by the
+        // same handoff the control plane uses, so there is one implementation of
+        // the order rather than two that disagree about it.
+        WorldRegistry reg = this.registry;
+        WorldHandoff handoff = this.worldHandoff;
+        this.worldHandoff = null;
+        PluginExecutors pools = this.executors;
+        if (handoff != null && reg != null && mainThread != null && MainThread.isMain()) {
+            Duration budget = policy.commitTimeout().plus(SHUTDOWN_UNLOAD_MARGIN);
+            try {
+                new NodeShutdown(reg, handoff, mainThread).releaseAll(budget);
+            } catch (RuntimeException e) {
+                getLogger().warning(() -> "shutdown handoff failed: " + e.getMessage());
+            }
+        } else if (reg != null && !reg.loadedWorlds().isEmpty()) {
+            getLogger()
+                    .warning(() -> "disabling with " + reg.loadedWorlds().size()
+                            + " world(s) still loaded and no handoff available; their leases expire on their own"
+                            + " (MN-12)");
         }
 
         // MN-17: leave the registration cleanly, so the proxy stops routing here
@@ -1050,5 +1215,15 @@ public class GzmnWorldsPlugin extends JavaPlugin {
 
     private void disableSelf() {
         getServer().getPluginManager().disablePlugin(this);
+    }
+
+    /**
+     * Closes a store opened early for the capability probe when enable aborts
+     * before {@link #startWorldLifecycle} would otherwise have taken ownership of it.
+     */
+    private static void closeQuietly(@Nullable ObjectStore store) {
+        if (store != null) {
+            store.close();
+        }
     }
 }

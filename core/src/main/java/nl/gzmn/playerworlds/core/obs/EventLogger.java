@@ -61,6 +61,11 @@ public final class EventLogger {
         emit(log.atError(), event, message, null, null, null, cause);
     }
 
+    /** The {@link #warn(LogEvent, String, WorldId)} twin, for a condition an operator must act on. */
+    public void error(LogEvent event, String message, @Nullable WorldId worldId) {
+        emit(log.atError(), event, message, worldId, null, null, null);
+    }
+
     private static void emit(
             LoggingEventBuilder builder,
             LogEvent event,

@@ -383,6 +383,211 @@ class BackendControlHandlersTest {
         assertEquals(0, membershipCache.size());
     }
 
+    /**
+     * R9 / FR-9e / FR-9i: {@code APPLY_SETTINGS} must re-assert every owner
+     * gamerule on a loaded world — not only refresh {@link WorldSettingsCache}.
+     *
+     * <p>Without the gamerule write, {@code /world set pvp on} reports success and
+     * updates the row while the live dimensions keep the load-time gamerule. The
+     * containers/interact settings only need the cache; every FR-9e/FR-9i
+     * gamerule lives in {@code level.dat} as well.
+     */
+    @Test
+    void applySettingsChangesPvpOnALoadedWorld_FR9e() throws Exception {
+        MembershipCache membershipCache = new MembershipCache();
+        WorldSettingsCache settingsCache = new WorldSettingsCache();
+        PlayerWorldRepository worlds = new PlayerWorldRepository(database);
+        MembershipRepository members = new MembershipRepository(database);
+
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        var row = offMain(() -> worlds.create(worldId, owner, "r9-pvp", 1L, 5000, Visibility.PRIVATE));
+
+        WorldCacheLoader caches = new WorldCacheLoader(worlds, members, membershipCache, settingsCache);
+        // Stale cache as if the world loaded while the owner had PVP switched off
+        // (FR-9e defaults it on, so turning it off is the change worth testing).
+        settingsCache.put(worldId, WorldSettings.defaults().withPvp(false));
+        assertThat(settingsCache.get(worldId).pvp()).isFalse();
+
+        WorldRegistry registry = new WorldRegistry();
+        LoadedWorld loaded = LoadedWorld.of(row);
+        loaded.markMaterialised(DimensionKind.OVERWORLD);
+        registry.register(loaded);
+
+        String overworldName = folders.bukkitWorldName(worldId, DimensionKind.OVERWORLD);
+        WorldMock overworld = server.addSimpleWorld(overworldName);
+        // Load-time gamerules, matching the stale cache above: FR-9e's two at their
+        // non-default settings-cache value, every FR-9i addition at vanilla's own
+        // default (mirroring a world that loaded before its owner touched anything).
+        platform.worldRuntime().setPvp(overworld, false);
+        platform.worldRuntime().setMobGriefing(overworld, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.KEEP_INVENTORY, false);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FALL_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FIRE_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.FREEZE_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.DROWNING_DAMAGE, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.ADVANCE_TIME, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.ADVANCE_WEATHER, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.SPAWN_PHANTOMS, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.IMMEDIATE_RESPAWN, false);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.NATURAL_HEALTH_REGENERATION, true);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.PLAYERS_SLEEPING_PERCENTAGE, 100);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.MAX_ENTITY_CRAMMING, 24);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.RESPAWN_RADIUS, 10);
+        platform.worldRuntime().setGameRule(overworld, org.bukkit.GameRules.MAX_SNOW_ACCUMULATION_HEIGHT, 1);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PVP)).isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MOB_GRIEFING))
+                .isTrue();
+
+        // Proxy half already committed: pvp on, mob-griefing off, and every FR-9i
+        // addition flipped away from its vanilla default so the assertions below
+        // cannot pass by coincidence.
+        WorldSettings updated = WorldSettings.defaults()
+                .withPvp(true)
+                .withMobGriefing(false)
+                .withKeepInventory(true)
+                .withFallDamage(false)
+                .withFireDamage(false)
+                .withFreezeDamage(false)
+                .withDrowningDamage(false)
+                .withAdvanceTime(false)
+                .withAdvanceWeather(false)
+                .withSpawnPhantoms(false)
+                .withImmediateRespawn(true)
+                .withNaturalHealthRegeneration(false)
+                .withPlayersSleepingPercentage(50)
+                .withMaxEntityCramming(10)
+                .withRespawnRadius(3)
+                .withMaxSnowAccumulationHeight(5);
+        assertThat(offMain(() -> worlds.updateSettings(worldId, updated.toJson())))
+                .isTrue();
+
+        ApplySettingsHandler handler =
+                new ApplySettingsHandler(caches, settingsCache, registry, folders, platform, executors);
+
+        NodeCommand command = new NodeCommand(
+                9L,
+                "node-1",
+                worldId,
+                null,
+                CommandKind.APPLY_SETTINGS.name(),
+                "{}",
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+
+        CommandResult result = offMain(() -> handler.handle(command));
+        assertTrue(result.isOk());
+
+        assertThat(settingsCache.get(worldId).pvp())
+                .as("R9: settings cache must pick up the new row")
+                .isTrue();
+        assertThat(settingsCache.get(worldId).mobGriefing()).isFalse();
+        assertThat(WorldSettings.fromJson(loaded.settingsJson()).pvp())
+                .as("R9: LoadedWorld snapshot must stay in step for later dimension loads")
+                .isTrue();
+
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PVP))
+                .as("R9 / FR-9e: PVP gamerule must change on the loaded overworld without unload")
+                .isTrue();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MOB_GRIEFING))
+                .as("R9 / FR-9e: mob-griefing gamerule must change on the loaded overworld")
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.KEEP_INVENTORY))
+                .as("R9 / FR-9i: keepInventory must change on the loaded overworld")
+                .isTrue();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FALL_DAMAGE)).isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FIRE_DAMAGE)).isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.FREEZE_DAMAGE))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.DROWNING_DAMAGE))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.ADVANCE_TIME))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.ADVANCE_WEATHER))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.SPAWN_PHANTOMS))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.IMMEDIATE_RESPAWN))
+                .isTrue();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.NATURAL_HEALTH_REGENERATION))
+                .isFalse();
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.PLAYERS_SLEEPING_PERCENTAGE))
+                .isEqualTo(50);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MAX_ENTITY_CRAMMING))
+                .isEqualTo(10);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.RESPAWN_RADIUS))
+                .isEqualTo(3);
+        assertThat(overworld.getGameRuleValue(org.bukkit.GameRules.MAX_SNOW_ACCUMULATION_HEIGHT))
+                .isEqualTo(5);
+    }
+
+    @Test
+    void applySettingsIsOkWhenWorldNotHeldHere() throws Exception {
+        // Idempotent (CP-5): refresh the cache, do not fail when this node has nothing loaded.
+        MembershipCache membershipCache = new MembershipCache();
+        WorldSettingsCache settingsCache = new WorldSettingsCache();
+        PlayerWorldRepository worlds = new PlayerWorldRepository(database);
+        MembershipRepository members = new MembershipRepository(database);
+
+        UUID owner = UUID.randomUUID();
+        WorldId worldId = WorldId.random();
+        var _ = offMain(() -> worlds.create(worldId, owner, "r9-elsewhere", 1L, 5000, Visibility.PRIVATE));
+        WorldSettings updated = WorldSettings.defaults().withPvp(true);
+        assertThat(offMain(() -> worlds.updateSettings(worldId, updated.toJson())))
+                .isTrue();
+
+        settingsCache.put(worldId, WorldSettings.defaults());
+        WorldCacheLoader caches = new WorldCacheLoader(worlds, members, membershipCache, settingsCache);
+        ApplySettingsHandler handler =
+                new ApplySettingsHandler(caches, settingsCache, new WorldRegistry(), folders, platform, executors);
+
+        NodeCommand command = new NodeCommand(
+                10L,
+                "node-1",
+                worldId,
+                null,
+                CommandKind.APPLY_SETTINGS.name(),
+                "{}",
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+
+        CommandResult result = offMain(() -> handler.handle(command));
+        assertTrue(result.isOk());
+        assertThat(settingsCache.get(worldId).pvp()).isTrue();
+    }
+
+    @Test
+    void applySettingsRequiresWorldId() throws Exception {
+        ApplySettingsHandler handler = new ApplySettingsHandler(
+                loaderFor(new MembershipCache()), new WorldSettingsCache(), null, null, null, null);
+
+        NodeCommand command = new NodeCommand(
+                11L,
+                "node-1",
+                null,
+                null,
+                CommandKind.APPLY_SETTINGS.name(),
+                "{}",
+                Instant.now(),
+                Instant.now().plusSeconds(60),
+                null,
+                null,
+                0,
+                null);
+
+        CommandResult result = handler.handle(command);
+        assertFalse(result.isOk());
+        assertEquals("ERROR:missing world_id", result.wire());
+    }
+
     @Test
     void ejectPlayerHandlesInvalidPayloadGracefully() {
         EjectPlayerHandler handler = new EjectPlayerHandler(loaderFor(new MembershipCache()), null, null, null, null);
@@ -519,11 +724,13 @@ class BackendControlHandlersTest {
         nl.gzmn.playerworlds.backend.storage.WorldRestorer restorer =
                 new nl.gzmn.playerworlds.backend.storage.WorldRestorer(
                         new PlayerWorldRepository(database),
+                        new nl.gzmn.playerworlds.core.db.ProfileRepository(database),
                         new nl.gzmn.playerworlds.core.db.ArchiveRepository(database),
                         storage,
                         null,
                         null,
                         tempDir.resolve("scratch"),
+                        folders,
                         NetworkPolicy::defaults,
                         "node-1",
                         Platform.BUILD_DATA_VERSION,

@@ -14,8 +14,10 @@ import java.util.stream.Collectors;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.ServerIdentity;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.config.StorageClientSettings;
 import nl.gzmn.playerworlds.core.db.DatabaseSettings;
 import nl.gzmn.playerworlds.testing.TestDatabase;
+import nl.gzmn.playerworlds.testing.TestObjectStore;
 import org.bukkit.Bukkit;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -200,6 +202,46 @@ class PluginSmokeTest {
     }
 
     @Test
+    @DisplayName("enable opens object storage early and the capability probe checks it (plan 00 section 10.4)")
+    void enableChecksObjectStorageWhenConfigured() throws Exception {
+        TestDatabase.openFresh().close();
+        StorageClientSettings storage = TestObjectStore.settingsForNewBucket();
+
+        FileConfiguration config = config(TestDatabase.settings());
+        withObjectStorage(config, storage);
+
+        GzmnWorldsPlugin plugin = MockBukkit.loadWithConfig(SmokePlugin.class, config);
+
+        assertThat(plugin.isEnabled())
+                .as("a reachable, configured bucket must not block enable")
+                .isTrue();
+        assertThat(plugin.objectStore())
+                .as("the store opened ahead of the probe is the one startWorldLifecycle keeps, not a second one")
+                .isNotNull();
+    }
+
+    @Test
+    @DisplayName("a node pointed at a bucket that does not exist refuses to enable (plan 00 section 10.4)")
+    void unreachableObjectStorageRefusesEnable() throws Exception {
+        TestDatabase.openFresh().close();
+        // Never created by TestObjectStore.settingsForNewBucket(), so every call
+        // against it fails exactly like a real misconfigured bucket or credential.
+        StorageClientSettings storage = TestObjectStore.settings("gzmn-smoke-test-no-such-bucket");
+
+        FileConfiguration config = config(TestDatabase.settings());
+        withObjectStorage(config, storage);
+
+        GzmnWorldsPlugin plugin = MockBukkit.loadWithConfig(SmokePlugin.class, config);
+
+        assertThat(plugin.isEnabled())
+                .as("object storage configured but unreachable must refuse enable, the same as an unreachable database")
+                .isFalse();
+        assertThat(plugin.objectStore())
+                .as("the early-opened store must not leak past a refused enable")
+                .isNull();
+    }
+
+    @Test
     @DisplayName("config that violates a safety property refuses the enable (plan 00 section 8.2)")
     void invalidConfigRefusesEnable() throws Exception {
         FileConfiguration config = config(TestDatabase.settings());
@@ -238,6 +280,17 @@ class PluginSmokeTest {
         // No scrape socket: a bound port would make the suite order-dependent.
         config.set("metrics.port", 0);
         return config;
+    }
+
+    /** Points {@code config} at {@code storage}, mirroring what {@code storage.s3.*} means in config.yml. */
+    private static void withObjectStorage(FileConfiguration config, StorageClientSettings storage) {
+        config.set("storage.s3.enabled", true);
+        config.set("storage.s3.endpoint", storage.endpoint().toString());
+        config.set("storage.s3.region", storage.region());
+        config.set("storage.s3.access-key", storage.accessKey());
+        config.set("storage.s3.secret-key", storage.secretKey());
+        config.set("storage.s3.bucket", storage.bucket());
+        config.set("storage.s3.path-style-access", storage.pathStyleAccess());
     }
 
     private static Path worldContainerPath() {

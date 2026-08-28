@@ -1,0 +1,14 @@
+name: gzmn-worlds-lobby
+version: '${version}'
+main: nl.gzmn.playerworlds.lobby.LobbyPlugin
+api-version: '${apiVersion}'
+description: Standalone zero-database lobby menu renderer for DynamicPlayerWorlds
+authors: [GZMN]
+website: https://github.com/LaurensBartelds/DynamicPlayerWorlds
+folia-supported: false
+commands:
+  world:
+    description: Open the DynamicPlayerWorlds menu
+    aliases: [worlds]
+    permission: gzmn.worlds.menu
+    permission-message: "§cYou do not have permission to use this command."

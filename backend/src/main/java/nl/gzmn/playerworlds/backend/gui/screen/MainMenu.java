@@ -1,13 +1,11 @@
 package nl.gzmn.playerworlds.backend.gui.screen;
 
 import java.util.Objects;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuHolder;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import org.bukkit.Bukkit;
@@ -53,9 +51,9 @@ public final class MainMenu implements GuiScreen {
     @Override
     public Inventory render(Player player) {
         Objects.requireNonNull(player, "player");
+        var messages = menuService.messages();
         MenuHolder holder = new MenuHolder(this);
-        Inventory inventory =
-                Bukkit.createInventory(holder, 27, Component.text("Dynamic Player Worlds", NamedTextColor.DARK_GRAY));
+        Inventory inventory = Bukkit.createInventory(holder, 27, messages.render("messages.gui.main-menu.title"));
         holder.setInventory(inventory);
 
         for (int i = 0; i < 27; i++) {
@@ -66,58 +64,49 @@ public final class MainMenu implements GuiScreen {
                 SLOT_MY_WORLDS,
                 ItemUtil.create(
                         Material.GRASS_BLOCK,
-                        Component.text("My Worlds", NamedTextColor.GREEN, TextDecoration.BOLD),
-                        Component.text("View and manage your worlds", NamedTextColor.GRAY),
-                        Component.text(
-                                "Owned: " + data.ownedWorldsCount() + " / " + data.maxWorlds(),
-                                NamedTextColor.DARK_GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to view", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.main-menu.item.my-worlds.name"),
+                        messages.renderLore(
+                                "messages.gui.main-menu.item.my-worlds.lore",
+                                Placeholders.count("owned", data.ownedWorldsCount()),
+                                Placeholders.count("max", data.maxWorlds()))));
 
         inventory.setItem(
                 SLOT_STORAGE,
                 ItemUtil.create(
                         Material.CHEST,
-                        Component.text("Storage Usage", NamedTextColor.AQUA, TextDecoration.BOLD),
-                        Component.text(
-                                "Used: "
-                                        + StorageQuotaResolver.formatBytes(
-                                                data.storageQuota().usedBytes()),
-                                NamedTextColor.GRAY),
-                        Component.text(
-                                "Limit: "
-                                        + (data.storageQuota().unlimited()
+                        messages.render("messages.gui.main-menu.item.storage.name"),
+                        messages.renderLore(
+                                "messages.gui.main-menu.item.storage.lore",
+                                Placeholders.bytes("used", data.storageQuota().usedBytes()),
+                                Placeholders.raw(
+                                        "limit",
+                                        data.storageQuota().unlimited()
                                                 ? "Unlimited"
                                                 : StorageQuotaResolver.formatBytes(
-                                                        data.storageQuota().limitBytes())),
-                                NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to view breakdown", NamedTextColor.YELLOW)));
+                                                        data.storageQuota().limitBytes())))));
 
         inventory.setItem(
                 SLOT_INVITES,
                 ItemUtil.create(
                         Material.WRITABLE_BOOK,
-                        Component.text("Pending Invites", NamedTextColor.GOLD, TextDecoration.BOLD),
-                        Component.text("Pending: " + data.pendingInvitesCount(), NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to view invites", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.main-menu.item.invites.name"),
+                        messages.renderLore(
+                                "messages.gui.main-menu.item.invites.lore",
+                                Placeholders.count("count", data.pendingInvitesCount()))));
 
         inventory.setItem(
                 SLOT_BROWSE,
                 ItemUtil.create(
                         Material.COMPASS,
-                        Component.text("Browse Public Worlds", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD),
-                        Component.text("Explore worlds shared by the community", NamedTextColor.GRAY),
-                        Component.empty(),
-                        Component.text("▶ Click to browse", NamedTextColor.YELLOW)));
+                        messages.render("messages.gui.main-menu.item.browse.name"),
+                        messages.renderLore("messages.gui.main-menu.item.browse.lore")));
 
         inventory.setItem(
                 SLOT_CLOSE,
                 ItemUtil.create(
                         Material.BARRIER,
-                        Component.text("Close Menu", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("▶ Click to exit", NamedTextColor.DARK_GRAY)));
+                        messages.render("messages.gui.main-menu.item.close.name"),
+                        messages.renderLore("messages.gui.main-menu.item.close.lore")));
 
         return inventory;
     }

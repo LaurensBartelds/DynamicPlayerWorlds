@@ -4,6 +4,12 @@ plugins {
 
 description = "Shared test fixtures: Testcontainers factories, world fixtures"
 
+java {
+    toolchain {
+        languageVersion.set(JavaLanguageVersion.of(21))
+    }
+}
+
 dependencies {
     api(platform(libs.junit.bom))
     api(platform(libs.testcontainers.bom))

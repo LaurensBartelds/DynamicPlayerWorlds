@@ -34,6 +34,11 @@ import org.mockbukkit.mockbukkit.world.WorldMock;
 /**
  * The cause-to-portal-type mapping (FR-3a) and player respawn routing.
  *
+ * <p>The respawn destination is the overworld spawn resolved through
+ * {@link SafeSpawn}, not the raw stored point: a respawn is an arrival, and the
+ * stored spawn is a coordinate rather than a promise that there is ground under
+ * it.
+ *
  * <p>Enums on both sides, so cause mapping needs no server. The destination maths it feeds
  * is covered by {@code DefaultPortalRoutingTest}; what is tested here is that the
  * right kind of transit is recognised at all — a miss means the event falls
@@ -152,7 +157,7 @@ class PortalListenerTest {
                 player, defaultWorld.getSpawnLocation(), false, false, false, PlayerRespawnEvent.RespawnReason.DEATH);
         listener.onPlayerRespawn(event);
 
-        assertThat(event.getRespawnLocation()).isEqualTo(overworld.getSpawnLocation());
+        assertThat(event.getRespawnLocation()).isEqualTo(SafeSpawn.resolve(overworld));
     }
 
     @Test
@@ -165,7 +170,7 @@ class PortalListenerTest {
                 player, defaultWorld.getSpawnLocation(), false, false, false, PlayerRespawnEvent.RespawnReason.DEATH);
         listener.onPlayerRespawn(event);
 
-        assertThat(event.getRespawnLocation()).isEqualTo(overworld.getSpawnLocation());
+        assertThat(event.getRespawnLocation()).isEqualTo(SafeSpawn.resolve(overworld));
     }
 
     @Test
@@ -178,7 +183,7 @@ class PortalListenerTest {
                 player, defaultWorld.getSpawnLocation(), false, false, false, PlayerRespawnEvent.RespawnReason.DEATH);
         listener.onPlayerRespawn(event);
 
-        assertThat(event.getRespawnLocation()).isEqualTo(overworld.getSpawnLocation());
+        assertThat(event.getRespawnLocation()).isEqualTo(SafeSpawn.resolve(overworld));
     }
 
     @Test
@@ -220,7 +225,7 @@ class PortalListenerTest {
                 new PlayerRespawnEvent(player, foreignBed, true, false, false, PlayerRespawnEvent.RespawnReason.DEATH);
         listener.onPlayerRespawn(event);
 
-        assertThat(event.getRespawnLocation()).isEqualTo(overworld.getSpawnLocation());
+        assertThat(event.getRespawnLocation()).isEqualTo(SafeSpawn.resolve(overworld));
     }
 
     @Test

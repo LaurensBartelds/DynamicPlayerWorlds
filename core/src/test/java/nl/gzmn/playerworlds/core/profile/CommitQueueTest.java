@@ -51,12 +51,12 @@ class CommitQueueTest {
     @DisplayName("triggers during a commit are absorbed into one follow-up (FR-15)")
     void concurrentTriggersCollapseIntoOneFollowUp() {
         CommitQueue queue = queue();
-        var _ = queue.request(world);
+        var unused = queue.request(world);
 
         // Ten players leaving at once need one more commit, not ten.
         CompletableFuture<Void> first = queue.request(world);
         for (int i = 0; i < 9; i++) {
-            var _ = queue.request(world);
+            var unusedLoop = queue.request(world);
         }
         assertThat(commits).as("no new commit while one is in flight").hasValue(1);
 
@@ -100,7 +100,7 @@ class CommitQueueTest {
 
         // A world that could never commit again after one failure would lose
         // every subsequent change silently.
-        var _ = queue.request(world);
+        var unused = queue.request(world);
         assertThat(commits).hasValue(2);
     }
 
@@ -123,8 +123,8 @@ class CommitQueueTest {
         CommitQueue queue = queue();
         WorldId other = WorldId.random();
 
-        var _ = queue.request(world);
-        var _ = queue.request(other);
+        var unused1 = queue.request(world);
+        var unused2 = queue.request(other);
 
         assertThat(commits).hasValue(2);
         assertThat(queue.isCommitting(world)).isTrue();

@@ -19,7 +19,10 @@ public enum CommandKind {
     DRAIN_NODE,
     INVALIDATE_CACHE,
     ARCHIVE_WORLD,
-    RESTORE_WORLD;
+    RESTORE_WORLD,
+
+    /** FR-37's hard deletion, which only a node can carry out: it owns the bucket. */
+    DELETE_WORLD;
 
     /**
      * Parses a stored command name. Empty when the string is not a known kind —

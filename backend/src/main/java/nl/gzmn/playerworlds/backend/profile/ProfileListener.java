@@ -3,10 +3,17 @@ package nl.gzmn.playerworlds.backend.profile;
 import java.sql.SQLException;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import nl.gzmn.playerworlds.backend.world.WorldFolders;
+import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.control.CommandKind;
+import nl.gzmn.playerworlds.core.control.ControlChannels;
+import nl.gzmn.playerworlds.core.control.EjectPayload;
+import nl.gzmn.playerworlds.core.db.NodeCommandRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository;
 import nl.gzmn.playerworlds.core.db.ProfileRepository.Snapshot;
@@ -16,6 +23,10 @@ import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.profile.ProfileCodec;
 import nl.gzmn.playerworlds.core.profile.ProfileEnvelope;
 import nl.gzmn.playerworlds.core.profile.ProfileFormatException;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.World;
+import org.bukkit.WorldBorder;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -34,14 +45,16 @@ import org.slf4j.LoggerFactory;
  * treats the three as a single unit, and a nether portal is not a change of
  * profile any more than it is a change of visibility group.
  *
- * <p>Milestone 4 leaves one window open and it is worth naming: a player is in
- * the world for the tick or two it takes the database read to come back, holding
- * whatever they arrived with. FR-11's holding area is what closes it, and it
- * arrives with the transfer path in milestone 5. Until then the inventory is
- * cleared the moment they cross, so the window contains an empty inventory
- * rather than the wrong one — which can lose nothing into the world.
+ * <p>R11 / FR-16: inventory is not cleared until a successful read. An
+ * unreadable profile never mutates the player and ejects them to lobby via
+ * {@code EJECT_PLAYER}, matching {@link nl.gzmn.playerworlds.backend.node.TransferJoinListener}.
+ * FR-11's holding area is what keeps the brief window before the database
+ * answers from carrying a previous world's inventory into this one.
  */
 public final class ProfileListener implements Listener {
+
+    /** Kept off the border itself, which is a wall a player can be pushed through. */
+    private static final double BORDER_INSET = 2.0;
 
     private static final Logger log = LoggerFactory.getLogger(ProfileListener.class);
 
@@ -51,6 +64,8 @@ public final class ProfileListener implements Listener {
     private final @Nullable PlayerWorldRepository playerWorlds;
     private final WorldCommitService commits;
     private final PluginExecutors executors;
+    private final NodeCommandRepository nodeCommands;
+    private final Supplier<NetworkPolicy> policy;
 
     public ProfileListener(
             WorldFolders folders,
@@ -58,13 +73,17 @@ public final class ProfileListener implements Listener {
             ProfileRepository repository,
             @Nullable PlayerWorldRepository playerWorlds,
             WorldCommitService commits,
-            PluginExecutors executors) {
+            PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy) {
         this.folders = Objects.requireNonNull(folders, "folders");
         this.profiles = Objects.requireNonNull(profiles, "profiles");
         this.repository = Objects.requireNonNull(repository, "repository");
         this.playerWorlds = playerWorlds;
         this.commits = Objects.requireNonNull(commits, "commits");
         this.executors = Objects.requireNonNull(executors, "executors");
+        this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
+        this.policy = Objects.requireNonNull(policy, "policy");
     }
 
     public ProfileListener(
@@ -72,8 +91,10 @@ public final class ProfileListener implements Listener {
             ProfileService profiles,
             ProfileRepository repository,
             WorldCommitService commits,
-            PluginExecutors executors) {
-        this(folders, profiles, repository, null, commits, executors);
+            PluginExecutors executors,
+            NodeCommandRepository nodeCommands,
+            Supplier<NetworkPolicy> policy) {
+        this(folders, profiles, repository, null, commits, executors, nodeCommands, policy);
     }
 
     /**
@@ -114,39 +135,81 @@ public final class ProfileListener implements Listener {
     /**
      * Loads the profile for the snapshot this world is at (FR-15b).
      *
-     * <p>Clears first, on the tick the player crosses, so the gap before the
-     * database answers holds an empty inventory rather than the one they walked
-     * in with — an empty one can lose nothing into the world.
+     * <p>R11 / FR-16: does <em>not</em> clear inventory first. A failed read must
+     * leave the player untouched and send them to lobby; clearing up-front made
+     * the old "Nothing has been overwritten" message false. Successful empty
+     * (never played) still applies FR-5's fresh profile after the read.
+     *
+     * <p>R10: {@link ProfileRepository#latestSnapshot} is only for the
+     * no-object-storage mode ({@code manifest_key IS NULL}). A present key is
+     * FR-15b's sole source; an unparseable key or a missing row when older
+     * profiles exist refuses rather than inventing a fresh inventory (§7).
      */
     private void enter(Player player, WorldId worldId) {
-        profiles.applyFresh(player);
-
         executors.db().execute(() -> {
-            Optional<Snapshot> snapshot = Optional.empty();
             final Optional<StoredProfile> stored;
             try {
-                if (playerWorlds != null) {
-                    Optional<PlayerWorld> pw = playerWorlds.findById(worldId);
-                    if (pw.isPresent() && pw.get().manifestKey() != null) {
-                        snapshot = parseSnapshotFromManifestKey(pw.get().manifestKey());
-                    }
+                SnapshotResolution resolution = resolveSnapshot(worldId);
+                if (resolution.unparseableManifest()) {
+                    log.error(
+                            "manifest_key for world {} is present but unparseable; refusing profile load "
+                                    + "rather than falling back to latestSnapshot (R10 / FR-15b)",
+                            worldId);
+                    executors
+                            .main()
+                            .execute(() -> refuse(
+                                    player,
+                                    worldId,
+                                    "your inventory for this world could not be loaded",
+                                    "Profile load refused: unparseable manifest_key (FR-16)"));
+                    return;
                 }
-                if (snapshot.isEmpty()) {
-                    snapshot = repository.latestSnapshot(worldId);
-                }
+                Optional<Snapshot> snapshot = resolution.snapshot();
                 stored = snapshot.isEmpty()
                         ? Optional.empty()
                         : repository.load(worldId, player.getUniqueId(), snapshot.get());
+
+                if (stored.isEmpty()
+                        && resolution.fromManifestKey()
+                        && repository.hasAnyProfile(worldId, player.getUniqueId())) {
+                    // Named snapshot has no row, but older ones do — FR-5 fresh would
+                    // be the silent wipe §7 warns about (pruned profiles, missed re-key).
+                    log.error(
+                            "profile of {} in world {} missing for manifest snapshot {} but older rows exist; "
+                                    + "refusing rather than granting a fresh inventory (R10 / FR-15b / §7)",
+                            player.getUniqueId(),
+                            worldId,
+                            snapshot.orElse(null));
+                    executors
+                            .main()
+                            .execute(() -> refuse(
+                                    player,
+                                    worldId,
+                                    "your inventory for this world could not be loaded",
+                                    "Profile load refused: snapshot row missing (FR-16)"));
+                    return;
+                }
             } catch (SQLException e) {
                 log.error("could not read the profile of {} for world {}", player.getUniqueId(), worldId, e);
-                executors.main().execute(() -> refuse(player, "your inventory for this world could not be loaded"));
+                executors
+                        .main()
+                        .execute(() -> refuse(
+                                player,
+                                worldId,
+                                "your inventory for this world could not be loaded",
+                                "Profile load refused: database error (FR-16)"));
                 return;
             }
 
             if (stored.isEmpty()) {
                 // FR-15b: no row for this snapshot means they have never played
-                // here, and FR-5 says that is a fresh profile — which they already
-                // have from the clear above.
+                // here, and FR-5 says that is a fresh profile — applied only after
+                // the successful empty read (R11).
+                executors.main().execute(() -> {
+                    if (player.isOnline()) {
+                        profiles.applyFresh(player);
+                    }
+                });
                 return;
             }
 
@@ -163,16 +226,124 @@ public final class ProfileListener implements Listener {
                         player.getUniqueId(),
                         worldId,
                         e);
-                executors.main().execute(() -> refuse(player, "your inventory for this world could not be read"));
+                executors
+                        .main()
+                        .execute(() -> refuse(
+                                player,
+                                worldId,
+                                "your inventory for this world could not be read",
+                                "Profile could not be deserialised (FR-16)"));
                 return;
             }
 
             executors.main().execute(() -> {
                 if (player.isOnline()) {
                     profiles.restore(player, envelope);
+                    returnToStoredLocation(player, envelope);
                 }
             });
         });
+    }
+
+    /**
+     * FR-14: puts the player back where they were, not at spawn.
+     *
+     * <p>{@code lastLocation} has been captured, encoded and decoded since
+     * milestone 4 and read by nothing, so {@code capture}'s javadoc — "stored so
+     * a rejoin returns them where they were rather than to spawn" — described
+     * behaviour that did not exist. The two javadocs disagreed: {@code restore}'s
+     * says it deliberately does not teleport, which stays true, because where the
+     * player ends up is the caller's decision and this is the caller.
+     *
+     * <p>Main thread, after the restore, so the arrival teleport
+     * {@code TransferJoinListener} performs has already happened and this is the
+     * last word on where they stand.
+     */
+    private void returnToStoredLocation(Player player, ProfileEnvelope envelope) {
+        MainThread.assertOn();
+        ProfileEnvelope.StoredLocation stored = envelope.lastLocation();
+        if (stored == null) {
+            return;
+        }
+        // Every dimension present on disk is materialised by the load, so a
+        // stored nether or end is already here — unless the world was archived
+        // and restored without one, in which case spawn is the honest answer.
+        World world = Bukkit.getWorld(stored.dimension());
+        if (world == null) {
+            log.debug(
+                    "player {} was last in {}, which is not loaded; leaving them where they arrived",
+                    player.getUniqueId(),
+                    stored.dimension());
+            return;
+        }
+        Location destination = clampToBorder(world, stored);
+        var _ = player.teleport(destination);
+    }
+
+    /**
+     * Brings a stored position inside the world's border (FR-3, FR-9e).
+     *
+     * <p>The border is read from the live world rather than recomputed: FR-25c
+     * has the database value applied on every load, so this is that value, and a
+     * border that has been shrunk since the player left would otherwise strand
+     * them outside it — which is a player stuck in the void, not a cosmetic
+     * problem.
+     */
+    private static Location clampToBorder(World world, ProfileEnvelope.StoredLocation stored) {
+        WorldBorder border = world.getWorldBorder();
+        double half = Math.max(0.0, border.getSize() / 2.0 - BORDER_INSET);
+        Location centre = border.getCenter();
+        double x = clamp(stored.x(), centre.getX() - half, centre.getX() + half);
+        double z = clamp(stored.z(), centre.getZ() - half, centre.getZ() + half);
+        return new Location(world, x, stored.y(), z, stored.yaw(), stored.pitch());
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    /**
+     * Resolves which profile snapshot to load (R10 / FR-15b).
+     *
+     * <ul>
+     *   <li>{@code manifest_key} present and parseable → that snapshot only
+     *   <li>{@code manifest_key} present and unparseable → refuse (no latest fallback)
+     *   <li>{@code manifest_key} null → {@link ProfileRepository#latestSnapshot}
+     *       (no-object-storage / generation-0 profiles)
+     * </ul>
+     */
+    SnapshotResolution resolveSnapshot(WorldId worldId) throws SQLException {
+        if (playerWorlds == null) {
+            return SnapshotResolution.latest(repository.latestSnapshot(worldId));
+        }
+        Optional<PlayerWorld> pw = playerWorlds.findById(worldId);
+        if (pw.isEmpty()) {
+            return SnapshotResolution.latest(Optional.empty());
+        }
+        String manifestKey = pw.get().manifestKey();
+        if (manifestKey == null) {
+            return SnapshotResolution.latest(repository.latestSnapshot(worldId));
+        }
+        Optional<Snapshot> parsed = parseSnapshotFromManifestKey(manifestKey);
+        if (parsed.isEmpty()) {
+            return SnapshotResolution.unparseable();
+        }
+        return SnapshotResolution.named(parsed.get());
+    }
+
+    /** Outcome of {@link #resolveSnapshot} (R10). */
+    record SnapshotResolution(Optional<Snapshot> snapshot, boolean fromManifestKey, boolean unparseableManifest) {
+        static SnapshotResolution named(Snapshot snapshot) {
+            return new SnapshotResolution(Optional.of(snapshot), true, false);
+        }
+
+        static SnapshotResolution latest(Optional<Snapshot> snapshot) {
+            return new SnapshotResolution(snapshot, false, false);
+        }
+
+        static SnapshotResolution unparseable() {
+            return new SnapshotResolution(Optional.empty(), true, true);
+        }
     }
 
     /**
@@ -202,16 +373,31 @@ public final class ProfileListener implements Listener {
     }
 
     /**
-     * FR-16's refusal path.
+     * FR-16's refusal path (R11): message the player and eject to lobby.
      *
-     * <p>Sending the player to lobby is milestone 5's transfer; until it exists
-     * the honest thing is to say so loudly and leave them with the empty
-     * inventory they already have, rather than silently handing them a world's
-     * worth of nothing and calling it their profile.
+     * <p>Must not mutate inventory — the player still holds whatever they arrived
+     * with (holding-area state under FR-11). Reuses the same {@code EJECT_PLAYER}
+     * enqueue as {@link nl.gzmn.playerworlds.backend.node.TransferJoinListener}.
      */
-    private void refuse(Player player, String reason) {
-        player.sendMessage(Component.text(
-                reason + ". Nothing has been overwritten — ask an admin to check the server log (FR-16).",
-                NamedTextColor.RED));
+    private void refuse(Player player, @Nullable WorldId worldId, String message, String ejectReason) {
+        if (player.isOnline()) {
+            player.sendMessage(Component.text(
+                    message + ". Returning you to the lobby — ask an admin to check the server log (FR-16).",
+                    NamedTextColor.RED));
+        }
+        executors.db().execute(() -> {
+            try {
+                nodeCommands.enqueue(
+                        "proxy",
+                        worldId,
+                        null,
+                        CommandKind.EJECT_PLAYER.name(),
+                        EjectPayload.format(player.getUniqueId(), ejectReason),
+                        policy.get().holdingTimeout(),
+                        ControlChannels.PROXY);
+            } catch (SQLException e) {
+                log.warn("could not enqueue EJECT_PLAYER for {} after FR-16 profile refusal", player.getUniqueId(), e);
+            }
+        });
     }
 }

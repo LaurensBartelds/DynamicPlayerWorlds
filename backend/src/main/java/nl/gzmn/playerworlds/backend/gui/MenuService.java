@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.gui;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -26,6 +27,7 @@ import nl.gzmn.playerworlds.backend.gui.screen.StorageMenu;
 import nl.gzmn.playerworlds.backend.gui.screen.WorldMenu;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
@@ -34,6 +36,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
 import nl.gzmn.playerworlds.core.model.WorldBan;
@@ -65,6 +68,7 @@ public class MenuService {
     private final @Nullable MenuChannel channel;
     private final PluginExecutors executors;
     private final @Nullable Supplier<NetworkPolicy> policy;
+    private final Messages messages;
 
     private final ConcurrentMap<UUID, GuiScreen> activeScreens = new ConcurrentHashMap<>();
     private @Nullable Function<Player, GuiScreen> mainMenuFactory;
@@ -78,6 +82,28 @@ public class MenuService {
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy) {
+        this(
+                worldRepository,
+                membershipRepository,
+                transferRepository,
+                banRepository,
+                nameRepository,
+                channel,
+                executors,
+                policy,
+                null);
+    }
+
+    public MenuService(
+            @Nullable PlayerWorldRepository worldRepository,
+            @Nullable MembershipRepository membershipRepository,
+            @Nullable TransferRequestRepository transferRepository,
+            @Nullable WorldBanRepository banRepository,
+            @Nullable PlayerNameRepository nameRepository,
+            @Nullable MenuChannel channel,
+            PluginExecutors executors,
+            @Nullable Supplier<NetworkPolicy> policy,
+            @Nullable Supplier<MessageCatalog> messageCatalog) {
         this.worldRepository = worldRepository;
         this.membershipRepository = membershipRepository;
         this.transferRepository = transferRepository;
@@ -86,6 +112,7 @@ public class MenuService {
         this.channel = channel;
         this.executors = Objects.requireNonNull(executors, "executors");
         this.policy = policy;
+        this.messages = new Messages(messageCatalog);
     }
 
     public @Nullable PlayerWorldRepository worldRepository() {
@@ -118,6 +145,11 @@ public class MenuService {
 
     public @Nullable Supplier<NetworkPolicy> policy() {
         return policy;
+    }
+
+    /** Renders admin-configurable message/GUI text (NFR-5). */
+    public Messages messages() {
+        return messages;
     }
 
     /** Configures an override factory used to produce the main menu screen (e.g. for tests). */
@@ -254,21 +286,36 @@ public class MenuService {
         return CompletableFuture.supplyAsync(
                         () -> {
                             MainThread.assertOff();
-                            List<PlayerWorld> worlds = List.of();
+                            List<PlayerWorld> owned = List.of();
+                            List<PlayerWorld> shared = List.of();
+                            Map<WorldId, Role> roles = Map.of();
                             if (worldRepository != null) {
                                 try {
-                                    worlds = worldRepository.listOwnedBy(player.getUniqueId());
+                                    owned = worldRepository.listOwnedBy(player.getUniqueId());
+                                    // FR-7: a world reached by accepting an invite belongs on
+                                    // this list too, or the only way back to it is remembering
+                                    // whose it was.
+                                    shared = worldRepository.listSharedWith(player.getUniqueId());
+                                    roles = sharedRoles(player.getUniqueId(), shared);
                                 } catch (SQLException e) {
-                                    log.warn("Failed to fetch owned worlds for player {}", player.getUniqueId(), e);
+                                    log.warn("Failed to fetch worlds for player {}", player.getUniqueId(), e);
                                 }
                             }
                             NetworkPolicy pol = policy != null ? policy.get() : NetworkPolicy.defaults();
-                            return new MyWorldsData(worlds, pol.maxWorldsPerPlayer());
+                            return new MyWorldsData(owned, shared, roles, pol.maxWorldsPerPlayer());
                         },
                         executors.db())
                 .thenAcceptAsync(
                         data -> openScreen(
-                                player, new MyWorldsMenu(this, channel, data.worlds(), page, data.maxWorlds())),
+                                player,
+                                new MyWorldsMenu(
+                                        this,
+                                        channel,
+                                        data.owned(),
+                                        data.shared(),
+                                        data.sharedRoles(),
+                                        page,
+                                        data.maxWorlds())),
                         executors.main());
     }
 
@@ -363,7 +410,7 @@ public class MenuService {
         Objects.requireNonNull(onConfirm, "onConfirm");
         Objects.requireNonNull(onCancel, "onCancel");
 
-        openScreen(player, new ConfirmMenu(title, description, onConfirm, onCancel));
+        openScreen(player, new ConfirmMenu(messages, title, description, onConfirm, onCancel));
     }
 
     /**
@@ -709,7 +756,24 @@ public class MenuService {
         activeScreens.remove(player.getUniqueId());
     }
 
-    private record MyWorldsData(List<PlayerWorld> worlds, int maxWorlds) {}
+    /**
+     * The viewer's role in each world they were invited into (FR-7, FR-9c).
+     *
+     * <p>Empty when nothing is shared, so the common case costs no query.
+     */
+    private Map<WorldId, Role> sharedRoles(UUID playerUuid, List<PlayerWorld> shared) throws SQLException {
+        if (shared.isEmpty() || membershipRepository == null) {
+            return Map.of();
+        }
+        Map<WorldId, Role> roles = new HashMap<>();
+        for (WorldMember membership : membershipRepository.membershipsOf(playerUuid)) {
+            roles.put(membership.worldId(), membership.role());
+        }
+        return Map.copyOf(roles);
+    }
+
+    private record MyWorldsData(
+            List<PlayerWorld> owned, List<PlayerWorld> shared, Map<WorldId, Role> sharedRoles, int maxWorlds) {}
 
     private record StorageMenuData(StorageQuota quota, List<PlayerWorld> owned) {}
 

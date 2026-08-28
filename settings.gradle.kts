@@ -32,7 +32,7 @@ dependencyResolutionManagement {
     }
 }
 
-include(":core", ":backend", ":proxy", ":testing", ":e2e-harness")
+include(":core", ":backend", ":proxy", ":testing", ":e2e-harness", ":lobby")
 
 // Test-only Paper plugin for the compose harness (F11). Lives under e2e/ so the
 // foundation layout matches plan §2; it is never a release artifact.

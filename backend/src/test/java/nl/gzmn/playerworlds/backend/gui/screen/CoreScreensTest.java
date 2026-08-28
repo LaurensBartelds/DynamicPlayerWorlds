@@ -1,10 +1,12 @@
 package nl.gzmn.playerworlds.backend.gui.screen;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -18,6 +20,7 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.ItemUtil;
 import nl.gzmn.playerworlds.backend.gui.MenuChannel;
 import nl.gzmn.playerworlds.backend.gui.MenuService;
+import nl.gzmn.playerworlds.backend.gui.Messages;
 import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
@@ -32,6 +35,7 @@ import nl.gzmn.playerworlds.core.menu.IntentEnvelope;
 import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
@@ -267,6 +271,98 @@ class CoreScreensTest {
     }
 
     @Test
+    @DisplayName("MyWorldsMenu lists worlds an accepted invite made reachable, after the owned ones (FR-7)")
+    void myWorldsMenuListsSharedWorlds() throws Exception {
+        RecordingPlayerMock player = createRecordingPlayer("Dana");
+        WorldId ownId = WorldId.random();
+        WorldId sharedId = WorldId.random();
+
+        PlayerWorld own = readyWorld(ownId, player.getUniqueId(), "danas-world");
+        PlayerWorld shared = readyWorld(sharedId, UUID.randomUUID(), "someone-elses");
+
+        MyWorldsMenu menu = new MyWorldsMenu(
+                menuService, channel, List.of(own), List.of(shared), Map.of(sharedId, Role.BUILDER), 0, 5);
+        Inventory inv = menu.render(player);
+
+        assertThat(inv.getItem(0).getType()).isEqualTo(Material.GRASS_BLOCK);
+        assertThat(inv.getItem(1))
+                .as("a world somebody else owns is on the list and looks different from your own")
+                .isNotNull();
+        assertThat(inv.getItem(1).getType()).isEqualTo(Material.PLAYER_HEAD);
+
+        List<Component> lore = inv.getItem(1).getItemMeta().lore();
+        assertThat(lore).isNotNull();
+        assertThat(lore.stream()
+                        .map(line -> PlainTextComponentSerializer.plainText().serialize(line))
+                        .toList())
+                .anyMatch(line -> line.contains("Shared with you") && line.contains("BUILDER"));
+
+        // Left-clicking it joins, exactly as an owned world does.
+        menu.handleClick(player, 1, ClickType.LEFT);
+        IntentEnvelope env = (IntentEnvelope) MenuCodec.decode(player.nextSentMessage());
+        assertThat(env.intent()).isEqualTo(new MenuIntent.JoinWorld(sharedId));
+
+        // FR-1's cap counts what the player owns, so the create button names one.
+        List<Component> createLore =
+                inv.getItem(MyWorldsMenu.SLOT_CREATE).getItemMeta().lore();
+        assertThat(createLore).isNotNull();
+        assertThat(createLore.stream()
+                        .map(line -> PlainTextComponentSerializer.plainText().serialize(line))
+                        .toList())
+                .contains("Owned: 1 / 5", "Shared with you: 1");
+    }
+
+    @Test
+    @DisplayName("WorldMenu drawn for a member who is not the owner has no management controls (FR-31a)")
+    void worldMenuForAMemberOmitsManagement() {
+        RecordingPlayerMock viewer = createRecordingPlayer("Eve");
+        WorldId worldId = WorldId.random();
+        PlayerWorld someoneElses = readyWorld(worldId, UUID.randomUUID(), "not-eves");
+
+        WorldMenu menu = new WorldMenu(menuService, channel, someoneElses);
+        Inventory inv = menu.render(viewer);
+
+        assertThat(inv.getItem(WorldMenu.SLOT_JOIN).getType())
+                .as("a member is here to go there")
+                .isEqualTo(Material.ENDER_PEARL);
+        // Archive resolves by name against the caller's own worlds, so drawing it
+        // for a visitor offers a button that hits the wrong world.
+        assertThat(inv.getItem(WorldMenu.SLOT_ARCHIVE).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+        assertThat(inv.getItem(WorldMenu.SLOT_SETTINGS).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+        assertThat(inv.getItem(WorldMenu.SLOT_VISIBILITY).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+        assertThat(inv.getItem(WorldMenu.SLOT_MEMBERS).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+
+        // And a click on one of them is a click on filler, not a request.
+        menu.handleClick(viewer, WorldMenu.SLOT_VISIBILITY, ClickType.LEFT);
+        assertThatThrownBy(viewer::nextSentMessage)
+                .as("no intent may leave the node for an action the viewer cannot take")
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    private static PlayerWorld readyWorld(WorldId id, UUID owner, String name) {
+        return new PlayerWorld(
+                id,
+                owner,
+                name,
+                id.folder(),
+                42L,
+                5000,
+                Visibility.PRIVATE,
+                null,
+                "{}",
+                null,
+                null,
+                1L,
+                null,
+                null,
+                null,
+                Instant.now(),
+                null,
+                WorldState.READY,
+                1024L);
+    }
+
+    @Test
     @DisplayName("WorldMenu renders options, toggles visibility, joins, and confirms archival")
     void worldMenuRendersAndOperates() throws Exception {
         RecordingPlayerMock player = createRecordingPlayer("Charlie");
@@ -435,13 +531,14 @@ class CoreScreensTest {
     }
 
     @Test
-    @DisplayName("ConfirmMenu executes onConfirm and onCancel callbacks on matching slots")
-    void confirmMenuExecutesCallbacks() {
+    @DisplayName("ConfirmMenu is the FR-27/FR-37 typed-confirm substitute: only SLOT_CONFIRM runs onConfirm")
+    void confirmMenuIsTypedConfirmationSubstitute_FR27_FR37_R5() {
         PlayerMock player = server.addPlayer();
         AtomicBoolean confirmed = new AtomicBoolean(false);
         AtomicBoolean cancelled = new AtomicBoolean(false);
 
         ConfirmMenu menu = new ConfirmMenu(
+                new Messages(null),
                 Component.text("Action Title"),
                 Component.text("Action Description"),
                 () -> confirmed.set(true),
@@ -453,14 +550,20 @@ class CoreScreensTest {
         assertThat(inv.getItem(ConfirmMenu.SLOT_CONFIRM).getType()).isEqualTo(Material.LIME_CONCRETE);
         assertThat(inv.getItem(ConfirmMenu.SLOT_CANCEL).getType()).isEqualTo(Material.RED_CONCRETE);
 
-        // Click Confirm
-        menu.handleClick(player, ConfirmMenu.SLOT_CONFIRM, ClickType.LEFT);
-        assertThat(confirmed).isTrue();
+        // Filler / info slots must not authorise the destructive action.
+        menu.handleClick(player, ConfirmMenu.SLOT_INFO, ClickType.LEFT);
+        menu.handleClick(player, 0, ClickType.LEFT);
+        assertThat(confirmed).isFalse();
         assertThat(cancelled).isFalse();
 
-        // Click Cancel
+        // Cancel is an explicit refusal — still not a confirmation.
         menu.handleClick(player, ConfirmMenu.SLOT_CANCEL, ClickType.LEFT);
         assertThat(cancelled).isTrue();
+        assertThat(confirmed).isFalse();
+
+        // Only SLOT_CONFIRM is the typed-confirm substitute used before ArchiveWorld / HardDeleteWorld.
+        menu.handleClick(player, ConfirmMenu.SLOT_CONFIRM, ClickType.LEFT);
+        assertThat(confirmed).isTrue();
     }
 
     @Test
