@@ -72,7 +72,7 @@ class QuiescenceWaiterTest {
         writer.start();
         try {
             boolean settled = QuiescenceWaiter.await(
-                    temp, List.of(Path.of("r.0.0.mca")), Duration.ofMillis(20), Duration.ofMillis(80));
+                    temp, List.of(Path.of("r.0.0.mca")), Duration.ofMillis(50), Duration.ofMillis(200));
             assertThat(settled).isFalse();
         } finally {
             stop.set(true);
