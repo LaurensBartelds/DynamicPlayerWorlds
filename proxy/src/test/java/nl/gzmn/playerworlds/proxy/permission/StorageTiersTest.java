@@ -26,20 +26,16 @@ class StorageTiersTest {
     private static Player playerWith(UUID uuid, Predicate<String> permissions) {
         return (Player) Proxy.newProxyInstance(
                 Player.class.getClassLoader(), new Class<?>[] {Player.class}, (proxy, method, args) -> {
-                    switch (method.getName()) {
-                        case "getUniqueId":
-                            return uuid;
-                        case "getUsername":
-                            return "Tester";
-                        case "hasPermission":
-                            return permissions.test((String) args[0]);
-                        case "toString":
-                            return "MockPlayer";
-                        default:
-                            return method.getReturnType() == Optional.class
+                    return switch (method.getName()) {
+                        case "getUniqueId" -> uuid;
+                        case "getUsername" -> "Tester";
+                        case "hasPermission" -> permissions.test((String) args[0]);
+                        case "toString" -> "MockPlayer";
+                        default ->
+                            method.getReturnType() == Optional.class
                                     ? Optional.empty()
                                     : (method.getReturnType().isPrimitive() ? false : null);
-                    }
+                    };
                 });
     }
 
