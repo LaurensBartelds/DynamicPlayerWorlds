@@ -246,13 +246,6 @@ public final class ArchivePacker {
     }
 
     /**
-     * Computes the SHA-256 hex digest of a file.
-     *
-     * @param file path to the file
-     * @return lowercase 64-character hex string
-     * @throws StorageException if reading the file fails
-     */
-    /**
      * zstd, or a diagnosis instead of a linkage error.
      *
      * <p>zstd-jni binds its JNI symbols to {@code com.github.luben.zstd}, and the
