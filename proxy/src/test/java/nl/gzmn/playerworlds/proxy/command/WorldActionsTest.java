@@ -138,6 +138,42 @@ class WorldActionsTest {
     }
 
     @Test
+    @DisplayName("create hardcore writes the flag on the row and says so once (FR-1b)")
+    void createWritesHardcoreAtCreation_FR1b() throws Exception {
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        registerServer("node-1");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerConnecting(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        ActionResult result = actions.create(player, "hardworld", null, true).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .as("the one moment this can be said, because FR-1b gives it no settings screen later")
+                .contains("hardcore")
+                .contains("cannot be turned off");
+        PlayerWorld created = worlds.findByOwnerAndName(owner, "hardworld").orElseThrow();
+        assertThat(created.hardcore()).isTrue();
+    }
+
+    @Test
+    @DisplayName("create without the word makes an ordinary world (FR-1b)")
+    void createDefaultsToAnOrdinaryWorld_FR1b() throws Exception {
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        registerServer("node-1");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerConnecting(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        ActionResult result = actions.create(player, "softworld", null).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(worlds.findByOwnerAndName(owner, "softworld").orElseThrow().hardcore())
+                .isFalse();
+    }
+
+    @Test
     void createWorldDuplicateNameFails() throws Exception {
         UUID owner = UUID.randomUUID();
         Player player = mockPlayer(owner, "Alice");
@@ -595,6 +631,71 @@ class WorldActionsTest {
     }
 
     @Test
+    @DisplayName("a dead member cannot come back to the hardcore world they died in (FR-5b)")
+    void deadMemberIsRefusedEntryToAHardcoreWorld_FR5b() throws Exception {
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "hardworld", 12345L, 5000, Visibility.PRIVATE, true, null, null);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+        membership.markDied(worldId, owner);
+
+        ActionResult result = actions.join(player, worldId).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(((ActionResult.Failed) result).code()).isEqualTo(FailureCode.PERMISSION_DENIED);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .contains("you died in 'hardworld'");
+        assertThat(transfers.claim(owner, Duration.ofMinutes(1)))
+                .as("the refusal happens before anything routes; a dead player never reaches a node")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("the owner of a hardcore world may still enter it until they die (FR-5b)")
+    void liveMemberOfAHardcoreWorldIsNotRefused_FR5b() throws Exception {
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        // Already on the node the world will be placed on, so the join needs no
+        // Velocity connection request -- the pending_transfer carries them (FR-11).
+        Player player = mockPlayerOn(owner, "Alice", "node-1");
+        playersByUuid.put(owner, player);
+        registerServer("node-1");
+
+        WorldId worldId = WorldId.random();
+        worlds.create(worldId, owner, "hardworld", 12345L, 5000, Visibility.PRIVATE, true, null, null);
+        worlds.transitionState(worldId, WorldState.CREATING, WorldState.READY);
+
+        ActionResult result = actions.join(player, worldId).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+    }
+
+    @Test
+    @DisplayName("a death in one world does not follow the player into another (FR-5b)")
+    void deathDoesNotFollowThePlayerToAnotherWorld_FR5b() throws Exception {
+        nodeRepo.heartbeat("node-1", "127.0.0.1:25566", 0, 0, 40, 20.0, false, 4903, "26.2");
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayerOn(owner, "Alice", "node-1");
+        playersByUuid.put(owner, player);
+        registerServer("node-1");
+
+        WorldId died = WorldId.random();
+        worlds.create(died, owner, "hardworld", 1L, 5000, Visibility.PRIVATE, true, null, null);
+        worlds.transitionState(died, WorldState.CREATING, WorldState.READY);
+        membership.markDied(died, owner);
+
+        WorldId other = WorldId.random();
+        worlds.create(other, owner, "softworld", 2L, 5000, Visibility.PRIVATE);
+        worlds.transitionState(other, WorldState.CREATING, WorldState.READY);
+
+        assertThat(actions.join(player, other).get()).isInstanceOf(ActionResult.Ok.class);
+    }
+
+    @Test
     @DisplayName("R12: join that cannot route releases the lease it acquired (MN-12)")
     void joinNotRoutableReleasesAcquiredLease_R12() throws Exception {
         // Placement can select the node from the heartbeat table, but Velocity has
@@ -897,6 +998,40 @@ class WorldActionsTest {
 
     private Player mockPlayer(UUID uuid, String name) {
         return mockPlayer(uuid, name, permission -> true);
+    }
+
+    /** A player Velocity will happily hand off to another server, for the paths that connect one. */
+    private Player mockPlayerConnecting(UUID uuid, String name) {
+        Object requestBuilder = Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] {com.velocitypowered.api.proxy.ConnectionRequestBuilder.class},
+                (proxyObj, method, args) -> null);
+        return (Player) Proxy.newProxyInstance(
+                getClass().getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
+                    if (method.getName().equals("getUniqueId")) return uuid;
+                    if (method.getName().equals("getUsername")) return name;
+                    if (method.getName().equals("getCurrentServer")) return Optional.empty();
+                    if (method.getName().equals("getPermissionValue")) return Tristate.TRUE;
+                    if (method.getName().equals("hasPermission")) return true;
+                    if (method.getName().equals("createConnectionRequest")) return requestBuilder;
+                    if (method.getName().equals("sendMessage") && args != null && args.length > 0) {
+                        messagesByPlayer
+                                .computeIfAbsent(uuid, ignored -> new ArrayList<>())
+                                .add((Component) args[0]);
+                        return null;
+                    }
+                    return null;
+                });
+    }
+
+    /** A node Velocity knows about, so {@code NodeRegistry#server} can resolve it. */
+    private void registerServer(String nodeId) {
+        ServerInfo info = new ServerInfo(nodeId, new InetSocketAddress(InetAddress.getLoopbackAddress(), 25566));
+        RegisteredServer server = (RegisteredServer) Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] {RegisteredServer.class},
+                (proxyObj, method, args) -> method.getName().equals("getServerInfo") ? info : null);
+        registeredServers.put(nodeId, server);
     }
 
     /** A player the proxy sees on a node, for the world-they-are-standing-in rule. */

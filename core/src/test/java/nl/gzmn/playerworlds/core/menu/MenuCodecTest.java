@@ -122,6 +122,31 @@ class MenuCodecTest {
         }
 
         @Test
+        @DisplayName("round-trips CreateWorld asking for hardcore (FR-1b)")
+        void roundTripsCreateWorldHardcore() {
+            MenuIntent.CreateWorld intent = new MenuIntent.CreateWorld("my-hardcore", null, true);
+
+            byte[] encoded = MenuCodec.encodeIntent(correlationId, intent);
+            IntentEnvelope envelope = MenuCodec.decodeIntent(encoded);
+
+            assertThat(envelope.intent()).isEqualTo(intent);
+            assertThat(((MenuIntent.CreateWorld) envelope.intent()).hardcore())
+                    .as("a lost flag here is an ordinary world the player asked to be hardcore, "
+                            + "which they only find out about by dying in it")
+                    .isTrue();
+        }
+
+        @Test
+        @DisplayName("a CreateWorld with no hardcore asked for stays ordinary (FR-1b)")
+        void createWorldDefaultsToOrdinary() {
+            MenuIntent.CreateWorld intent = new MenuIntent.CreateWorld("my-survival", "42");
+
+            IntentEnvelope envelope = MenuCodec.decodeIntent(MenuCodec.encodeIntent(correlationId, intent));
+
+            assertThat(((MenuIntent.CreateWorld) envelope.intent()).hardcore()).isFalse();
+        }
+
+        @Test
         @DisplayName("round-trips ArchiveWorld")
         void roundTripsArchiveWorld() {
             MenuIntent.ArchiveWorld intent = new MenuIntent.ArchiveWorld("old-world");

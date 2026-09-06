@@ -69,6 +69,38 @@ class PlayerWorldRepositoryTest {
     }
 
     @Test
+    @DisplayName("an ordinary world is not hardcore, and a hardcore one reads back hardcore (FR-1b)")
+    void hardcoreIsStoredAtCreation_FR1b() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId ordinary = WorldId.random();
+        WorldId hardcore = WorldId.random();
+
+        assertThat(create(ordinary, owner, "soft", 1L).hardcore()).isFalse();
+
+        PlayerWorld created = worlds.create(hardcore, owner, "hard", 2L, 5000, Visibility.PRIVATE, true, null, null);
+
+        assertThat(created.hardcore()).isTrue();
+        assertThat(worlds.findById(hardcore).orElseThrow().hardcore())
+                .as("read back from the row rather than from the object the insert returned")
+                .isTrue();
+        assertThat(worlds.findById(ordinary).orElseThrow().hardcore()).isFalse();
+    }
+
+    @Test
+    @DisplayName("a world created with a lease is hardcore in the same insert (FR-1a, FR-1b)")
+    void hardcoreSurvivesTheLeasedCreatePath_FR1b() throws Exception {
+        UUID owner = UUID.randomUUID();
+        WorldId id = WorldId.random();
+
+        PlayerWorld created =
+                worlds.create(id, owner, "hard", 3L, 5000, Visibility.PRIVATE, true, "node-a", Duration.ofMinutes(5));
+
+        assertThat(created.hardcore()).isTrue();
+        assertThat(created.assignedNode()).isEqualTo("node-a");
+        assertThat(worlds.findById(id).orElseThrow().hardcore()).isTrue();
+    }
+
+    @Test
     @DisplayName("the folder is derived from the id, never from the name (FR-2a)")
     void folderMustFollowFromTheId() throws Exception {
         WorldId id = WorldId.random();

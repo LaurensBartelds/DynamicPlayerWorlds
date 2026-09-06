@@ -173,6 +173,7 @@ public final class MyWorldsMenu implements GuiScreen {
         }
         createLore.add(Component.empty());
         createLore.add(messages.render("messages.gui.my-worlds-menu.item.create.hint"));
+        createLore.add(messages.render("messages.gui.my-worlds-menu.item.create.hardcore-hint"));
         inventory.setItem(
                 SLOT_CREATE,
                 ItemUtil.create(
@@ -287,8 +288,14 @@ public final class MyWorldsMenu implements GuiScreen {
         } else if (slot == SLOT_CREATE) {
             if (menuChannel != null) {
                 String defaultName = player.getName().toLowerCase(Locale.ROOT) + "-" + (owned.size() + 1);
+                // FR-1b: right-click is the hardcore variant. A separate gesture
+                // rather than a confirmation step, because the menu's confirm
+                // modal (FR-27) is for undoing what already exists -- there is
+                // nothing here to lose yet, and the world says what it is from
+                // its first tick.
+                boolean hardcore = clickType.isRightClick();
                 var _ = menuChannel
-                        .sendIntent(player, new MenuIntent.CreateWorld(defaultName, null))
+                        .sendIntent(player, new MenuIntent.CreateWorld(defaultName, null, hardcore))
                         .whenComplete((result, ex) -> {
                             if (result instanceof MenuResult.Failed failed) {
                                 player.sendMessage(

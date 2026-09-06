@@ -41,9 +41,20 @@ public sealed interface MenuIntent
         }
     }
 
-    record CreateWorld(String name, @Nullable String seed) implements MenuIntent {
+    /**
+     * A request to create a world, from the lobby GUI (FR-27, FR-30a).
+     *
+     * @param hardcore FR-1b. Part of the intent rather than a setting applied
+     *     afterwards, because there is no afterwards: hardcore is fixed at
+     *     creation and the create call is the only chance to ask for it.
+     */
+    record CreateWorld(String name, @Nullable String seed, boolean hardcore) implements MenuIntent {
         public CreateWorld {
             Objects.requireNonNull(name, "name");
+        }
+
+        public CreateWorld(String name, @Nullable String seed) {
+            this(name, seed, false);
         }
     }
 

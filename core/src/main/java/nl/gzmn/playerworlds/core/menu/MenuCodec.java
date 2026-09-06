@@ -533,6 +533,10 @@ public final class MenuCodec {
                 out.writeByte(INTENT_CREATE_WORLD);
                 out.writeUTF(createWorld.name());
                 writeNullableString(out, createWorld.seed());
+                // FR-1b. Appended after the existing fields, which keeps the
+                // encoder and decoder the only two places that have to agree --
+                // both ship in the same release, in the same shaded jar pair.
+                out.writeBoolean(createWorld.hardcore());
             }
             case MenuIntent.ArchiveWorld archiveWorld -> {
                 out.writeByte(INTENT_ARCHIVE_WORLD);
@@ -607,7 +611,11 @@ public final class MenuCodec {
         byte intentType = in.readByte();
         return switch (intentType) {
             case INTENT_JOIN_WORLD -> new MenuIntent.JoinWorld(readWorldId(in));
-            case INTENT_CREATE_WORLD -> new MenuIntent.CreateWorld(in.readUTF(), readNullableString(in));
+            case INTENT_CREATE_WORLD -> {
+                String createName = in.readUTF();
+                String createSeed = readNullableString(in);
+                yield new MenuIntent.CreateWorld(createName, createSeed, in.readBoolean());
+            }
             case INTENT_ARCHIVE_WORLD -> new MenuIntent.ArchiveWorld(in.readUTF());
             case INTENT_RESTORE_WORLD -> new MenuIntent.RestoreWorld(in.readUTF());
             case INTENT_INVITE_MEMBER -> new MenuIntent.InviteMember(in.readUTF(), readNullableWorldId(in));

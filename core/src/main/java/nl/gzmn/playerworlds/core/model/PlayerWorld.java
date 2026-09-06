@@ -30,6 +30,8 @@ import org.jspecify.annotations.Nullable;
  * @param visibility FR-9a
  * @param description one line shown in {@code /world browse}; {@code null} when unset
  * @param settingsJson per-world owner settings as JSONB text (FR-9e)
+ * @param hardcore FR-1b; fixed at creation, so unlike everything in
+ *     {@code settingsJson} it has no setter anywhere in the codebase
  * @param assignedNode node holding the lease, {@code null} when unleased (MN-8)
  * @param leaseExpires database time the lease lapses, {@code null} when unleased
  * @param generation bumped on every lease acquisition; the fencing token (MN-3a)
@@ -56,6 +58,7 @@ public record PlayerWorld(
         Visibility visibility,
         @Nullable String description,
         String settingsJson,
+        boolean hardcore,
         @Nullable String assignedNode,
         @Nullable Instant leaseExpires,
         long generation,
@@ -127,6 +130,7 @@ public record PlayerWorld(
                 visibility,
                 description,
                 settingsJson,
+                hardcore,
                 node,
                 expires,
                 gen,

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.SQLException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -120,6 +121,57 @@ class MembershipRepositoryTest {
         // Not silently re-promoted to BUILDER, and no invite left behind.
         assertThat(membership.findMember(worldId, target).orElseThrow().role()).isEqualTo(Role.VISITOR);
         assertThat(membership.findLiveInvite(worldId, target)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a hardcore death is recorded in database time and refuses to move (FR-5b)")
+    void markDiedIsIdempotent_FR5b() throws Exception {
+        UUID builder = UUID.randomUUID();
+        membership.invite(worldId, builder, owner, Duration.ofMinutes(10));
+        membership.acceptInvite(worldId, builder);
+
+        assertThat(membership.isDead(worldId, builder)).isFalse();
+        assertThat(membership.markDied(worldId, builder)).isTrue();
+
+        WorldMember dead = membership.findMember(worldId, builder).orElseThrow();
+        assertThat(dead.isDead()).isTrue();
+        Instant firstDeath = dead.diedAt();
+        assertThat(firstDeath).isNotNull();
+
+        assertThat(membership.markDied(worldId, builder))
+                .as("a retried delivery must not re-stamp a death (rule 7)")
+                .isFalse();
+        assertThat(membership.findMember(worldId, builder).orElseThrow().diedAt())
+                .isEqualTo(firstDeath);
+    }
+
+    @Test
+    @DisplayName("a death touches only the member who died, and only in that world (FR-5b)")
+    void deathIsPerMemberAndPerWorld_FR5b() throws Exception {
+        UUID builder = UUID.randomUUID();
+        membership.invite(worldId, builder, owner, Duration.ofMinutes(10));
+        membership.acceptInvite(worldId, builder);
+        PlayerWorld other = worlds.create(WorldId.random(), owner, "second", 2L, 5000, Visibility.PRIVATE);
+        membership.invite(other.id(), builder, owner, Duration.ofMinutes(10));
+        membership.acceptInvite(other.id(), builder);
+
+        assertThat(membership.markDied(worldId, builder)).isTrue();
+
+        assertThat(membership.isDead(worldId, owner))
+                .as("the owner plays on; FR-5b ends the world for one player, not for the world")
+                .isFalse();
+        assertThat(membership.isDead(other.id(), builder))
+                .as("a death is in one world, not in every world the player belongs to")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("a stranger is not dead, they are simply not a member (FR-5b)")
+    void deathOfANonMemberRecordsNothing_FR5b() throws Exception {
+        UUID stranger = UUID.randomUUID();
+
+        assertThat(membership.markDied(worldId, stranger)).isFalse();
+        assertThat(membership.isDead(worldId, stranger)).isFalse();
     }
 
     @Test

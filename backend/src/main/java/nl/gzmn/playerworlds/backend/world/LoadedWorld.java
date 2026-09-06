@@ -41,6 +41,15 @@ public final class LoadedWorld {
     private final int borderRadius;
 
     /**
+     * FR-1b, carried here for the same reason as the seed: the death handler and
+     * the portal handler both read it on the tick thread, where they cannot go
+     * and ask the database (NFR-2). Final, because FR-1b fixes it at creation —
+     * there is no {@code APPLY_SETTINGS} equivalent that could change it under a
+     * loaded world the way {@code settingsJson} changes.
+     */
+    private final boolean hardcore;
+
+    /**
      * The lease generation this world was loaded against (FR-11's fencing token).
      */
     private final long generation;
@@ -111,6 +120,18 @@ public final class LoadedWorld {
             int borderRadius,
             long generation,
             String settingsJson) {
+        this(id, ownerUuid, name, seed, borderRadius, generation, settingsJson, false);
+    }
+
+    public LoadedWorld(
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            long seed,
+            int borderRadius,
+            long generation,
+            String settingsJson,
+            boolean hardcore) {
         this.id = Objects.requireNonNull(id, "id");
         this.ownerUuid = Objects.requireNonNull(ownerUuid, "ownerUuid");
         this.name = Objects.requireNonNull(name, "name");
@@ -121,6 +142,7 @@ public final class LoadedWorld {
         this.borderRadius = borderRadius;
         this.generation = generation;
         this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
+        this.hardcore = hardcore;
         this.lastHeartbeatNanoTime = System.nanoTime();
         this.lastCommitOkNanoTime = this.lastHeartbeatNanoTime;
     }
@@ -135,7 +157,8 @@ public final class LoadedWorld {
                 row.seed(),
                 row.borderRadius(),
                 row.generation(),
-                row.settingsJson());
+                row.settingsJson(),
+                row.hardcore());
         if (row.leaseExpires() != null) {
             world.recordLeaseGrant(row.leaseExpires());
         }
@@ -166,6 +189,11 @@ public final class LoadedWorld {
      */
     public void updateSettingsJson(String settingsJson) {
         this.settingsJson = Objects.requireNonNull(settingsJson, "settingsJson");
+    }
+
+    /** FR-1b. Fixed at creation, so this never changes for a given world. */
+    public boolean isHardcore() {
+        return hardcore;
     }
 
     /** Shared by all three dimensions, so one materialised later matches (FR-2). */

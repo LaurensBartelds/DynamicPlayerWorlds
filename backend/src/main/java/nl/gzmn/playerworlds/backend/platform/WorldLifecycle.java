@@ -32,8 +32,13 @@ public interface WorldLifecycle {
      *     later is identical to one created up front (FR-2)
      * @param generateStructures normally true; false only for tests that want a
      *     cheap world
+     * @param hardcore FR-5a. Set at generation as well as on every load, because
+     *     a dimension generated soft and hardened afterwards has already run one
+     *     tick as an ordinary world -- and because the nether and the end are
+     *     generated on first transit (FR-2, FR-4), long after the overworld
      */
-    record CreationRequest(String bukkitWorldName, DimensionKind dimension, long seed, boolean generateStructures) {
+    record CreationRequest(
+            String bukkitWorldName, DimensionKind dimension, long seed, boolean generateStructures, boolean hardcore) {
 
         public CreationRequest {
             Objects.requireNonNull(bukkitWorldName, "bukkitWorldName");
@@ -43,8 +48,17 @@ public interface WorldLifecycle {
             }
         }
 
+        public CreationRequest(String bukkitWorldName, DimensionKind dimension, long seed, boolean generateStructures) {
+            this(bukkitWorldName, dimension, seed, generateStructures, false);
+        }
+
         public static CreationRequest of(String bukkitWorldName, DimensionKind dimension, long seed) {
-            return new CreationRequest(bukkitWorldName, dimension, seed, true);
+            return new CreationRequest(bukkitWorldName, dimension, seed, true, false);
+        }
+
+        /** FR-1b: the same request for a world whose stakes are permanent. */
+        public static CreationRequest of(String bukkitWorldName, DimensionKind dimension, long seed, boolean hardcore) {
+            return new CreationRequest(bukkitWorldName, dimension, seed, true, hardcore);
         }
     }
 

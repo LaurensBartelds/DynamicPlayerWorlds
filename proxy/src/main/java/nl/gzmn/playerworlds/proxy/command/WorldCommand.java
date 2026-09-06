@@ -108,6 +108,14 @@ public final class WorldCommand {
      */
     public static final String CREATE_PERMISSION = WorldPermissions.CREATE;
 
+    /**
+     * The word that makes a new world hardcore (FR-1b), on both
+     * {@code /world create <name> hardcore} and
+     * {@code /world create <name> <seed> hardcore}. Named once so the command
+     * tree, the menu channel and the tests all spell it the same way.
+     */
+    public static final String HARDCORE_LITERAL = "hardcore";
+
     public static final String JOIN_PERMISSION = WorldPermissions.JOIN;
     public static final String PUBLIC_PERMISSION = WorldPermissions.PUBLIC;
     public static final String ADMIN_PERMISSION = WorldPermissions.ADMIN;
@@ -300,6 +308,23 @@ public final class WorldCommand {
                                     }
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })
+                                // A literal rather than a flag, matching `delete <name> confirm`:
+                                // this is the same kind of word, one a player has to type out in
+                                // full for something they cannot undo (FR-1b).
+                                .then(BrigadierCommand.literalArgumentBuilder(HARDCORE_LITERAL)
+                                        .executes(context -> {
+                                            Player caller = playerOrNull(context);
+                                            if (caller != null) {
+                                                deliver(
+                                                        caller,
+                                                        actions.create(
+                                                                caller,
+                                                                StringArgumentType.getString(context, "name"),
+                                                                null,
+                                                                true));
+                                            }
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))
                                 .then(BrigadierCommand.requiredArgumentBuilder("seed", StringArgumentType.word())
                                         .executes(context -> {
                                             Player caller = playerOrNull(context);
@@ -312,7 +337,21 @@ public final class WorldCommand {
                                                                 StringArgumentType.getString(context, "seed")));
                                             }
                                             return com.mojang.brigadier.Command.SINGLE_SUCCESS;
-                                        }))))
+                                        })
+                                        .then(BrigadierCommand.literalArgumentBuilder(HARDCORE_LITERAL)
+                                                .executes(context -> {
+                                                    Player caller = playerOrNull(context);
+                                                    if (caller != null) {
+                                                        deliver(
+                                                                caller,
+                                                                actions.create(
+                                                                        caller,
+                                                                        StringArgumentType.getString(context, "name"),
+                                                                        StringArgumentType.getString(context, "seed"),
+                                                                        true));
+                                                    }
+                                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                                })))))
                 .then(BrigadierCommand.literalArgumentBuilder("delete")
                         .then(BrigadierCommand.requiredArgumentBuilder("name", StringArgumentType.word())
                                 .executes(context -> {

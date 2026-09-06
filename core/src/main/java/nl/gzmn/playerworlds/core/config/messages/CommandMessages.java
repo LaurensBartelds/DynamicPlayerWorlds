@@ -102,6 +102,13 @@ public final class CommandMessages {
                     "messages.command.create.started",
                     "<gray>creating '<world>' on <node>; this may take a few seconds...</gray>",
                     Set.of("world", "node")),
+            // FR-1b: said at creation because it is the last moment it can be
+            // said. There is no settings screen that will mention it later.
+            MessageKey.of(
+                    "messages.command.create.started-hardcore",
+                    "<gray>creating hardcore world '<world>' on <node>; this may take a few seconds...</gray>\n"
+                            + "<red>if you die there you cannot go back, and this cannot be turned off</red>",
+                    Set.of("world", "node")),
 
             // --- delete (FR-27, FR-35) ----------------------------------------
             MessageKey.of(
@@ -188,6 +195,12 @@ public final class CommandMessages {
                     "messages.command.join.banned",
                     "<red>you are banned from '<world>'<reason></red>",
                     Set.of("world", "reason")),
+            // FR-5b. Deliberately says who and when rather than only refusing: a
+            // player who does not remember dying reads a bare refusal as a bug.
+            MessageKey.of(
+                    "messages.command.join.hardcore-dead",
+                    "<red>you died in '<world>' and it is hardcore; you cannot return</red>",
+                    Set.of("world")),
             MessageKey.of(
                     "messages.command.join.lease-conflict",
                     "<red>that world is being opened elsewhere right now; try again in a moment</red>"),

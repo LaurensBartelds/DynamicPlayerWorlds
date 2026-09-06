@@ -426,6 +426,7 @@ class SocialAndSettingsScreensTest {
                 Visibility.PRIVATE,
                 null,
                 "{}",
+                false,
                 null,
                 null,
                 1L,

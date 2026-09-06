@@ -199,6 +199,21 @@ the jar filename (`+mc<version>`), not part of the project version.
   GUI-driven success/failure message keeps its styling instead of being
   re-wrapped in a hardcoded backend prefix.
 
+- Hardcore worlds (FR-1b, FR-5a, FR-5b). `/world create <name> [seed] hardcore`
+  creates a world whose dimensions carry the hardcore flag and difficulty HARD,
+  re-asserted on every load like the border and the FR-9e settings, because all
+  of them live in `level.dat` and a restore must not be trusted with them. A
+  death there by an OWNER or BUILDER is permanent: `player_world_member.died_at`
+  is stamped in database time, the player is returned to the lobby, and the
+  proxy refuses every later entry beside the FR-9d ban check. VISITORs are
+  exempt, so a stranger passing through a public hardcore world cannot lock
+  themselves out of it. The world itself stays READY and everyone else plays on;
+  a dead owner keeps every management command but can no longer enter. Hardcore
+  is fixed at creation — `player_world.hardcore` has no update path anywhere in
+  the repository, which is what makes that a property of the code rather than a
+  convention. In the lobby GUI, right-clicking the create button is the hardcore
+  variant. Migration `V6__hardcore.sql`.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper

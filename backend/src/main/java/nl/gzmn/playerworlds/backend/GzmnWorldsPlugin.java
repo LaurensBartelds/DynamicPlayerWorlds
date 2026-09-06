@@ -48,6 +48,7 @@ import nl.gzmn.playerworlds.backend.storage.WorldEraser;
 import nl.gzmn.playerworlds.backend.storage.WorldRestorer;
 import nl.gzmn.playerworlds.backend.world.CommandGuardListener;
 import nl.gzmn.playerworlds.backend.world.GroupChatBuffer;
+import nl.gzmn.playerworlds.backend.world.HardcoreDeathListener;
 import nl.gzmn.playerworlds.backend.world.HoldingArea;
 import nl.gzmn.playerworlds.backend.world.IdleUnloadTask;
 import nl.gzmn.playerworlds.backend.world.MembershipCache;
@@ -641,6 +642,24 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 .registerEvents(new RoleEnforcementListener(worldFolders, membershipCache, settingsCache), this);
         // FR-18/19/20: Visibility and group chat buffer
         getServer().getPluginManager().registerEvents(new VisibilityListener(this, visibilityGroups, chatBuffer), this);
+        // FR-5b: a death in a hardcore world (FR-1b) ends that world for the
+        // player who died. Registered after PortalListener, which owns where a
+        // respawn lands (FR-3a) -- this one waits a tick and then takes them out
+        // of wherever that was, rather than competing for the same event.
+        getServer()
+                .getPluginManager()
+                .registerEvents(
+                        new HardcoreDeathListener(
+                                this,
+                                worldFolders,
+                                worldRegistry,
+                                membershipCache,
+                                membershipRepository,
+                                pools,
+                                nodeCommands,
+                                this::policy,
+                                this::messages),
+                        this);
         // FR-6 and the rest of section 6: the proxy sees the node a player is on
         // but not the world, and one node holds many. Without this the owner
         // commands can only guess, which with FR-1's cap of two is a refusal.
