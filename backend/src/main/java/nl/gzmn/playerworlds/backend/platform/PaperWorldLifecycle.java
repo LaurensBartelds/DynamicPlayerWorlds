@@ -28,7 +28,10 @@ public final class PaperWorldLifecycle implements WorldLifecycle {
         WorldCreator creator = new WorldCreator(request.bukkitWorldName())
                 .environment(environment(request.dimension()))
                 .seed(request.seed())
-                .generateStructures(request.generateStructures());
+                .generateStructures(request.generateStructures())
+                // FR-5a. Also re-asserted through WorldRuntime#setHardcore on every
+                // load, because this only reaches level.dat when the folder is new.
+                .hardcore(request.hardcore());
         // Loads rather than creates when the folder already exists, which is what
         // makes this one method rather than two: a world materialised on a
         // previous boot and one materialised on first transit take the same path.

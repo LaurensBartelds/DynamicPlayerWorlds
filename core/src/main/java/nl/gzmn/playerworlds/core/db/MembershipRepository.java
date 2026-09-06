@@ -244,7 +244,7 @@ public final class MembershipRepository extends Repository {
         return queryOne(
                 connection,
                 """
-                SELECT world_id, uuid, role, invited_by, joined_at
+                SELECT world_id, uuid, role, invited_by, joined_at, died_at
                   FROM player_world_member
                  WHERE world_id = ? AND uuid = ?
                 """,
@@ -266,7 +266,7 @@ public final class MembershipRepository extends Repository {
         return database.withConnection(connection -> queryList(
                 connection,
                 """
-                SELECT world_id, uuid, role, invited_by, joined_at
+                SELECT world_id, uuid, role, invited_by, joined_at, died_at
                   FROM player_world_member
                  WHERE world_id = ?
                  ORDER BY CASE role WHEN 'OWNER' THEN 0 WHEN 'BUILDER' THEN 1 ELSE 2 END, joined_at NULLS LAST
@@ -297,7 +297,7 @@ public final class MembershipRepository extends Repository {
         Objects.requireNonNull(uuid, "uuid");
         return database.withConnection(connection ->
                 queryList(connection, """
-                SELECT world_id, uuid, role, invited_by, joined_at
+                SELECT world_id, uuid, role, invited_by, joined_at, died_at
                   FROM player_world_member
                  WHERE uuid = ?
                 """, statement -> statement.setObject(1, uuid), MembershipRepository::mapMember));
@@ -376,13 +376,57 @@ public final class MembershipRepository extends Repository {
                 == 1);
     }
 
+    /**
+     * Records a permanent death in a hardcore world, in database time (FR-5b).
+     *
+     * <p>Conditional on {@code died_at IS NULL} rather than an unconditional
+     * write, so a retried control-plane delivery or a second death arriving in
+     * the same tick cannot move an earlier death forward (CONTRIBUTING.md rule
+     * 7). {@code now()} is the database's clock, not the node's, for the reason
+     * in rule 5: this timestamp is the evidence behind a permanent refusal and a
+     * node with a fast clock must not be able to backdate one.
+     *
+     * <p>Says nothing about whether the world is hardcore. The caller has
+     * already read {@code player_world.hardcore} to get here, and duplicating
+     * that as a join would let this method be called for a world it makes no
+     * sense in and quietly do nothing, which is harder to debug than a caller
+     * that never asks.
+     *
+     * @return true when this call recorded the death, false when the member was
+     *     already dead or no such member exists
+     */
+    public boolean markDied(WorldId worldId, UUID uuid) throws SQLException {
+        Objects.requireNonNull(worldId, "worldId");
+        Objects.requireNonNull(uuid, "uuid");
+        return database.inTransaction(connection -> execute(connection, """
+                        UPDATE player_world_member
+                           SET died_at = now()
+                         WHERE world_id = ? AND uuid = ? AND died_at IS NULL
+                        """, statement -> {
+                    statement.setObject(1, worldId.value());
+                    statement.setObject(2, uuid);
+                })
+                == 1);
+    }
+
+    /**
+     * Whether this player has died permanently in this world (FR-5b).
+     *
+     * <p>False for a player who is not a member at all: they are not dead, they
+     * are a stranger, and the membership checks are what refuse them.
+     */
+    public boolean isDead(WorldId worldId, UUID uuid) throws SQLException {
+        return findMember(worldId, uuid).map(WorldMember::isDead).orElse(false);
+    }
+
     private static WorldMember mapMember(ResultSet row) throws SQLException {
         return new WorldMember(
                 new WorldId(Objects.requireNonNull(row.getObject("world_id", UUID.class), "world_id")),
                 Objects.requireNonNull(row.getObject("uuid", UUID.class), "uuid"),
                 Role.fromWire(Objects.requireNonNull(row.getString("role"), "role")),
                 row.getObject("invited_by", UUID.class),
-                optionalInstant(row, "joined_at"));
+                optionalInstant(row, "joined_at"),
+                optionalInstant(row, "died_at"));
     }
 
     private static WorldInvite mapInvite(ResultSet row) throws SQLException {

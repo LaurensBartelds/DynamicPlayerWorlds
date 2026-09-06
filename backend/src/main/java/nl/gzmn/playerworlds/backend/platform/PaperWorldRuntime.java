@@ -1,6 +1,7 @@
 package nl.gzmn.playerworlds.backend.platform;
 
 import java.util.Objects;
+import org.bukkit.Difficulty;
 import org.bukkit.GameRule;
 import org.bukkit.GameRules;
 import org.bukkit.World;
@@ -90,6 +91,19 @@ public final class PaperWorldRuntime implements WorldRuntime {
         // GameRules.PVP replaced World#setPVP in 1.21.9; keep the intent on the
         // seam so a further rename is one call site.
         setGameRule(world, GameRules.PVP, allowed);
+    }
+
+    @Override
+    public void setHardcore(World world, boolean hardcore) {
+        Objects.requireNonNull(world, "world");
+        world.setHardcore(hardcore);
+    }
+
+    @Override
+    public void setDifficulty(World world, Difficulty difficulty) {
+        Objects.requireNonNull(world, "world");
+        Objects.requireNonNull(difficulty, "difficulty");
+        world.setDifficulty(difficulty);
     }
 
     @Override

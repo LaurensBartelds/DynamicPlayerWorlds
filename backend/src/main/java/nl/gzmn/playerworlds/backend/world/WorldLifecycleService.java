@@ -40,6 +40,7 @@ import nl.gzmn.playerworlds.core.storage.Manifest;
 import nl.gzmn.playerworlds.core.storage.ManifestCodec;
 import nl.gzmn.playerworlds.core.storage.ObjectStore;
 import nl.gzmn.playerworlds.core.storage.WorldDownloader;
+import org.bukkit.Difficulty;
 import org.bukkit.World;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -325,7 +326,8 @@ public final class WorldLifecycleService implements WorldLoader {
 
         return onMain(() -> {
                     String bukkitName = folders.bukkitWorldName(row.id(), DimensionKind.OVERWORLD);
-                    World world = timedMaterialise(bukkitName, DimensionKind.OVERWORLD, loaded.seed(), true, current);
+                    World world = timedMaterialise(
+                            bukkitName, DimensionKind.OVERWORLD, loaded.seed(), loaded.isHardcore(), true, current);
                     if (world == null) {
                         return Boolean.FALSE;
                     }
@@ -401,6 +403,7 @@ public final class WorldLifecycleService implements WorldLoader {
                             row.visibility(),
                             row.description(),
                             row.settingsJson(),
+                            row.hardcore(),
                             row.assignedNode(),
                             row.leaseExpires(),
                             row.generation(),
@@ -670,7 +673,8 @@ public final class WorldLifecycleService implements WorldLoader {
         return onMain(() -> {
                     for (DimensionKind dimension : onDisk) {
                         String bukkitName = folders.bukkitWorldName(row.id(), dimension);
-                        World world = timedMaterialise(bukkitName, dimension, loaded.seed(), false, current);
+                        World world = timedMaterialise(
+                                bukkitName, dimension, loaded.seed(), loaded.isHardcore(), false, current);
                         if (world == null) {
                             return dimension.name();
                         }
@@ -768,7 +772,7 @@ public final class WorldLifecycleService implements WorldLoader {
         }
         NetworkPolicy current = policy.get();
         String bukkitName = folders.bukkitWorldName(loaded.id(), dimension);
-        World world = timedMaterialise(bukkitName, dimension, loaded.seed(), true, current);
+        World world = timedMaterialise(bukkitName, dimension, loaded.seed(), loaded.isHardcore(), true, current);
         if (world == null) {
             log.error("could not materialise {} for world {}", dimension, loaded.id());
             return false;
@@ -899,12 +903,13 @@ public final class WorldLifecycleService implements WorldLoader {
     }
 
     /**
-     * Border, spawn-chunk radius and gamerules, applied on <em>every</em> load.
+     * Border, spawn-chunk radius, gamerules and hardcore state, applied on
+     * <em>every</em> load.
      *
-     * <p>Not once at creation. All three are persisted in {@code level.dat}, so
+     * <p>Not once at creation. All of them are persisted in {@code level.dat}, so
      * they arrive from a restore carrying whatever the folder happened to hold —
-     * FR-3, FR-25c and FR-9e each say in their own words that the database value
-     * wins over the folder.
+     * FR-3, FR-25c, FR-9e and FR-5a each say in their own words that the database
+     * value wins over the folder.
      */
     private void applySettings(World world, DimensionKind dimension, LoadedWorld loaded, NetworkPolicy current) {
         WorldRuntime runtime = platform.worldRuntime();
@@ -916,6 +921,16 @@ public final class WorldLifecycleService implements WorldLoader {
         }
         runtime.setPvp(world, settings.pvp());
         runtime.setMobGriefing(world, settings.mobGriefing());
+        // FR-5a. Outside the FR-9e/FR-9i block above on purpose: those come from
+        // `settings` and the owner can change any of them, this comes from the
+        // `hardcore` column and nobody can (FR-1b). A world that is not hardcore
+        // is left alone rather than set soft -- difficulty on an ordinary player
+        // world is the node's business, and asserting EASY here would take a
+        // setting away from the operator that this feature never asked for.
+        if (loaded.isHardcore()) {
+            runtime.setHardcore(world, true);
+            runtime.setDifficulty(world, Difficulty.HARD);
+        }
     }
 
     /**
@@ -926,11 +941,16 @@ public final class WorldLifecycleService implements WorldLoader {
      *     loads into it would blur the release-gating number FR-4 asks for.
      */
     private @Nullable World timedMaterialise(
-            String bukkitName, DimensionKind dimension, long seed, boolean fresh, NetworkPolicy current) {
+            String bukkitName,
+            DimensionKind dimension,
+            long seed,
+            boolean hardcore,
+            boolean fresh,
+            NetworkPolicy current) {
         MainThread.assertOn();
         long start = System.nanoTime();
-        World world =
-                platform.worldLifecycle().createOrLoad(WorldLifecycle.CreationRequest.of(bukkitName, dimension, seed));
+        World world = platform.worldLifecycle()
+                .createOrLoad(WorldLifecycle.CreationRequest.of(bukkitName, dimension, seed, hardcore));
         Duration stall = Duration.ofNanos(System.nanoTime() - start);
 
         if (fresh) {

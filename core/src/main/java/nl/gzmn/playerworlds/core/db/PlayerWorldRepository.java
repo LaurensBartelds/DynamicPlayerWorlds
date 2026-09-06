@@ -29,7 +29,7 @@ public final class PlayerWorldRepository extends Repository {
 
     private static final String SELECT_COLUMNS = """
             id, owner_uuid, name, folder, seed, border_radius, visibility, description,
-            settings::text AS settings_json, assigned_node, lease_expires, generation,
+            settings::text AS settings_json, hardcore, assigned_node, lease_expires, generation,
             manifest_key, data_version, mc_version, created_at, last_played, state, storage_bytes
             """;
 
@@ -169,6 +169,9 @@ public final class PlayerWorldRepository extends Repository {
      *
      * @param folder must equal {@code id.folder()} (FR-2a); passed explicitly so
      *     the derivation is visible at the call site rather than implied
+     * @param hardcore FR-1b. Written here and nowhere else: there is no update
+     *     path for this column anywhere in the repository, which is what makes
+     *     "fixed at creation" a property of the code rather than a convention
      */
     public PlayerWorld insertCreating(
             Connection connection,
@@ -179,6 +182,7 @@ public final class PlayerWorldRepository extends Repository {
             long seed,
             int borderRadius,
             Visibility visibility,
+            boolean hardcore,
             @Nullable String assignedNode,
             @Nullable Duration initialLease)
             throws SQLException {
@@ -204,9 +208,9 @@ public final class PlayerWorldRepository extends Repository {
                             connection,
                             """
                             INSERT INTO player_world (
-                              id, owner_uuid, name, folder, seed, border_radius, visibility, state,
+                              id, owner_uuid, name, folder, seed, border_radius, visibility, hardcore, state,
                               assigned_node, lease_expires, generation
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATING', ?, now() + (? * interval '1 second'), 1)
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CREATING', ?, now() + (? * interval '1 second'), 1)
                             RETURNING
                             """ + SELECT_COLUMNS,
                             statement -> {
@@ -217,8 +221,9 @@ public final class PlayerWorldRepository extends Repository {
                                 statement.setLong(5, seed);
                                 statement.setInt(6, borderRadius);
                                 statement.setString(7, visibility.wire());
-                                statement.setString(8, assignedNode);
-                                statement.setLong(9, initialLease.toSeconds());
+                                statement.setBoolean(8, hardcore);
+                                statement.setString(9, assignedNode);
+                                statement.setLong(10, initialLease.toSeconds());
                             },
                             PlayerWorldRepository::mapRow)
                     .orElseThrow(() -> new SQLException("INSERT player_world RETURNING produced no row"));
@@ -228,8 +233,8 @@ public final class PlayerWorldRepository extends Repository {
                         connection,
                         """
                         INSERT INTO player_world (
-                          id, owner_uuid, name, folder, seed, border_radius, visibility, state
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'CREATING')
+                          id, owner_uuid, name, folder, seed, border_radius, visibility, hardcore, state
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'CREATING')
                         RETURNING
                         """ + SELECT_COLUMNS,
                         statement -> {
@@ -240,6 +245,7 @@ public final class PlayerWorldRepository extends Repository {
                             statement.setLong(5, seed);
                             statement.setInt(6, borderRadius);
                             statement.setString(7, visibility.wire());
+                            statement.setBoolean(8, hardcore);
                         },
                         PlayerWorldRepository::mapRow)
                 .orElseThrow(() -> new SQLException("INSERT player_world RETURNING produced no row"));
@@ -253,13 +259,40 @@ public final class PlayerWorldRepository extends Repository {
             String folder,
             long seed,
             int borderRadius,
+            Visibility visibility,
+            @Nullable String assignedNode,
+            @Nullable Duration initialLease)
+            throws SQLException {
+        return insertCreating(
+                connection,
+                id,
+                ownerUuid,
+                name,
+                folder,
+                seed,
+                borderRadius,
+                visibility,
+                false,
+                assignedNode,
+                initialLease);
+    }
+
+    public PlayerWorld insertCreating(
+            Connection connection,
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            String folder,
+            long seed,
+            int borderRadius,
             Visibility visibility)
             throws SQLException {
-        return insertCreating(connection, id, ownerUuid, name, folder, seed, borderRadius, visibility, null, null);
+        return insertCreating(
+                connection, id, ownerUuid, name, folder, seed, borderRadius, visibility, false, null, null);
     }
 
     /**
-     * Creates a world in its own transaction (FR-1, FR-2, FR-2a).
+     * Creates a world in its own transaction (FR-1, FR-2, FR-2a, FR-1b).
      */
     public PlayerWorld create(
             WorldId id,
@@ -268,6 +301,7 @@ public final class PlayerWorldRepository extends Repository {
             long seed,
             int borderRadius,
             Visibility visibility,
+            boolean hardcore,
             @Nullable String assignedNode,
             @Nullable Duration initialLease)
             throws SQLException {
@@ -284,6 +318,7 @@ public final class PlayerWorldRepository extends Repository {
                     seed,
                     borderRadius,
                     visibility,
+                    hardcore,
                     assignedNode,
                     initialLease);
             membership.insertMember(connection, id, ownerUuid, Role.OWNER, null);
@@ -292,9 +327,22 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     public PlayerWorld create(
+            WorldId id,
+            UUID ownerUuid,
+            String name,
+            long seed,
+            int borderRadius,
+            Visibility visibility,
+            @Nullable String assignedNode,
+            @Nullable Duration initialLease)
+            throws SQLException {
+        return create(id, ownerUuid, name, seed, borderRadius, visibility, false, assignedNode, initialLease);
+    }
+
+    public PlayerWorld create(
             WorldId id, UUID ownerUuid, String name, long seed, int borderRadius, Visibility visibility)
             throws SQLException {
-        return create(id, ownerUuid, name, seed, borderRadius, visibility, null, null);
+        return create(id, ownerUuid, name, seed, borderRadius, visibility, false, null, null);
     }
 
     /**
@@ -1417,6 +1465,7 @@ public final class PlayerWorldRepository extends Repository {
                 Visibility.fromWire(Objects.requireNonNull(row.getString("visibility"), "visibility")),
                 row.getString("description"),
                 Objects.requireNonNull(row.getString("settings_json"), "settings"),
+                row.getBoolean("hardcore"),
                 row.getString("assigned_node"),
                 optionalInstant(row, "lease_expires"),
                 row.getLong("generation"),

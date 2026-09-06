@@ -30,6 +30,7 @@ import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.proxy.command.ActionResult;
 import nl.gzmn.playerworlds.proxy.command.WorldActions;
+import nl.gzmn.playerworlds.proxy.command.WorldCommand;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -220,10 +221,13 @@ public final class MenuChannelListener {
                 String suffix = UUID.randomUUID().toString().substring(0, 8);
                 String name =
                         parts.size() >= 3 ? parts.get(2) : player.getUsername().toLowerCase(Locale.ROOT) + "-" + suffix;
+                // FR-1b, as a trailing word so an older node that never sends it
+                // keeps creating ordinary worlds rather than failing to parse.
+                boolean hardcore = parts.size() >= 4 && WorldCommand.HARDCORE_LITERAL.equalsIgnoreCase(parts.get(3));
                 executeActionAndRerender(
                         connection,
                         player,
-                        actions.create(player, name, null),
+                        actions.create(player, name, null, hardcore),
                         () -> viewService.buildMyWorldsMenu(player.getUniqueId(), 0, correlationId));
             }
             case "ARCHIVE" -> {
@@ -444,7 +448,8 @@ public final class MenuChannelListener {
     private CompletableFuture<ActionResult> dispatch(Player player, MenuIntent intent) {
         return switch (intent) {
             case MenuIntent.JoinWorld joinWorld -> actions.join(player, joinWorld.worldId());
-            case MenuIntent.CreateWorld createWorld -> actions.create(player, createWorld.name(), createWorld.seed());
+            case MenuIntent.CreateWorld createWorld ->
+                actions.create(player, createWorld.name(), createWorld.seed(), createWorld.hardcore());
             case MenuIntent.ArchiveWorld archiveWorld ->
                 // ConfirmMenu is FR-27's typed-confirmation substitute: the backend only
                 // emits this intent after the owner clicks confirm in the modal.

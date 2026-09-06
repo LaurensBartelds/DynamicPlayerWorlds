@@ -21,5 +21,14 @@ public final class NoticeMessages {
                     "messages.notice.invite",
                     "<green><owner> invited you to their world '<world>'.</green>\n"
                             + "<button> <gray>or type /world accept <owner></gray>",
-                    Set.of("owner", "world", "button")));
+                    Set.of("owner", "world", "button")),
+
+            // FR-5b, sent by the node as the player is put back on the lobby. The
+            // proxy has its own refusal for the next time they try to come back
+            // (messages.command.join.hardcore-dead); this is the one that says it
+            // happened, at the moment it does.
+            MessageKey.of(
+                    "messages.notice.hardcore-death",
+                    "<red>you died in '<world>'. It is a hardcore world, so that is the end of it for you.</red>",
+                    Set.of("world")));
 }

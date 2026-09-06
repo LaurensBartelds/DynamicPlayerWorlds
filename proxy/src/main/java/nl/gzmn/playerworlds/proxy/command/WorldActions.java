@@ -201,6 +201,18 @@ public final class WorldActions {
      * cannot bypass {@code gzmn.worlds.create} (D14 / R5).
      */
     public CompletableFuture<ActionResult> create(Player caller, String name, @Nullable String seedText) {
+        return create(caller, name, seedText, false);
+    }
+
+    /**
+     * Creates a new world, optionally hardcore (FR-1, FR-1a, FR-1b).
+     *
+     * <p>{@code hardcore} is only ever read here. There is no command, menu
+     * intent or control-plane message that changes it afterwards, which is what
+     * FR-1b means by fixed at creation.
+     */
+    public CompletableFuture<ActionResult> create(
+            Player caller, String name, @Nullable String seedText, boolean hardcore) {
         Objects.requireNonNull(caller, "caller");
         Objects.requireNonNull(name, "name");
         return CompletableFuture.supplyAsync(
@@ -256,12 +268,15 @@ public final class WorldActions {
                                 seed,
                                 current.defaultBorderRadius(),
                                 visibility,
+                                hardcore,
                                 nodeId,
                                 current.leaseDuration());
 
                         transfers.route(owner, world.id(), nodeId, world.generation());
                         Component msg = info(
-                                "messages.command.create.started",
+                                hardcore
+                                        ? "messages.command.create.started-hardcore"
+                                        : "messages.command.create.started",
                                 Placeholders.text("world", name),
                                 Placeholders.raw("node", nodeId));
                         caller.createConnectionRequest(targetServer.get()).fireAndForget();
@@ -676,6 +691,21 @@ public final class WorldActions {
             return ActionResult.success(
                     info("messages.command.join.already-here", Placeholders.text("world", world.name())));
         }
+        // FR-5b: a hardcore death is permanent, and this is the check that makes
+        // it so. It sits beside the ban check because entry is the only place it
+        // can be enforced from -- the world is unloaded most of the time (FR-25),
+        // so there is no node to ask, and the answer must be the same whether or
+        // not one happens to hold it.
+        if (world.hardcore()
+                && membership
+                        .findMember(world.id(), caller.getUniqueId())
+                        .map(WorldMember::isDead)
+                        .orElse(false)) {
+            return ActionResult.failure(
+                    FailureCode.PERMISSION_DENIED,
+                    error("messages.command.join.hardcore-dead", Placeholders.text("world", world.name())));
+        }
+
         if (bans.isBanned(world.id(), caller.getUniqueId())) {
             Optional<WorldBan> ban = bans.findBan(world.id(), caller.getUniqueId());
             String reason = ban.flatMap(b -> Optional.ofNullable(b.reason()))

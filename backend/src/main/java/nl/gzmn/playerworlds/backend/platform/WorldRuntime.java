@@ -1,5 +1,6 @@
 package nl.gzmn.playerworlds.backend.platform;
 
+import org.bukkit.Difficulty;
 import org.bukkit.GameRule;
 import org.bukkit.World;
 import org.bukkit.boss.DragonBattle;
@@ -53,6 +54,23 @@ public interface WorldRuntime {
 
     /** FR-9e PVP flag for this world. */
     void setPvp(World world, boolean allowed);
+
+    /**
+     * FR-5a: the hardcore flag on a loaded dimension of a hardcore world (FR-1b).
+     *
+     * <p>Applied on every load, not once at creation: it lives in
+     * {@code level.dat}, so a folder restored from object storage carries
+     * whatever it was saved with rather than what the database says it is.
+     */
+    void setHardcore(World world, boolean hardcore);
+
+    /**
+     * FR-5a: difficulty for one dimension, {@code HARD} for a hardcore world.
+     *
+     * <p>Also persisted in {@code level.dat}, and re-asserted for the same
+     * reason as {@link #setHardcore}.
+     */
+    void setDifficulty(World world, Difficulty difficulty);
 
     /**
      * Typed gamerule write. Prefer this over the string form so a renamed rule

@@ -58,6 +58,12 @@ public final class GuiMyWorldsMenuMessages {
                     "<gray>Shared with you: <count></gray>",
                     Set.of("count")),
             MessageKey.of("messages.gui.my-worlds-menu.item.create.hint", "<yellow>▶ Click to create a world</yellow>"),
+            // FR-1b. On the same button as the ordinary create rather than a
+            // button of its own: the menu has one free slot for this, and the
+            // two things differ by a modifier rather than in kind.
+            MessageKey.of(
+                    "messages.gui.my-worlds-menu.item.create.hardcore-hint",
+                    "<red>▶ Right-click to create a hardcore world (permanent death)</red>"),
             MessageKey.of(
                     "messages.gui.my-worlds-menu.item.next-page.name", "<yellow><bold>Next Page ▶</bold></yellow>"));
 }
