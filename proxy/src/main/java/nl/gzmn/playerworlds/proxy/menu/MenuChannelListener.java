@@ -149,7 +149,8 @@ public final class MenuChannelListener {
                         viewService.buildMainMenu(player.getUniqueId(), player::hasPermission, correlationId);
                     case "MY_WORLDS" -> {
                         int page = parts.size() >= 3 ? parsePage(parts.get(2)) : 0;
-                        yield viewService.buildMyWorldsMenu(player.getUniqueId(), page, correlationId);
+                        yield viewService.buildMyWorldsMenu(
+                                player.getUniqueId(), player::hasPermission, page, correlationId);
                     }
                     case "WORLD" -> {
                         if (parts.size() < 3) yield null;
@@ -228,7 +229,8 @@ public final class MenuChannelListener {
                         connection,
                         player,
                         actions.create(player, name, null, hardcore),
-                        () -> viewService.buildMyWorldsMenu(player.getUniqueId(), 0, correlationId));
+                        () -> viewService.buildMyWorldsMenu(
+                                player.getUniqueId(), player::hasPermission, 0, correlationId));
             }
             case "ARCHIVE" -> {
                 if (parts.size() >= 3) {
@@ -237,7 +239,8 @@ public final class MenuChannelListener {
                             connection,
                             player,
                             actions.delete(player, worldName, true),
-                            () -> viewService.buildMyWorldsMenu(player.getUniqueId(), 0, correlationId));
+                            () -> viewService.buildMyWorldsMenu(
+                                    player.getUniqueId(), player::hasPermission, 0, correlationId));
                 }
             }
             case "RESTORE" -> {
@@ -247,7 +250,8 @@ public final class MenuChannelListener {
                             connection,
                             player,
                             actions.restore(player, worldName),
-                            () -> viewService.buildMyWorldsMenu(player.getUniqueId(), 0, correlationId));
+                            () -> viewService.buildMyWorldsMenu(
+                                    player.getUniqueId(), player::hasPermission, 0, correlationId));
                 }
             }
             case "SET_VISIBILITY" -> {

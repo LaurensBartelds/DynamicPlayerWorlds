@@ -89,6 +89,7 @@ import nl.gzmn.playerworlds.core.db.ReportRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.obs.CapabilityProbe;
@@ -275,6 +276,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
         TransferRequestRepository menuTransferRepo = new TransferRequestRepository(openedDatabase);
         WorldBanRepository menuBanRepo = new WorldBanRepository(openedDatabase);
         PlayerNameRepository menuNameRepo = new PlayerNameRepository(openedDatabase);
+        WorldUpgradeRepository menuUpgradeRepo = new WorldUpgradeRepository(openedDatabase);
 
         MenuChannel channel = new MenuChannel(this, pools);
         MenuService service = new MenuService(
@@ -283,6 +285,7 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                 menuTransferRepo,
                 menuBanRepo,
                 menuNameRepo,
+                menuUpgradeRepo,
                 channel,
                 pools,
                 this::policy,
@@ -915,7 +918,8 @@ public class GzmnWorldsPlugin extends JavaPlugin {
                         new NetworkSettings(openedDatabase), worldCaches, worldRegistry, pools.db()));
         plane.register(
                 CommandKind.APPLY_SETTINGS,
-                new ApplySettingsHandler(worldCaches, settingsCache, worldRegistry, worldFolders, platform, pools));
+                new ApplySettingsHandler(
+                        worldCaches, settingsCache, worldRegistry, worldFolders, platform, pools, this::policy));
         EjectPlayerHandler ejectHandler =
                 new EjectPlayerHandler(worldCaches, worldFolders, pools, nodeCommands, this::policy);
         plane.register(CommandKind.KICK_MEMBER, ejectHandler);

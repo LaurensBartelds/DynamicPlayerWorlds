@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.core.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 import java.util.List;
 import java.util.UUID;
@@ -72,19 +73,19 @@ class StorageQuotaResolverTest {
     @Test
     @DisplayName("admin and unlimited permission players are exempt from quotas")
     void adminAndUnlimitedAreExempt() {
-        StorageQuota quotaAdmin = StorageQuotaResolver.evaluate(UUID.randomUUID(), 1000L, List.of(), true, 5000L);
+        StorageQuota quotaAdmin = StorageQuotaResolver.evaluate(UUID.randomUUID(), 1000L, List.of(), true, 5000L, 0L);
         assertThat(quotaAdmin.unlimited()).isTrue();
         assertThat(quotaAdmin.isExceeded()).isFalse();
         assertThat(quotaAdmin.percentage()).isEqualTo(0.0);
 
         StorageQuota quotaPerm = StorageQuotaResolver.evaluate(
-                UUID.randomUUID(), 1000L, List.of("gzmn.worlds.storage.unlimited"), false, 5000L);
+                UUID.randomUUID(), 1000L, List.of("gzmn.worlds.storage.unlimited"), false, 5000L, 0L);
         assertThat(quotaPerm.unlimited()).isTrue();
         assertThat(quotaPerm.isExceeded()).isFalse();
         assertThat(quotaPerm.percentage()).isEqualTo(0.0);
 
         StorageQuota quotaAdminPerm =
-                StorageQuotaResolver.evaluate(UUID.randomUUID(), 1000L, List.of("gzmn.worlds.admin"), false, 5000L);
+                StorageQuotaResolver.evaluate(UUID.randomUUID(), 1000L, List.of("gzmn.worlds.admin"), false, 5000L, 0L);
         assertThat(quotaAdminPerm.unlimited()).isTrue();
         assertThat(quotaAdminPerm.isExceeded()).isFalse();
     }
@@ -97,7 +98,7 @@ class StorageQuotaResolverTest {
         long used = 2560L * 1024 * 1024; // 2.5 GB
 
         StorageQuota quota = StorageQuotaResolver.evaluate(
-                player, used, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024);
+                player, used, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024, 0L);
 
         assertThat(quota.playerUuid()).isEqualTo(player);
         assertThat(quota.usedBytes()).isEqualTo(used);
@@ -114,12 +115,12 @@ class StorageQuotaResolverTest {
         long limit = 10L * 1024 * 1024 * 1024;
 
         StorageQuota quotaExact = StorageQuotaResolver.evaluate(
-                player, limit, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024);
+                player, limit, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024, 0L);
         assertThat(quotaExact.isExceeded()).isTrue();
         assertThat(quotaExact.percentage()).isEqualTo(100.0);
 
         StorageQuota quotaOver = StorageQuotaResolver.evaluate(
-                player, limit + 1024L, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024);
+                player, limit + 1024L, List.of("gzmn.worlds.storage.10gb"), false, 5L * 1024 * 1024 * 1024, 0L);
         assertThat(quotaOver.isExceeded()).isTrue();
         assertThat(quotaOver.percentage()).isEqualTo(100.0);
     }
@@ -133,12 +134,12 @@ class StorageQuotaResolverTest {
 
         // 7gb is granted but not configured, so probing cannot see it and 1gb is the best answer.
         StorageQuota probed =
-                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "5gb", "10gb"), 500L);
+                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "5gb", "10gb"), 500L, 0L);
         assertThat(probed.limitBytes()).isEqualTo(1024L * 1024 * 1024);
 
         // Configure it and the same player resolves to it.
         StorageQuota configured =
-                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "7gb", "10gb"), 500L);
+                StorageQuotaResolver.evaluate(UUID.randomUUID(), 0L, holds, List.of("1gb", "7gb", "10gb"), 500L, 0L);
         assertThat(configured.limitBytes()).isEqualTo(7L * 1024 * 1024 * 1024);
     }
 
@@ -155,7 +156,7 @@ class StorageQuotaResolverTest {
     @DisplayName("probing falls back to the network default when no configured tier matches")
     void probingFallsBackToTheDefaultWhenNoTierMatches() {
         StorageQuota quota = StorageQuotaResolver.evaluate(
-                UUID.randomUUID(), 0L, permission -> false, List.of("1gb", "10gb"), 4096L);
+                UUID.randomUUID(), 0L, permission -> false, List.of("1gb", "10gb"), 4096L, 0L);
         assertThat(quota.limitBytes()).isEqualTo(4096L);
         assertThat(quota.unlimited()).isFalse();
     }
@@ -168,12 +169,13 @@ class StorageQuotaResolverTest {
                 9999L,
                 StorageQuotaResolver.PERMISSION_STORAGE_UNLIMITED::equals,
                 List.of("1gb"),
-                500L);
+                500L,
+                0L);
         assertThat(unlimited.unlimited()).isTrue();
         assertThat(unlimited.isExceeded()).isFalse();
 
         StorageQuota admin = StorageQuotaResolver.evaluate(
-                UUID.randomUUID(), 9999L, StorageQuotaResolver.PERMISSION_ADMIN::equals, List.of("1gb"), 500L);
+                UUID.randomUUID(), 9999L, StorageQuotaResolver.PERMISSION_ADMIN::equals, List.of("1gb"), 500L, 0L);
         assertThat(admin.unlimited()).isTrue();
     }
 
@@ -199,7 +201,38 @@ class StorageQuotaResolverTest {
     @Test
     @DisplayName("evaluates throws on null UUID")
     void evaluatesThrowsOnNullUuid() {
-        assertThatThrownBy(() -> StorageQuotaResolver.evaluate(null, 0L, List.of(), false, 5000L))
+        assertThatThrownBy(() -> StorageQuotaResolver.evaluate(null, 0L, List.of(), false, 5000L, 0L))
                 .isInstanceOf(NullPointerException.class);
+    }
+
+    @Test
+    @DisplayName("a purchased upgrade raises the allowance actually enforced_FR45")
+    void purchasedBytesRaiseTheEnforcedAllowance() {
+        UUID player = UUID.randomUUID();
+
+        // 5 GB of tier, 2 GB bought, 6 GB used: under the total, so not exceeded.
+        StorageQuota quota = StorageQuotaResolver.evaluate(
+                player, 6L * 1024 * 1024 * 1024, List.of(), false, 5L * 1024 * 1024 * 1024, 2L * 1024 * 1024 * 1024);
+
+        assertThat(quota.limitBytes())
+                .as("the tier stays visible on its own, so a screen can say what was bought")
+                .isEqualTo(5L * 1024 * 1024 * 1024);
+        assertThat(quota.bonusBytes()).isEqualTo(2L * 1024 * 1024 * 1024);
+        assertThat(quota.effectiveLimitBytes()).isEqualTo(7L * 1024 * 1024 * 1024);
+        assertThat(quota.isExceeded())
+                .as("the same player would have been over the limit without what they paid for")
+                .isFalse();
+        assertThat(quota.percentage()).isCloseTo(85.7, within(0.1));
+    }
+
+    @Test
+    @DisplayName("an allowance near the top of the range saturates rather than wrapping negative")
+    void effectiveLimitSaturates() {
+        StorageQuota quota = new StorageQuota(UUID.randomUUID(), 1024L, Long.MAX_VALUE, Long.MAX_VALUE, false);
+
+        // Wrapping would read as a negative limit, which every caller would see as
+        // "exceeded" -- refusing every create on the network.
+        assertThat(quota.effectiveLimitBytes()).isEqualTo(Long.MAX_VALUE);
+        assertThat(quota.isExceeded()).isFalse();
     }
 }

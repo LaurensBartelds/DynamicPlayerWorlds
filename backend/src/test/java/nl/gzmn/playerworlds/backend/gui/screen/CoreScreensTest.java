@@ -31,6 +31,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.IntentEnvelope;
 import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
@@ -66,6 +67,7 @@ class CoreScreensTest {
     private TransferRequestRepository transferRepository;
     private WorldBanRepository banRepository;
     private PlayerNameRepository nameRepository;
+    private WorldUpgradeRepository upgradeRepo;
     private Queue<Runnable> mainTasks;
     private MenuChannel channel;
     private MenuService menuService;
@@ -95,6 +97,7 @@ class CoreScreensTest {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepo,
                 channel,
                 executors,
                 NetworkPolicy::defaults);
@@ -140,7 +143,8 @@ class CoreScreensTest {
     @DisplayName("MainMenu renders navigation slots and dispatches click actions")
     void mainMenuRendersAndNavigates() throws Exception {
         PlayerMock player = server.addPlayer();
-        StorageQuota quota = new StorageQuota(player.getUniqueId(), 1024L * 1024L * 50L, 1024L * 1024L * 500L, false);
+        StorageQuota quota =
+                new StorageQuota(player.getUniqueId(), 1024L * 1024L * 50L, 1024L * 1024L * 500L, 0L, false);
         MainMenu.MainMenuData data = new MainMenu.MainMenuData(2, 5, 1, quota);
         MainMenu menu = new MainMenu(menuService, data);
 
@@ -532,7 +536,8 @@ class CoreScreensTest {
                 WorldState.READY,
                 1024L * 1024L * 15L);
 
-        StorageQuota quota = new StorageQuota(player.getUniqueId(), 1024L * 1024L * 15L, 1024L * 1024L * 100L, false);
+        StorageQuota quota =
+                new StorageQuota(player.getUniqueId(), 1024L * 1024L * 15L, 1024L * 1024L * 100L, 0L, false);
         StorageMenu menu = new StorageMenu(menuService, quota, List.of(world));
 
         Inventory inv = menu.render(player);
@@ -549,6 +554,28 @@ class CoreScreensTest {
                     && menuService.activeScreen(player).get() instanceof WorldMenu;
         });
         assertThat(menuService.activeScreen(player).get()).isInstanceOf(WorldMenu.class);
+    }
+
+    @Test
+    @DisplayName("StorageMenu shows the allowance actually enforced, purchases included_FR45")
+    void storageMenuShowsTheEnforcedAllowance() {
+        PlayerMock player = server.addPlayer();
+        // 100 MB of tier plus 50 MB bought: the screen has to say 150 MB, because that is what
+        // /world create will enforce. Showing the tier alone tells a player who paid for the
+        // space that they do not have it.
+        StorageQuota quota = new StorageQuota(
+                player.getUniqueId(), 1024L * 1024L * 15L, 1024L * 1024L * 100L, 1024L * 1024L * 50L, false);
+
+        StorageMenu menu = new StorageMenu(menuService, quota, List.of());
+        Inventory inv = menu.render(player);
+
+        List<Component> lore =
+                inv.getItem(StorageMenu.SLOT_OVERVIEW).getItemMeta().lore();
+        assertThat(lore).isNotNull();
+        assertThat(lore.stream()
+                        .map(line -> PlainTextComponentSerializer.plainText().serialize(line))
+                        .toList())
+                .anyMatch(line -> line.contains("150.00 MB"));
     }
 
     @Test

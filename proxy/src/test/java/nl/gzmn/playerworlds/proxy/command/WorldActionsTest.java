@@ -23,6 +23,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.EntitlementTiers;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
@@ -39,9 +40,12 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.StorageQuota;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
@@ -996,8 +1000,196 @@ class WorldActionsTest {
         }
     }
 
+    // --- paid tiers (FR-3c, FR-42, FR-43, FR-45) ---------------------------------
+
+    @Test
+    @DisplayName("a slots tier raises the cap above the network default_FR43")
+    void slotsTierRaisesTheCap() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player subscriber = mockPlayer(
+                owner,
+                "Alice",
+                permission -> ordinaryPermission(permission) || permission.equals("gzmn.worlds.slots.5"));
+        playersByUuid.put(owner, subscriber);
+
+        for (int i = 0; i < policy.maxWorldsPerPlayer(); i++) {
+            worlds.create(WorldId.random(), owner, "world" + i, 12345L, 5000, Visibility.PRIVATE);
+        }
+
+        // Already at the network cap of 2, where createWorldEnforcesCap shows a player
+        // without a tier is refused. No node is registered, so getting as far as placement
+        // is itself the evidence that the cap was not what stopped them.
+        ActionResult result = actions.create(subscriber, "third-world", null).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(((ActionResult.Failed) result).code())
+                .as("gzmn.worlds.slots.5 raises the cap from the network's 2")
+                .isNotEqualTo(FailureCode.CAP_REACHED);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(result.message()))
+                .doesNotContain("already own");
+    }
+
+    @Test
+    @DisplayName("a border may be raised within the allowance and never lowered_FR3c")
+    void borderRaisesButNeverLowers() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player subscriber = mockPlayer(
+                owner,
+                "Alice",
+                permission -> ordinaryPermission(permission) || permission.equals("gzmn.worlds.border.10000"));
+        playersByUuid.put(owner, subscriber);
+        WorldId id = WorldId.random();
+        worlds.create(id, owner, "home", 1L, 5000, Visibility.PRIVATE);
+
+        ActionResult raised = actions.border(subscriber, 9000, id).get();
+        assertThat(raised).isInstanceOf(ActionResult.Ok.class);
+        assertThat(worlds.findById(id).orElseThrow().borderRadius()).isEqualTo(9000);
+
+        ActionResult lowered = actions.border(subscriber, 6000, id).get();
+        assertThat(lowered).isInstanceOf(ActionResult.Failed.class);
+        assertThat(PlainTextComponentSerializer.plainText().serialize(lowered.message()))
+                .contains("raised but never lowered");
+        assertThat(worlds.findById(id).orElseThrow().borderRadius())
+                .as("a refused shrink leaves the border where it was")
+                .isEqualTo(9000);
+    }
+
+    @Test
+    @DisplayName("a border beyond the owner's allowance is refused_FR3c")
+    void borderBeyondAllowanceIsRefused() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        WorldId id = WorldId.random();
+        worlds.create(id, owner, "home", 1L, 5000, Visibility.PRIVATE);
+
+        // No tier at all, so the default radius is also the allowance.
+        ActionResult result = actions.border(player, 12000, id).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Failed.class);
+        assertThat(worlds.findById(id).orElseThrow().borderRadius()).isEqualTo(5000);
+    }
+
+    @Test
+    @DisplayName("a redeemed BORDER upgrade extends one world's allowance past the tier_FR45")
+    void redeemedBorderUpgradeExtendsOneWorld() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        WorldId upgraded = WorldId.random();
+        WorldId plain = WorldId.random();
+        worlds.create(upgraded, owner, "upgraded", 1L, 5000, Visibility.PRIVATE);
+        worlds.create(plain, owner, "plain", 2L, 5000, Visibility.PRIVATE);
+
+        WorldUpgradeRepository upgrades = actions.upgrades();
+        var grant = upgrades.grant(owner, UpgradeKind.BORDER, 3000L, "tebex-border-1");
+        assertThat(actions.redeemUpgrade(player, grant.upgrade().id(), upgraded).get())
+                .isInstanceOf(ActionResult.Ok.class);
+
+        assertThat(actions.border(player, 8000, upgraded).get()).isInstanceOf(ActionResult.Ok.class);
+        assertThat(worlds.findById(upgraded).orElseThrow().borderRadius()).isEqualTo(8000);
+
+        // The purchase was spent on one world, so the other is still on the default.
+        assertThat(actions.border(player, 8000, plain).get()).isInstanceOf(ActionResult.Failed.class);
+        assertThat(worlds.findById(plain).orElseThrow().borderRadius()).isEqualTo(5000);
+    }
+
+    @Test
+    @DisplayName("the network ceiling caps a raise whatever the owner holds_FR3c")
+    void networkCeilingCapsEveryRaise() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(
+                owner,
+                "Alice",
+                permission -> ordinaryPermission(permission) || permission.equals("gzmn.worlds.border.25000"));
+        playersByUuid.put(owner, player);
+        WorldId id = WorldId.random();
+        worlds.create(id, owner, "home", 1L, 5000, Visibility.PRIVATE);
+
+        // NFR-3 bounds disk by the border, so worlds.max-border-radius applies to a
+        // subscriber too. Lower it below their tier and the ceiling is what they get.
+        policy = withMaxBorderRadius(NetworkPolicy.defaults(), 9000);
+
+        assertThat(actions.border(player, 12000, id).get()).isInstanceOf(ActionResult.Failed.class);
+        assertThat(actions.border(player, 9000, id).get()).isInstanceOf(ActionResult.Ok.class);
+        assertThat(worlds.findById(id).orElseThrow().borderRadius()).isEqualTo(9000);
+    }
+
+    @Test
+    @DisplayName("a redeemed STORAGE upgrade raises the allowance the create path enforces_FR45")
+    void redeemedStorageUpgradeRaisesTheQuota() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+        WorldId id = WorldId.random();
+        worlds.create(id, owner, "home", 1L, 5000, Visibility.PRIVATE);
+
+        assertThat(actions.quotaFor(player, policy).bonusBytes()).isZero();
+
+        WorldUpgradeRepository upgrades = actions.upgrades();
+        var grant = upgrades.grant(owner, UpgradeKind.STORAGE, 2L * 1024 * 1024 * 1024, "tebex-storage-1");
+        assertThat(actions.redeemUpgrade(player, grant.upgrade().id(), id).get())
+                .isInstanceOf(ActionResult.Ok.class);
+
+        StorageQuota quota = actions.quotaFor(player, policy);
+        assertThat(quota.bonusBytes()).isEqualTo(2L * 1024 * 1024 * 1024);
+        assertThat(quota.effectiveLimitBytes())
+                .as("the purchase is added to the tier rather than replacing it")
+                .isEqualTo(quota.limitBytes() + 2L * 1024 * 1024 * 1024);
+    }
+
+    /** {@link NetworkPolicy} is a wide record; this changes the one field a test cares about. */
+    private static NetworkPolicy withMaxBorderRadius(NetworkPolicy base, int ceiling) {
+        return new NetworkPolicy(
+                base.maxWorldsPerPlayer(),
+                base.idleUnload(),
+                base.unloadRetry(),
+                base.defaultBorderRadius(),
+                base.netherBorderDivisor(),
+                base.pregenSpawnChunks(),
+                base.createStallBudget(),
+                base.defaultVisibility(),
+                base.browsePageSize(),
+                base.allowedCommands(),
+                base.archiveAfterDays(),
+                base.archiveWarnDays(),
+                base.archiveCompression(),
+                base.inviteExpiry(),
+                base.transferPendingExpiry(),
+                base.transferExpiry(),
+                base.holdingTimeout(),
+                base.maintenanceInterval(),
+                base.controlPollInterval(),
+                base.controlClaimTimeout(),
+                base.leaseDuration(),
+                base.deadAfter(),
+                base.fenceSafetyMargin(),
+                base.maxWorldsPerNode(),
+                base.maxHeapPercent(),
+                base.minTps(),
+                base.syncInterval(),
+                base.maxSyncFailure(),
+                base.snapshotQuiet(),
+                base.snapshotQuiesceTimeout(),
+                base.snapshotCopyRetries(),
+                base.verifyRegionStructure(),
+                base.commitTimeout(),
+                base.coldLoadBudget(),
+                base.manifestRetentionCount(),
+                base.parallelTransfers(),
+                base.localCacheMaxBytes(),
+                base.quarantineMaxBytes(),
+                base.quarantineRetainDays(),
+                base.excludeGlobs(),
+                base.defaultStorageLimitBytes(),
+                base.storageQuotaTiers(),
+                ceiling,
+                base.slotTiers(),
+                base.borderTiers());
+    }
+
     private Player mockPlayer(UUID uuid, String name) {
-        return mockPlayer(uuid, name, permission -> true);
+        return mockPlayer(uuid, name, WorldActionsTest::ordinaryPermission);
     }
 
     /** A player Velocity will happily hand off to another server, for the paths that connect one. */
@@ -1011,8 +1203,12 @@ class WorldActionsTest {
                     if (method.getName().equals("getUniqueId")) return uuid;
                     if (method.getName().equals("getUsername")) return name;
                     if (method.getName().equals("getCurrentServer")) return Optional.empty();
-                    if (method.getName().equals("getPermissionValue")) return Tristate.TRUE;
-                    if (method.getName().equals("hasPermission")) return true;
+                    if (method.getName().equals("getPermissionValue")) {
+                        return ordinaryPermission((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;
+                    }
+                    if (method.getName().equals("hasPermission")) {
+                        return ordinaryPermission((String) args[0]);
+                    }
                     if (method.getName().equals("createConnectionRequest")) return requestBuilder;
                     if (method.getName().equals("sendMessage") && args != null && args.length > 0) {
                         messagesByPlayer
@@ -1046,6 +1242,19 @@ class WorldActionsTest {
 
     private Player mockPlayer(UUID uuid, String name, Predicate<String> permissions) {
         return mockPlayer(uuid, name, permissions, Optional.empty());
+    }
+
+    /**
+     * The permission set a test player is meant to have: every ordinary node, and no
+     * subscription tier.
+     *
+     * <p>These mocks predate FR-43 and answered {@code true} to everything, which now reads as
+     * a player holding the top {@code gzmn.worlds.slots.<n>} tier on the network — so the cap
+     * tests stopped hitting a cap. A test that wants a subscriber grants it a tier explicitly.
+     */
+    private static boolean ordinaryPermission(String permission) {
+        return !permission.startsWith(EntitlementTiers.PERMISSION_SLOTS_PREFIX)
+                && !permission.startsWith(EntitlementTiers.PERMISSION_BORDER_PREFIX);
     }
 
     private Player mockPlayer(

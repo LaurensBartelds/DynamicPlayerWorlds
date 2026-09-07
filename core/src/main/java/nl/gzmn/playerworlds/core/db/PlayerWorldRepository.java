@@ -612,6 +612,39 @@ public final class PlayerWorldRepository extends Repository {
      *
      * @return true if the world was updated
      */
+    /**
+     * Raises a world's border radius (FR-3c).
+     *
+     * <p>The {@code border_radius < ?} predicate is the requirement, not a convenience: FR-3c
+     * permits raising and forbids lowering, and putting that in the statement means no future
+     * caller can lower one by forgetting to check. Shrinking a border strands whatever was
+     * built in the ring it removes, on the far side of a barrier the player cannot cross.
+     *
+     * <p>Zero rows affected therefore means "not larger than it already is", which is an
+     * outcome the caller reports rather than an error.
+     *
+     * @param id the world
+     * @param newRadius the radius to raise to, in blocks
+     * @return true when the border was raised
+     */
+    public boolean raiseBorderRadius(WorldId id, int newRadius) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        if (newRadius < 1) {
+            throw new IllegalArgumentException("newRadius must be at least 1, was: " + newRadius);
+        }
+        return database.inTransaction(connection -> execute(connection, """
+                        UPDATE player_world
+                           SET border_radius = ?
+                         WHERE id = ?
+                           AND border_radius < ?
+                        """, statement -> {
+                    statement.setInt(1, newRadius);
+                    statement.setObject(2, id.value());
+                    statement.setInt(3, newRadius);
+                })
+                > 0);
+    }
+
     public boolean updateSettings(WorldId id, String settingsJson) throws SQLException {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(settingsJson, "settingsJson");

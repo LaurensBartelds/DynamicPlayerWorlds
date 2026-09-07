@@ -15,6 +15,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
@@ -39,6 +40,7 @@ class MenuViewServiceTest {
     private TransferRequestRepository transferRepo;
     private WorldBanRepository banRepo;
     private PlayerNameRepository nameRepo;
+    private WorldUpgradeRepository upgradeRepo;
     private MenuViewService service;
 
     private UUID playerUuid;
@@ -55,9 +57,17 @@ class MenuViewServiceTest {
         transferRepo = new TransferRequestRepository(database);
         banRepo = new WorldBanRepository(database);
         nameRepo = new PlayerNameRepository(database);
+        upgradeRepo = new WorldUpgradeRepository(database);
 
         service = new MenuViewService(
-                worldRepo, memberRepo, transferRepo, banRepo, nameRepo, NetworkPolicy::defaults, executors);
+                worldRepo,
+                memberRepo,
+                transferRepo,
+                banRepo,
+                nameRepo,
+                upgradeRepo,
+                NetworkPolicy::defaults,
+                executors);
 
         playerUuid = UUID.randomUUID();
         playerName = "TestPlayer";
@@ -173,8 +183,8 @@ class MenuViewServiceTest {
             worldRepo.transitionState(archivedWorld.id(), WorldState.CREATING, WorldState.READY);
             worldRepo.transitionState(archivedWorld.id(), WorldState.READY, WorldState.ARCHIVED);
 
-            RenderMenuPayload payload =
-                    service.buildMyWorldsMenu(playerUuid, 0, 1002L).get();
+            RenderMenuPayload payload = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1002L)
+                    .get();
 
             assertThat(payload.correlationId()).isEqualTo(1002L);
             assertThat(payload.screenType()).isEqualTo("MY_WORLDS");
@@ -222,15 +232,15 @@ class MenuViewServiceTest {
                 worldRepo.transitionState(w.id(), WorldState.CREATING, WorldState.READY);
             }
 
-            RenderMenuPayload page0 =
-                    service.buildMyWorldsMenu(playerUuid, 0, 1003L).get();
+            RenderMenuPayload page0 = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1003L)
+                    .get();
             assertThat(page0.title()).isEqualTo("§8My Worlds (Page 1/2)");
             assertThat(page0.items().get(53).materialName()).isEqualTo("ARROW");
             assertThat(page0.items().get(53).actionTag()).isEqualTo("NAV:MY_WORLDS:1");
             assertThat(page0.items().get(45).materialName()).isEqualTo("GRAY_STAINED_GLASS_PANE");
 
-            RenderMenuPayload page1 =
-                    service.buildMyWorldsMenu(playerUuid, 1, 1004L).get();
+            RenderMenuPayload page1 = service.buildMyWorldsMenu(playerUuid, node -> false, 1, 1004L)
+                    .get();
             assertThat(page1.title()).isEqualTo("§8My Worlds (Page 2/2)");
             assertThat(page1.items().get(45).materialName()).isEqualTo("ARROW");
             assertThat(page1.items().get(45).actionTag()).isEqualTo("NAV:MY_WORLDS:0");
@@ -279,8 +289,8 @@ class MenuViewServiceTest {
                     Duration.ofMinutes(10));
             memberRepo.invite(unaccepted.id(), playerUuid, hostUuid, Duration.ofMinutes(10));
 
-            RenderMenuPayload payload =
-                    service.buildMyWorldsMenu(playerUuid, 0, 1010L).get();
+            RenderMenuPayload payload = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1010L)
+                    .get();
 
             MenuItemDescriptor owned = payload.items().get(0);
             assertThat(owned.displayName()).contains("mine");

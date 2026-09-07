@@ -462,6 +462,75 @@ public final class CommandMessages {
                     "<gray>  <world> - <size> - <state></gray>",
                     Set.of("world", "size", "state")),
 
+            // --- border (FR-3c) ------------------------------------------------------
+            MessageKey.of(
+                    "messages.command.border.success",
+                    "<green>Border of <world> raised to <radius> blocks (nether: <nether>).</green>",
+                    Set.of("world", "radius", "nether")),
+            MessageKey.of(
+                    "messages.command.border.not-larger",
+                    "<red><world> is already at <current> blocks, so <radius> would shrink it."
+                            + " A border can be raised but never lowered - anything built in the ring"
+                            + " it removed would be stranded outside it.</red>",
+                    Set.of("world", "current", "radius")),
+            MessageKey.of(
+                    "messages.command.border.beyond-allowance",
+                    "<red><radius> is beyond what you may set: your allowance is <allowed> (network ceiling <ceiling>).</red>",
+                    Set.of("radius", "allowed", "ceiling")),
+            MessageKey.of(
+                    "messages.command.border.invalid",
+                    "<red><radius> is not a border radius; give a whole number of blocks above zero.</red>",
+                    Set.of("radius")),
+            MessageKey.of(
+                    "messages.command.border.not-raised",
+                    "<red>That border was not raised - something else changed it first. Check it and try again.</red>"),
+
+            // --- upgrades (FR-44, FR-45) ---------------------------------------------
+            MessageKey.of("messages.command.upgrades.none", "<gray>You have no purchased upgrades.</gray>"),
+            MessageKey.of("messages.command.upgrades.header", "<gray>Your upgrades:</gray>"),
+            MessageKey.of(
+                    "messages.command.upgrades.entry-unspent",
+                    "<gray>  <yellow><kind> <amount></yellow> - unspent; /world upgrades redeem <id> [world]</gray>",
+                    Set.of("kind", "amount", "id")),
+            MessageKey.of(
+                    "messages.command.upgrades.entry-spent",
+                    "<gray>  <kind> <amount> - on <world></gray>",
+                    Set.of("kind", "amount", "world")),
+            MessageKey.of(
+                    "messages.command.upgrades.already-spent",
+                    "<red>That upgrade has already been spent on a world.</red>"),
+            MessageKey.of("messages.command.upgrades.not-yours", "<red>No unspent upgrade of yours has that id.</red>"),
+            MessageKey.of(
+                    "messages.command.upgrades.redeemed-storage",
+                    "<green><size> added to your storage allowance, from the upgrade you spent on <world>.</green>",
+                    Set.of("size", "world")),
+            MessageKey.of(
+                    "messages.command.upgrades.redeemed-border",
+                    "<green><world> may now be enlarged by a further <blocks> blocks - use /world border to set it.</green>",
+                    Set.of("world", "blocks")),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.granted",
+                    "<green>Granted <kind> <amount> (<reference>), id <id>.</green>",
+                    Set.of("kind", "amount", "reference", "id")),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.already-granted",
+                    "<gray><reference> was already delivered as <kind> <amount>, id <id>; nothing granted.</gray>",
+                    Set.of("kind", "amount", "reference", "id")),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.revoked",
+                    "<green>Revoked <reference>.</green>",
+                    Set.of("reference")),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.not-revocable",
+                    "<red><reference> is unknown or already spent on a world; a spent upgrade cannot be revoked.</red>",
+                    Set.of("reference")),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.invalid-amount",
+                    "<red>An upgrade amount must be a positive number.</red>"),
+            MessageKey.of(
+                    "messages.command.admin.upgrade.usage",
+                    "<gray>/world admin upgrade grant <player> storage|border <amount> <reference></gray>"),
+
             // --- WorldCommand's own direct replies (usage, admin subtree) ----------------
             MessageKey.of(
                     "messages.command.player-only",

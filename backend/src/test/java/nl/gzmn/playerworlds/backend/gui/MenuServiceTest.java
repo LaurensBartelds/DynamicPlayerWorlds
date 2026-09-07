@@ -22,6 +22,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.testing.TestDatabase;
@@ -56,6 +57,7 @@ class MenuServiceTest {
     private TransferRequestRepository transferRepository;
     private WorldBanRepository banRepository;
     private PlayerNameRepository nameRepository;
+    private WorldUpgradeRepository upgradeRepo;
     private Queue<Runnable> mainTasks;
     private MenuChannel channel;
     private MenuService menuService;
@@ -86,6 +88,7 @@ class MenuServiceTest {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepo,
                 channel,
                 executors,
                 NetworkPolicy::defaults);

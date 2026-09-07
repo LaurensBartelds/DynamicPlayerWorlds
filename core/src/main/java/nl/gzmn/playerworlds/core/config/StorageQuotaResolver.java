@@ -114,16 +114,22 @@ public final class StorageQuotaResolver {
      * @param permissions collection of permission strings assigned to the player
      * @param isAdmin whether the player is an admin
      * @param defaultLimitBytes default network policy quota limit
+     * @param bonusBytes bytes from redeemed one-time {@code STORAGE} upgrades (FR-45)
      * @return evaluated StorageQuota
      */
     public static StorageQuota evaluate(
-            UUID playerUuid, long usedBytes, Collection<String> permissions, boolean isAdmin, long defaultLimitBytes) {
+            UUID playerUuid,
+            long usedBytes,
+            Collection<String> permissions,
+            boolean isAdmin,
+            long defaultLimitBytes,
+            long bonusBytes) {
         Objects.requireNonNull(playerUuid, "playerUuid");
 
         boolean unlimited = isAdmin || hasUnlimitedPermission(permissions);
         long limitBytes = resolveLimitBytes(permissions, isAdmin, defaultLimitBytes);
 
-        return new StorageQuota(playerUuid, usedBytes, limitBytes, unlimited);
+        return new StorageQuota(playerUuid, usedBytes, limitBytes, bonusBytes, unlimited);
     }
 
     private static boolean hasUnlimitedPermission(Collection<String> permissions) {
@@ -162,7 +168,7 @@ public final class StorageQuotaResolver {
      *
      * <p>Velocity's {@code PermissionSubject} answers permission queries per node and cannot
      * list what a player holds, so a tier that is neither configured nor asked about is invisible
-     * here. Prefer {@link #evaluate(UUID, long, Collection, boolean, long)} wherever the granted
+     * here. Prefer {@link #evaluate(UUID, long, Collection, boolean, long, long)} wherever the granted
      * permissions can be enumerated — LuckPerms can, and through that overload every tier works
      * whether or not an operator remembered to configure it.
      *
@@ -171,6 +177,7 @@ public final class StorageQuotaResolver {
      * @param holdsPermission answers whether the player holds one permission node
      * @param tiers configured tier suffixes to ask about
      * @param defaultLimitBytes default network policy quota limit
+     * @param bonusBytes bytes from redeemed one-time {@code STORAGE} upgrades (FR-45)
      * @return evaluated StorageQuota
      */
     public static StorageQuota evaluate(
@@ -178,7 +185,8 @@ public final class StorageQuotaResolver {
             long usedBytes,
             Predicate<String> holdsPermission,
             Collection<String> tiers,
-            long defaultLimitBytes) {
+            long defaultLimitBytes,
+            long bonusBytes) {
         Objects.requireNonNull(playerUuid, "playerUuid");
         Objects.requireNonNull(holdsPermission, "holdsPermission");
 
@@ -186,7 +194,8 @@ public final class StorageQuotaResolver {
                 holdsPermission.test(PERMISSION_ADMIN) || holdsPermission.test(PERMISSION_STORAGE_UNLIMITED);
         List<String> held =
                 candidatePermissions(tiers).stream().filter(holdsPermission).toList();
-        return new StorageQuota(playerUuid, usedBytes, resolveLimitBytes(held, false, defaultLimitBytes), unlimited);
+        return new StorageQuota(
+                playerUuid, usedBytes, resolveLimitBytes(held, false, defaultLimitBytes), bonusBytes, unlimited);
     }
 
     /**

@@ -1,6 +1,8 @@
 # Implementation Plan 06 — Paid Tiers
 
-Status: **in progress**
+Status: **T1–T8 landed**, `./gradlew check` green. T9 is partly done: the
+storage screens show the purchased allowance, and redeeming is `/world upgrades
+redeem` rather than a menu entry. See §5.
 Covers: FR-3c and FR-41–FR-47, added to the specification by this change
 Spec baseline: `docs/spec/v0.4.md` (§2, §4, §5.1, §5.10, §6, §7 amended)
 Predecessors: `05-audit-remediation.md`
@@ -154,7 +156,38 @@ redeem entry when the viewer owns an unredeemed upgrade.
 - **No border shrinking**, at any privilege level. An admin who must undo an
   enlargement edits the row.
 
-## 4. Open question
+## 4. What landed, and where it differs from §2
+
+- **T1–T8 as written.** One addition worth naming: `world_upgrade` carries a
+  `CHECK ((world_id IS NULL) = (redeemed_at IS NULL))` and a `BEFORE DELETE`
+  trigger on `player_world`. The foreign key's own `ON DELETE SET NULL` clears
+  `world_id` and would leave `redeemed_at` behind, tripping that check; the
+  trigger clears the pair together. Half a redemption would leave every reader
+  to decide for itself which of the two columns means "redeemed".
+- **`StorageQuota` has no four-argument constructor.** Every construction site
+  states the purchased bytes, because a site that forgets refuses a create to
+  somebody who paid for the space, and a defaulted zero would compile.
+- **The proxy's test mocks changed.** They answered `true` to every permission,
+  which under FR-43 reads as a player holding the top slots tier — so the cap
+  tests stopped hitting a cap. They now answer `true` to every *ordinary* node
+  and no tier. This is worth knowing before writing another one.
+
+## 5. Still open
+
+- **T9 is half done.** The storage screens show the purchased allowance and the
+  effective limit (a player who bought storage sees it). There is no redeem
+  entry in the world menu yet: `/world upgrades redeem <id> [world]` is the only
+  way to spend one. The command is the load-bearing half — the menu entry is a
+  second route to it.
+- **The GUI reads tiers by probing, the command by enumeration.** `/world
+  storage` goes through `StorageTiers`, which uses LuckPerms where it is
+  installed; `MenuViewService` only has a permission predicate and so can only
+  ask about configured tiers. This predates paid tiers — the storage screen
+  already behaved this way — but it now affects the slot cap the menu prints
+  too. Fixing it means giving `MenuViewService` the `Player` rather than a
+  `Predicate`, which is a wider change than this plan needed.
+
+## 6. Open question
 
 - **OQ-P1: what an operator should do about a subscriber who lapses while over
   the slot cap.** FR-46 settles the behaviour — they keep every world and may

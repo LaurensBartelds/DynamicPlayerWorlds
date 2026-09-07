@@ -25,6 +25,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.IntentEnvelope;
 import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
@@ -58,6 +59,7 @@ class SocialAndSettingsScreensTest {
     private TransferRequestRepository transferRepository;
     private WorldBanRepository banRepository;
     private PlayerNameRepository nameRepository;
+    private WorldUpgradeRepository upgradeRepo;
     private Queue<Runnable> mainTasks;
     private MenuChannel channel;
     private MenuService menuService;
@@ -87,6 +89,7 @@ class SocialAndSettingsScreensTest {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepo,
                 channel,
                 executors,
                 NetworkPolicy::defaults);

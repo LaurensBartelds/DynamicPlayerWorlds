@@ -91,6 +91,7 @@ class SchemaTest {
                         "player_world_profile",
                         "player_world_report",
                         "player_world_transfer_request",
+                        "world_upgrade",
                         "worlds_node");
     }
 

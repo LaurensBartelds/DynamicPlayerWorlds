@@ -74,7 +74,10 @@ public record NetworkPolicy(
         int quarantineRetainDays,
         List<String> excludeGlobs,
         long defaultStorageLimitBytes,
-        List<String> storageQuotaTiers) {
+        List<String> storageQuotaTiers,
+        int maxBorderRadius,
+        List<String> slotTiers,
+        List<String> borderTiers) {
 
     // --- key names (the network_setting primary key) -----------------------
 
@@ -82,6 +85,22 @@ public record NetworkPolicy(
     public static final String KEY_IDLE_UNLOAD_MINUTES = "worlds.idle-unload-minutes";
     public static final String KEY_UNLOAD_RETRY_MINUTES = "worlds.unload-retry-minutes";
     public static final String KEY_DEFAULT_BORDER_RADIUS = "worlds.default-border-radius";
+
+    /**
+     * The ceiling FR-3c checks a border raise against, whatever the owner is entitled to.
+     *
+     * <p>NFR-3 bounds a world's disk usage by its border and by nothing else, so this is the
+     * only thing standing between a mistyped {@code gzmn.worlds.border.<radius>} tier and a
+     * node filling its disk.
+     */
+    public static final String KEY_MAX_BORDER_RADIUS = "worlds.max-border-radius";
+
+    /** {@code gzmn.worlds.slots.<n>} tiers an operator has granted (FR-43). */
+    public static final String KEY_SLOT_TIERS = "worlds.slot-tiers";
+
+    /** {@code gzmn.worlds.border.<radius>} tiers an operator has granted (FR-43). */
+    public static final String KEY_BORDER_TIERS = "worlds.border-tiers";
+
     public static final String KEY_NETHER_BORDER_DIVISOR = "worlds.nether-border-divisor";
     public static final String KEY_PREGEN_SPAWN_CHUNKS = "worlds.pregen-spawn-chunks";
     public static final String KEY_CREATE_STALL_BUDGET_MS = "worlds.create-stall-budget-ms";
@@ -230,6 +249,22 @@ public record NetworkPolicy(
 
     public static final long DEFAULT_STORAGE_LIMIT_BYTES = 5L * 1024 * 1024 * 1024;
 
+    /**
+     * Five times the default radius (spec §7).
+     *
+     * <p>At NFR-3's own figures the default 5000 is already on the order of a thousand files
+     * per world; this is the point past which a single world costs a node more disk than the
+     * pool is sized for, and an operator who wants more says so explicitly.
+     */
+    public static final int DEFAULT_MAX_BORDER_RADIUS = 25_000;
+
+    /** A ladder covering the slot counts a network is likely to sell, smallest first. */
+    public static final List<String> DEFAULT_SLOT_TIERS = List.of("3", "4", "5", "8", "10", "15", "20", "25", "50");
+
+    /** A ladder covering the border radii a network is likely to sell, smallest first. */
+    public static final List<String> DEFAULT_BORDER_TIERS =
+            List.of("7500", "10000", "12500", "15000", "20000", "25000");
+
     public NetworkPolicy {
         Objects.requireNonNull(idleUnload, "idleUnload");
         Objects.requireNonNull(unloadRetry, "unloadRetry");
@@ -256,6 +291,8 @@ public record NetworkPolicy(
         Objects.requireNonNull(coldLoadBudget, "coldLoadBudget");
         Objects.requireNonNull(excludeGlobs, "excludeGlobs");
         Objects.requireNonNull(storageQuotaTiers, "storageQuotaTiers");
+        Objects.requireNonNull(slotTiers, "slotTiers");
+        Objects.requireNonNull(borderTiers, "borderTiers");
         if (defaultStorageLimitBytes < 0) {
             throw new IllegalArgumentException(
                     "defaultStorageLimitBytes must not be negative: " + defaultStorageLimitBytes);
@@ -264,6 +301,8 @@ public record NetworkPolicy(
         archiveWarnDays = List.copyOf(archiveWarnDays);
         excludeGlobs = List.copyOf(excludeGlobs);
         storageQuotaTiers = List.copyOf(storageQuotaTiers);
+        slotTiers = List.copyOf(slotTiers);
+        borderTiers = List.copyOf(borderTiers);
     }
 
     /** Specification defaults, used when {@code network_setting} has no row. */
@@ -310,7 +349,10 @@ public record NetworkPolicy(
                 DEFAULT_QUARANTINE_RETAIN_DAYS,
                 DEFAULT_EXCLUDE_GLOBS,
                 DEFAULT_STORAGE_LIMIT_BYTES,
-                DEFAULT_STORAGE_QUOTA_TIERS);
+                DEFAULT_STORAGE_QUOTA_TIERS,
+                DEFAULT_MAX_BORDER_RADIUS,
+                DEFAULT_SLOT_TIERS,
+                DEFAULT_BORDER_TIERS);
     }
 
     /**
@@ -373,7 +415,10 @@ public record NetworkPolicy(
                 intVal(rawJsonByKey, KEY_QUARANTINE_RETAIN_DAYS, DEFAULT_QUARANTINE_RETAIN_DAYS),
                 stringList(rawJsonByKey, KEY_EXCLUDE_GLOBS, DEFAULT_EXCLUDE_GLOBS),
                 gib(rawJsonByKey, KEY_DEFAULT_STORAGE_LIMIT_GB, DEFAULT_STORAGE_LIMIT_BYTES),
-                stringList(rawJsonByKey, KEY_STORAGE_QUOTA_TIERS, DEFAULT_STORAGE_QUOTA_TIERS));
+                stringList(rawJsonByKey, KEY_STORAGE_QUOTA_TIERS, DEFAULT_STORAGE_QUOTA_TIERS),
+                intVal(rawJsonByKey, KEY_MAX_BORDER_RADIUS, DEFAULT_MAX_BORDER_RADIUS),
+                stringList(rawJsonByKey, KEY_SLOT_TIERS, DEFAULT_SLOT_TIERS),
+                stringList(rawJsonByKey, KEY_BORDER_TIERS, DEFAULT_BORDER_TIERS));
     }
 
     private static int intVal(Map<String, String> raw, String key, int defaultValue) {

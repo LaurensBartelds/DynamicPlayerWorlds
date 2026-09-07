@@ -1,5 +1,7 @@
 package nl.gzmn.playerworlds.proxy.command;
 
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.builder.RequiredArgumentBuilder;
@@ -50,6 +52,7 @@ import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.OpenMenu;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.proxy.menu.MenuChannelListener;
@@ -98,6 +101,8 @@ public final class WorldCommand {
             "unban",
             "bans",
             "storage",
+            "border",
+            "upgrades",
             "admin");
 
     /**
@@ -122,7 +127,17 @@ public final class WorldCommand {
 
     /** Subcommands of {@code /world admin}, for the usage line and for tests. */
     public static final List<String> ADMIN_SUBCOMMANDS = List.of(
-            "list", "unload", "migrate", "drain", "transfer", "storage", "archive", "restore", "delete", "message");
+            "list",
+            "unload",
+            "migrate",
+            "drain",
+            "transfer",
+            "storage",
+            "archive",
+            "restore",
+            "delete",
+            "message",
+            "upgrade");
 
     /**
      * Subcommands that belong to the backend and must be forwarded (OQ-15).
@@ -534,6 +549,23 @@ public final class WorldCommand {
                     }
                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                 }))
+                .then(BrigadierCommand.literalArgumentBuilder("border")
+                        .then(BrigadierCommand.requiredArgumentBuilder("radius", IntegerArgumentType.integer(1))
+                                .executes(context -> border(context, null))
+                                .then(worldArgument().executes(context -> border(context, worldName(context))))))
+                .then(BrigadierCommand.literalArgumentBuilder("upgrades")
+                        .executes(context -> {
+                            Player caller = playerOrNull(context);
+                            if (caller != null) {
+                                deliver(caller, actions.listUpgrades(caller));
+                            }
+                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                        })
+                        .then(BrigadierCommand.literalArgumentBuilder("redeem")
+                                .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
+                                        .executes(context -> redeemUpgrade(context, null))
+                                        .then(worldArgument()
+                                                .executes(context -> redeemUpgrade(context, worldName(context)))))))
                 .then(BrigadierCommand.literalArgumentBuilder("bans")
                         .executes(context -> listBans(context, null))
                         .then(worldArgument().executes(context -> listBans(context, worldName(context)))))
@@ -617,6 +649,43 @@ public final class WorldCommand {
                                     adminStorage(context.getSource(), StringArgumentType.getString(context, "player"));
                                     return com.mojang.brigadier.Command.SINGLE_SUCCESS;
                                 })))
+                .then(BrigadierCommand.literalArgumentBuilder("upgrade")
+                        .executes(context -> {
+                            var _ = info(context.getSource(), "messages.command.admin.upgrade.usage");
+                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                        })
+                        // FR-44: the whole integration surface a webstore needs. Idempotent on
+                        // <reference>, so a retried delivery grants one upgrade.
+                        .then(BrigadierCommand.literalArgumentBuilder("grant")
+                                .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                        .suggests(this::suggestOnlinePlayers)
+                                        .then(BrigadierCommand.requiredArgumentBuilder(
+                                                        "kind", StringArgumentType.word())
+                                                .then(BrigadierCommand.requiredArgumentBuilder(
+                                                                "amount", LongArgumentType.longArg(1))
+                                                        .then(BrigadierCommand.requiredArgumentBuilder(
+                                                                        "reference", StringArgumentType.word())
+                                                                .executes(context -> {
+                                                                    adminUpgradeGrant(context);
+                                                                    return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                                                }))))))
+                        .then(BrigadierCommand.literalArgumentBuilder("revoke")
+                                .then(BrigadierCommand.requiredArgumentBuilder("reference", StringArgumentType.word())
+                                        .executes(context -> {
+                                            CommandSource source = context.getSource();
+                                            String reference = StringArgumentType.getString(context, "reference");
+                                            runAsAdmin(source, () -> deliver(source, actions.revokeUpgrade(reference)));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        })))
+                        .then(BrigadierCommand.literalArgumentBuilder("list")
+                                .then(BrigadierCommand.requiredArgumentBuilder("player", StringArgumentType.word())
+                                        .suggests(this::suggestOnlinePlayers)
+                                        .executes(context -> {
+                                            adminUpgradeList(
+                                                    context.getSource(),
+                                                    StringArgumentType.getString(context, "player"));
+                                            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+                                        }))))
                 .then(BrigadierCommand.literalArgumentBuilder("archive")
                         .then(BrigadierCommand.requiredArgumentBuilder("id", StringArgumentType.word())
                                 .executes(context -> {
@@ -1026,6 +1095,45 @@ public final class WorldCommand {
     }
 
     /** {@code /world admin storage <player>} — another player's footprint, for support. */
+    /** {@code /world admin upgrade grant <player> <kind> <amount> <reference>} — FR-44. */
+    private void adminUpgradeGrant(CommandContext<CommandSource> context) {
+        CommandSource source = context.getSource();
+        String targetName = StringArgumentType.getString(context, "player");
+        String kindRaw = StringArgumentType.getString(context, "kind");
+        long amount = LongArgumentType.getLong(context, "amount");
+        String reference = StringArgumentType.getString(context, "reference");
+
+        Optional<UpgradeKind> kind = UpgradeKind.parse(kindRaw);
+        if (kind.isEmpty()) {
+            var _ = error(source, "messages.command.admin.upgrade.usage");
+            return;
+        }
+        runAsAdmin(source, () -> {
+            // Resolved from player_name rather than from a connection, so a store can deliver
+            // to somebody who is not online -- which is the normal case (FR-44).
+            Optional<UUID> target = actions.resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                var _ = error(
+                        source, "messages.command.generic.player-not-found", Placeholders.text("player", targetName));
+                return;
+            }
+            deliver(source, actions.grantUpgrade(target.get(), kind.get(), amount, reference));
+        });
+    }
+
+    /** {@code /world admin upgrade list <player>}. */
+    private void adminUpgradeList(CommandSource source, String targetName) {
+        runAsAdmin(source, () -> {
+            Optional<UUID> target = actions.resolvePlayer(targetName);
+            if (target.isEmpty()) {
+                var _ = error(
+                        source, "messages.command.generic.player-not-found", Placeholders.text("player", targetName));
+                return;
+            }
+            deliver(source, actions.listUpgradesOf(target.get()));
+        });
+    }
+
     private void adminStorage(CommandSource source, String targetName) {
         NetworkPolicy current = policy.get();
         runAsAdmin(source, () -> {
@@ -1036,10 +1144,13 @@ public final class WorldCommand {
             }
             UUID uuid = target.get();
             long used = worlds.totalStorageUsedBy(uuid);
+            // Purchases are rows, so they are readable for an offline player even though the
+            // subscription tier above them is not (FR-41).
+            long bought = actions.upgrades().bonusStorageBytes(uuid);
             Optional<Player> online = proxy.getPlayer(uuid);
             StorageQuota quota = online.isPresent()
-                    ? storageTiers.evaluate(online.get(), used, current).quota()
-                    : new StorageQuota(uuid, used, current.defaultStorageLimitBytes(), false);
+                    ? storageTiers.evaluate(online.get(), used, current, bought).quota()
+                    : new StorageQuota(uuid, used, current.defaultStorageLimitBytes(), bought, false);
             actions.renderStorage(source, targetName + "'s", quota, worlds.listOwnedBy(uuid));
             if (online.isEmpty()) {
                 info(source, "messages.command.admin.storage.offline-note");
@@ -1472,6 +1583,36 @@ public final class WorldCommand {
             String targetName = StringArgumentType.getString(context, "player");
             deliverForWorld(caller, world, worldId -> actions.unban(caller, targetName, worldId));
         }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    /** {@code /world border <radius> [world]} — FR-3c. */
+    private int border(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller != null) {
+            int radius = IntegerArgumentType.getInteger(context, "radius");
+            deliverForWorld(caller, world, worldId -> actions.border(caller, radius, worldId));
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    /** {@code /world upgrades redeem <id> [world]} — FR-45. */
+    private int redeemUpgrade(CommandContext<CommandSource> context, @Nullable String world) {
+        Player caller = playerOrNull(context);
+        if (caller == null) {
+            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+        }
+        String raw = StringArgumentType.getString(context, "id");
+        UUID upgradeId;
+        try {
+            upgradeId = UUID.fromString(raw);
+        } catch (IllegalArgumentException e) {
+            // The id comes off their own /world upgrades listing, so a malformed one is a
+            // typo rather than an attack; say so instead of failing an action.
+            var _ = error(caller, "messages.command.upgrades.not-yours");
+            return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+        }
+        deliverForWorld(caller, world, worldId -> actions.redeemUpgrade(caller, upgradeId, worldId));
         return com.mojang.brigadier.Command.SINGLE_SUCCESS;
     }
 

@@ -235,6 +235,7 @@ public final class GzmnWorldsProxyPlugin {
                 transferRequests,
                 banRepository,
                 this.playerNames,
+                worldActions.upgrades(),
                 this::policy,
                 pools,
                 this::messages);

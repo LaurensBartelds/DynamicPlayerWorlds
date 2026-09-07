@@ -111,40 +111,41 @@ public final class LobbyMenuChannel implements PluginMessageListener {
             }
         }
 
-        List<UUID> skullOwners = payload.items().stream()
-                .map(MenuItemDescriptor::skullOwner)
-                .filter(Objects::nonNull)
-                .distinct()
-                .toList();
-
-        // Resolving a head texture is an HTTP call and cannot happen on this thread. When
-        // every owner on the screen is already known the menu opens on this tick as it
-        // always did; only the first sight of a player costs a round trip, and the menu
-        // opens either way.
-        if (heads.allKnown(skullOwners)) {
-            openRendered(player, payload, slotActions);
-        } else {
-            heads.resolveThen(skullOwners, () -> {
-                if (player.isOnline()) {
-                    openRendered(player, payload, slotActions);
-                }
-            });
-        }
-    }
-
-    private void openRendered(Player player, RenderMenuPayload payload, Map<Integer, String> slotActions) {
         LobbyMenuHolder holder = new LobbyMenuHolder(payload.correlationId(), 0, slotActions);
         Component title = LegacyComponentSerializer.legacySection().deserialize(payload.title());
         Inventory inventory = Bukkit.createInventory(holder, payload.size(), title);
         holder.setInventory(inventory);
 
+        fillItems(inventory, payload);
+        player.openInventory(inventory);
+
+        // The menu never waits on Mojang. Resolving a head texture is an HTTP call, so the
+        // screen opens now with whatever is already known -- the default skin, on the first
+        // sight of a player -- and the heads are replaced in place once the lookup lands.
+        // Deferring the open instead would put a network round trip in front of every menu
+        // the first time it is drawn.
+        List<UUID> unresolved = payload.items().stream()
+                .map(MenuItemDescriptor::skullOwner)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (!heads.allKnown(unresolved)) {
+            heads.resolveThen(unresolved, () -> {
+                // Only if they are still looking at this very screen. A player who has
+                // clicked on to another one must not have it redrawn underneath them.
+                if (player.isOnline() && player.getOpenInventory().getTopInventory() == inventory) {
+                    fillItems(inventory, payload);
+                }
+            });
+        }
+    }
+
+    private void fillItems(Inventory inventory, RenderMenuPayload payload) {
         for (MenuItemDescriptor item : payload.items()) {
             if (item.slot() >= 0 && item.slot() < payload.size()) {
                 inventory.setItem(item.slot(), LobbyItemUtil.create(item, heads));
             }
         }
-
-        player.openInventory(inventory);
     }
 
     /**

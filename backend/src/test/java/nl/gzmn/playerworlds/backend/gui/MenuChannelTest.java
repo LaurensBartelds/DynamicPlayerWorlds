@@ -140,7 +140,7 @@ class MenuChannelTest {
         AtomicBoolean called = new AtomicBoolean(false);
         AtomicReference<Player> receivedPlayer = new AtomicReference<>();
 
-        MenuService stubService = new MenuService(null, null, null, null, null, menuChannel, executors, null) {
+        MenuService stubService = new MenuService(null, null, null, null, null, null, menuChannel, executors, null) {
             @Override
             public CompletableFuture<Void> openMainMenu(Player player) {
                 called.set(true);

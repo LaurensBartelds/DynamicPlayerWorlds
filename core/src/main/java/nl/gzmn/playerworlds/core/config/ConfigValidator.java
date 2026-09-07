@@ -50,6 +50,22 @@ public final class ConfigValidator {
             throw new ConfigException(NetworkPolicy.KEY_MAX_WORLDS_PER_PLAYER + " must be at least 1, was: "
                     + policy.maxWorldsPerPlayer());
         }
+        // FR-3 divides the overworld radius by this to get the nether's, and since FR-3c the
+        // proxy does that arithmetic too, when it tells an owner what their raise did. Zero is
+        // a division by zero on a thread with nothing useful to do with the exception; the
+        // backend already refuses it at apply time, which is far too late to be the only check.
+        if (policy.netherBorderDivisor() < 1) {
+            throw new ConfigException(NetworkPolicy.KEY_NETHER_BORDER_DIVISOR + " must be at least 1, was: "
+                    + policy.netherBorderDivisor());
+        }
+        // FR-3c's ceiling has to be reachable. Below the default it is not a ceiling at all:
+        // every world in the network would already be over it at creation, and no raise
+        // could ever succeed -- which is never what an operator meant to configure.
+        if (policy.maxBorderRadius() < policy.defaultBorderRadius()) {
+            throw new ConfigException(NetworkPolicy.KEY_MAX_BORDER_RADIUS + " must not be below "
+                    + NetworkPolicy.KEY_DEFAULT_BORDER_RADIUS + " (" + policy.defaultBorderRadius() + "), was: "
+                    + policy.maxBorderRadius());
+        }
         if (policy.maxWorldsPerNode() < 1) {
             throw new ConfigException(
                     NetworkPolicy.KEY_MAX_WORLDS_PER_NODE + " must be at least 1, was: " + policy.maxWorldsPerNode());

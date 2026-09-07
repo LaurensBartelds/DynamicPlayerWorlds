@@ -14,6 +14,7 @@ import java.util.concurrent.Executor;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.EntitlementTiers;
 import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
@@ -22,6 +23,7 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
@@ -56,6 +58,7 @@ public final class MenuViewService {
     private final TransferRequestRepository transferRepository;
     private final WorldBanRepository banRepository;
     private final PlayerNameRepository nameRepository;
+    private final WorldUpgradeRepository upgradeRepository;
     private final Supplier<NetworkPolicy> policySupplier;
     private final Executor dbExecutor;
     private final Messages messages;
@@ -66,6 +69,7 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
             Supplier<NetworkPolicy> policySupplier,
             PluginExecutors executors) {
         this(
@@ -74,6 +78,7 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
                 policySupplier,
                 executors,
                 null);
@@ -85,6 +90,7 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
             Supplier<NetworkPolicy> policySupplier,
             PluginExecutors executors,
             @Nullable Supplier<MessageCatalog> messageCatalog) {
@@ -94,6 +100,7 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
                 policySupplier,
                 Objects.requireNonNull(executors, "executors").db(),
                 messageCatalog);
@@ -105,6 +112,7 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
             Supplier<NetworkPolicy> policySupplier,
             Executor dbExecutor) {
         this(
@@ -113,6 +121,7 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
                 policySupplier,
                 dbExecutor,
                 null);
@@ -124,6 +133,7 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
             Supplier<NetworkPolicy> policySupplier,
             Executor dbExecutor,
             @Nullable Supplier<MessageCatalog> messageCatalog) {
@@ -132,6 +142,7 @@ public final class MenuViewService {
         this.transferRepository = Objects.requireNonNull(transferRepository, "transferRepository");
         this.banRepository = Objects.requireNonNull(banRepository, "banRepository");
         this.nameRepository = Objects.requireNonNull(nameRepository, "nameRepository");
+        this.upgradeRepository = Objects.requireNonNull(upgradeRepository, "upgradeRepository");
         this.policySupplier = Objects.requireNonNull(policySupplier, "policySupplier");
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor");
         this.messages = new Messages(messageCatalog);
@@ -171,9 +182,11 @@ public final class MenuViewService {
                                 used,
                                 permissionCheck,
                                 pol.storageQuotaTiers(),
-                                pol.defaultStorageLimitBytes());
-                        return MainScreenBuilder.build(
-                                messages, correlationId, owned, pol.maxWorldsPerPlayer(), invites, quota);
+                                pol.defaultStorageLimitBytes(),
+                                upgradeRepository.bonusStorageBytes(playerUuid));
+                        int slots = EntitlementTiers.resolveSlots(
+                                permissionCheck, pol.slotTiers(), pol.maxWorldsPerPlayer());
+                        return MainScreenBuilder.build(messages, correlationId, owned, slots, invites, quota);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -184,15 +197,22 @@ public final class MenuViewService {
     /**
      * Builds page 0 of the owned worlds menu screen.
      */
-    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(UUID playerUuid, long correlationId) {
-        return buildMyWorldsMenu(playerUuid, 0, correlationId);
+    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(
+            UUID playerUuid, Predicate<String> permissionCheck, long correlationId) {
+        return buildMyWorldsMenu(playerUuid, permissionCheck, 0, correlationId);
     }
 
     /**
      * Builds a specific page of the owned worlds menu screen.
+     *
+     * <p>Takes the permission check because the screen states the world cap, and a
+     * subscriber's cap is not the network's (FR-43). Showing them the default would tell a
+     * player who has paid for ten slots that they have two.
      */
-    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(UUID playerUuid, int page, long correlationId) {
+    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(
+            UUID playerUuid, Predicate<String> permissionCheck, int page, long correlationId) {
         Objects.requireNonNull(playerUuid, "playerUuid");
+        Objects.requireNonNull(permissionCheck, "permissionCheck");
 
         return CompletableFuture.supplyAsync(
                 () -> {
@@ -201,8 +221,9 @@ public final class MenuViewService {
                         List<PlayerWorld> shared = worldRepository.listSharedWith(playerUuid);
                         Map<WorldId, Role> roles = sharedRoles(playerUuid, shared);
                         NetworkPolicy pol = policySupplier.get();
-                        return MyWorldsScreenBuilder.build(
-                                messages, correlationId, owned, shared, roles, page, pol.maxWorldsPerPlayer());
+                        int slots = EntitlementTiers.resolveSlots(
+                                permissionCheck, pol.slotTiers(), pol.maxWorldsPerPlayer());
+                        return MyWorldsScreenBuilder.build(messages, correlationId, owned, shared, roles, page, slots);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -355,7 +376,8 @@ public final class MenuViewService {
                                 used,
                                 permissionCheck,
                                 pol.storageQuotaTiers(),
-                                pol.defaultStorageLimitBytes());
+                                pol.defaultStorageLimitBytes(),
+                                upgradeRepository.bonusStorageBytes(playerUuid));
                         return StorageScreenBuilder.build(messages, correlationId, quota, owned);
                     } catch (SQLException e) {
                         throw new CompletionException(e);

@@ -25,6 +25,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.IntentEnvelope;
 import nl.gzmn.playerworlds.core.menu.MenuCodec;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
@@ -57,6 +58,7 @@ class BrowseMenuTest {
     private TransferRequestRepository transferRepository;
     private WorldBanRepository banRepository;
     private PlayerNameRepository nameRepository;
+    private WorldUpgradeRepository upgradeRepo;
     private Queue<Runnable> mainTasks;
     private MenuChannel channel;
     private MenuService menuService;
@@ -86,6 +88,7 @@ class BrowseMenuTest {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepo,
                 channel,
                 executors,
                 NetworkPolicy::defaults);
@@ -256,7 +259,7 @@ class BrowseMenuTest {
     @DisplayName("MainMenu slot 16 navigates to BrowseMenu")
     void mainMenuSlotBrowseNavigatesToBrowseMenu() throws Exception {
         PlayerMock player = server.addPlayer();
-        StorageQuota quota = new StorageQuota(player.getUniqueId(), 0L, 1024L * 1024L * 500L, false);
+        StorageQuota quota = new StorageQuota(player.getUniqueId(), 0L, 1024L * 1024L * 500L, 0L, false);
         MainMenu.MainMenuData data = new MainMenu.MainMenuData(0, 5, 0, quota);
         MainMenu mainMenu = new MainMenu(menuService, data);
 

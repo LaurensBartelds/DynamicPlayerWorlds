@@ -65,6 +65,21 @@ public final class WorldCacheLoader {
      *     are dropped for it rather than left holding a row that is gone
      */
     public boolean refresh(WorldId worldId) throws SQLException {
+        return reload(worldId).isPresent();
+    }
+
+    /**
+     * As {@link #refresh}, handing back the row it read.
+     *
+     * <p>{@code APPLY_SETTINGS} needs the row itself and not just whether one exists: FR-3c
+     * lets {@code border_radius} change, and re-asserting a border means knowing what it is
+     * now. Re-reading it a second time would be a second answer to the same question, and
+     * the two could differ.
+     *
+     * @param worldId the world
+     * @return the row, or empty when the world is gone and both caches were dropped
+     */
+    public Optional<PlayerWorld> reload(WorldId worldId) throws SQLException {
         Objects.requireNonNull(worldId, "worldId");
         Optional<PlayerWorld> found = worlds.findById(worldId);
         if (found.isEmpty()) {
@@ -72,10 +87,10 @@ public final class WorldCacheLoader {
             if (settingsCache != null) {
                 settingsCache.invalidate(worldId);
             }
-            return false;
+            return Optional.empty();
         }
         publish(found.get());
-        return true;
+        return found;
     }
 
     /**

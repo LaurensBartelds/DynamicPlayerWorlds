@@ -35,6 +35,7 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
@@ -65,6 +66,14 @@ public class MenuService {
     private final @Nullable TransferRequestRepository transferRepository;
     private final @Nullable WorldBanRepository banRepository;
     private final @Nullable PlayerNameRepository nameRepository;
+
+    /**
+     * One-time purchased upgrades (FR-44). Nullable like every other repository here: the
+     * GUI tests build a MenuService without a database at all, and a screen with no upgrade
+     * data shows the tier allowance rather than refusing to open.
+     */
+    private final @Nullable WorldUpgradeRepository upgradeRepository;
+
     private final @Nullable MenuChannel channel;
     private final PluginExecutors executors;
     private final @Nullable Supplier<NetworkPolicy> policy;
@@ -82,6 +91,7 @@ public class MenuService {
             @Nullable TransferRequestRepository transferRepository,
             @Nullable WorldBanRepository banRepository,
             @Nullable PlayerNameRepository nameRepository,
+            @Nullable WorldUpgradeRepository upgradeRepository,
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy) {
@@ -91,6 +101,7 @@ public class MenuService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
                 channel,
                 executors,
                 policy,
@@ -103,6 +114,7 @@ public class MenuService {
             @Nullable TransferRequestRepository transferRepository,
             @Nullable WorldBanRepository banRepository,
             @Nullable PlayerNameRepository nameRepository,
+            @Nullable WorldUpgradeRepository upgradeRepository,
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy,
@@ -112,6 +124,7 @@ public class MenuService {
         this.transferRepository = transferRepository;
         this.banRepository = banRepository;
         this.nameRepository = nameRepository;
+        this.upgradeRepository = upgradeRepository;
         this.channel = channel;
         this.executors = Objects.requireNonNull(executors, "executors");
         this.policy = policy;
@@ -136,6 +149,10 @@ public class MenuService {
 
     public @Nullable PlayerNameRepository nameRepository() {
         return nameRepository;
+    }
+
+    public @Nullable WorldUpgradeRepository upgradeRepository() {
+        return upgradeRepository;
     }
 
     public @Nullable MenuChannel channel() {
@@ -278,7 +295,8 @@ public class MenuService {
                                     used,
                                     player::hasPermission,
                                     pol.storageQuotaTiers(),
-                                    pol.defaultStorageLimitBytes());
+                                    pol.defaultStorageLimitBytes(),
+                                    bonusStorageBytes(player.getUniqueId()));
                             return new MainMenu.MainMenuData(owned, pol.maxWorldsPerPlayer(), invites, quota);
                         },
                         executors.db())
@@ -418,7 +436,8 @@ public class MenuService {
                                     used,
                                     player::hasPermission,
                                     pol.storageQuotaTiers(),
-                                    pol.defaultStorageLimitBytes());
+                                    pol.defaultStorageLimitBytes(),
+                                    bonusStorageBytes(player.getUniqueId()));
                             return new StorageMenuData(quota, owned);
                         },
                         executors.db())
@@ -819,6 +838,24 @@ public class MenuService {
 
     private record MyWorldsData(
             List<PlayerWorld> owned, List<PlayerWorld> shared, Map<WorldId, Role> sharedRoles, int maxWorlds) {}
+
+    /**
+     * Bytes this player's redeemed {@code STORAGE} upgrades add (FR-45), or zero where there
+     * is no database to ask. Called on the database executor, never on the main thread.
+     */
+    private long bonusStorageBytes(UUID playerUuid) {
+        if (upgradeRepository == null) {
+            return 0L;
+        }
+        try {
+            return upgradeRepository.bonusStorageBytes(playerUuid);
+        } catch (SQLException e) {
+            // Showing the tier allowance is wrong by however much they have bought, but it
+            // is a screen: refusing to open it would be worse than understating it.
+            log.warn("Failed to read purchased storage for player {}", playerUuid, e);
+            return 0L;
+        }
+    }
 
     private record StorageMenuData(StorageQuota quota, List<PlayerWorld> owned) {}
 

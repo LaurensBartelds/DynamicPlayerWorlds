@@ -38,7 +38,13 @@ public final class LoadedWorld {
     private final UUID ownerUuid;
     private final String name;
     private final long seed;
-    private final int borderRadius;
+    /**
+     * FR-3's radius, and volatile for the same reason {@code settingsJson} is: FR-3c lets an
+     * owner raise it on a world that is already loaded, and a dimension materialised after
+     * that (a portal, FR-4) must get the new radius rather than the load-time one. The
+     * portal handler reads it on the tick thread, where it cannot go and ask the database.
+     */
+    private volatile int borderRadius;
 
     /**
      * FR-1b, carried here for the same reason as the seed: the death handler and
@@ -286,6 +292,25 @@ public final class LoadedWorld {
     /** Overworld and end radius; the nether divides it (FR-3). */
     public int borderRadius() {
         return borderRadius;
+    }
+
+    /**
+     * Replaces the border radius after an FR-3c raise ({@code APPLY_SETTINGS}).
+     *
+     * <p>Refuses to lower it, so a stale command or an out-of-order delivery cannot shrink a
+     * world's border behind the requirement's back (CP-5). Lowering is forbidden everywhere
+     * else in the system for the reason FR-3c gives; this is the tick thread's copy of the
+     * same rule.
+     *
+     * @param newRadius the radius the database now holds
+     * @return true when this raised it
+     */
+    public boolean raiseBorderRadius(int newRadius) {
+        if (newRadius <= borderRadius) {
+            return false;
+        }
+        borderRadius = newRadius;
+        return true;
     }
 
     /** Dimensions currently on disk and loaded. */
