@@ -288,6 +288,10 @@ class MenuViewServiceTest {
 
             MenuItemDescriptor invited = payload.items().get(1);
             assertThat(invited.displayName()).contains("theirs");
+            assertThat(invited.materialName()).isEqualTo("PLAYER_HEAD");
+            assertThat(invited.skullOwner())
+                    .as("a shared world's entry is a head, and the head is its owner's")
+                    .isEqualTo(hostUuid);
             assertThat(invited.actionTag()).isEqualTo("NAV:WORLD:" + theirs.id().value());
             assertThat(invited.lore())
                     .as("the member has to be able to tell whose world it is and what they may do there")
@@ -338,6 +342,9 @@ class MenuViewServiceTest {
 
             MenuItemDescriptor members = payload.items().get(11);
             assertThat(members.materialName()).isEqualTo("PLAYER_HEAD");
+            assertThat(members.skullOwner())
+                    .as("the members icon is a head and must show whose world it is")
+                    .isEqualTo(world.ownerUuid());
             assertThat(members.actionTag())
                     .isEqualTo("NAV:MEMBERS:" + world.id().value());
 

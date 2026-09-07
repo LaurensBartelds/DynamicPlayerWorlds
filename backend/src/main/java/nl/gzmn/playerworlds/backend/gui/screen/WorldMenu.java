@@ -145,10 +145,12 @@ public final class WorldMenu implements GuiScreen {
         // Slot 11: Members
         inventory.setItem(
                 SLOT_MEMBERS,
-                ItemUtil.create(
-                        Material.PLAYER_HEAD,
+                ItemUtil.createPlayerHead(
+                        world.ownerUuid(),
+                        null,
                         messages.render("messages.gui.world-menu.item.members.name"),
-                        messages.renderLore("messages.gui.world-menu.item.members.lore")));
+                        messages.renderLore("messages.gui.world-menu.item.members.lore"),
+                        menuService.heads()));
 
         // Slot 12: Settings
         inventory.setItem(

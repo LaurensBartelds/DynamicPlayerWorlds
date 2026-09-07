@@ -291,6 +291,17 @@ class CoreScreensTest {
                 .as("a world somebody else owns is on the list and looks different from your own")
                 .isNotNull();
         assertThat(inv.getItem(1).getType()).isEqualTo(Material.PLAYER_HEAD);
+        assertThat(inv.getItem(1).getItemMeta())
+                .as("the head on a shared world is the owner's, not an empty skull")
+                .isInstanceOf(SkullMeta.class);
+        SkullMeta sharedSkull = (SkullMeta) inv.getItem(1).getItemMeta();
+        // Only that an owner was set at all: the entry used to be built through the plain
+        // item path, which never touches SkullMeta, so every shared world rendered as the
+        // default skin. MockBukkit's getOfflinePlayer rewrites the UUID into a name-derived
+        // one, so the exact value is pinned proxy-side in MenuViewServiceTest instead.
+        assertThat(sharedSkull.getOwningPlayer())
+                .as("the head on a shared world is the owner's, not an empty skull")
+                .isNotNull();
 
         List<Component> lore = inv.getItem(1).getItemMeta().lore();
         assertThat(lore).isNotNull();
@@ -399,6 +410,10 @@ class CoreScreensTest {
         assertThat(inv.getItem(WorldMenu.SLOT_INFO).getType()).isEqualTo(Material.BEACON);
         assertThat(inv.getItem(WorldMenu.SLOT_JOIN).getType()).isEqualTo(Material.ENDER_PEARL);
         assertThat(inv.getItem(WorldMenu.SLOT_MEMBERS).getType()).isEqualTo(Material.PLAYER_HEAD);
+        SkullMeta membersSkull = (SkullMeta) inv.getItem(WorldMenu.SLOT_MEMBERS).getItemMeta();
+        assertThat(membersSkull.getOwningPlayer())
+                .as("the members icon is a head and must show whose world it is")
+                .isNotNull();
         assertThat(inv.getItem(WorldMenu.SLOT_SETTINGS).getType()).isEqualTo(Material.COMPARATOR);
         assertThat(inv.getItem(WorldMenu.SLOT_VISIBILITY).getType()).isEqualTo(Material.ENDER_EYE);
         assertThat(inv.getItem(WorldMenu.SLOT_BANS).getType()).isEqualTo(Material.IRON_BARS);

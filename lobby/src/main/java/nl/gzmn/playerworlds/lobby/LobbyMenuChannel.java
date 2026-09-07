@@ -1,8 +1,10 @@
 package nl.gzmn.playerworlds.lobby;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,9 +37,11 @@ public final class LobbyMenuChannel implements PluginMessageListener {
     private static final AtomicLong CORRELATION_SEQUENCE = new AtomicLong(1);
 
     private final Plugin plugin;
+    private final LobbyHeadProfiles heads;
 
     public LobbyMenuChannel(Plugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.heads = new LobbyHeadProfiles(plugin);
     }
 
     /**
@@ -107,6 +111,28 @@ public final class LobbyMenuChannel implements PluginMessageListener {
             }
         }
 
+        List<UUID> skullOwners = payload.items().stream()
+                .map(MenuItemDescriptor::skullOwner)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+
+        // Resolving a head texture is an HTTP call and cannot happen on this thread. When
+        // every owner on the screen is already known the menu opens on this tick as it
+        // always did; only the first sight of a player costs a round trip, and the menu
+        // opens either way.
+        if (heads.allKnown(skullOwners)) {
+            openRendered(player, payload, slotActions);
+        } else {
+            heads.resolveThen(skullOwners, () -> {
+                if (player.isOnline()) {
+                    openRendered(player, payload, slotActions);
+                }
+            });
+        }
+    }
+
+    private void openRendered(Player player, RenderMenuPayload payload, Map<Integer, String> slotActions) {
         LobbyMenuHolder holder = new LobbyMenuHolder(payload.correlationId(), 0, slotActions);
         Component title = LegacyComponentSerializer.legacySection().deserialize(payload.title());
         Inventory inventory = Bukkit.createInventory(holder, payload.size(), title);
@@ -114,7 +140,7 @@ public final class LobbyMenuChannel implements PluginMessageListener {
 
         for (MenuItemDescriptor item : payload.items()) {
             if (item.slot() >= 0 && item.slot() < payload.size()) {
-                inventory.setItem(item.slot(), LobbyItemUtil.create(item));
+                inventory.setItem(item.slot(), LobbyItemUtil.create(item, heads));
             }
         }
 

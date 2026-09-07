@@ -237,6 +237,12 @@ public final class MyWorldsMenu implements GuiScreen {
                 "messages.gui.my-worlds-menu.item.world-entry.manage-hint",
                 Placeholders.raw("action", owned ? "Manage World" : "World Details")));
 
+        // A shared world's entry is a head, and it is the owner's head: an entry that
+        // renders the default skin says nothing about whose world it is, which was the
+        // whole reason for using a head rather than a block here.
+        if (material == Material.PLAYER_HEAD) {
+            return ItemUtil.createPlayerHead(world.ownerUuid(), null, name, lore, menuService.heads());
+        }
         return ItemUtil.create(material, name, lore);
     }
 

@@ -153,7 +153,7 @@ public final class WorldDetailScreenBuilder {
                         1,
                         legacy(messages.render("messages.gui.world-menu.item.members.name")),
                         legacyLore(messages.renderLore("messages.gui.world-menu.item.members.lore")),
-                        null,
+                        world.ownerUuid(),
                         "NAV:MEMBERS:" + world.id().value()));
 
         // Slot 12: Settings

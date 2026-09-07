@@ -149,7 +149,7 @@ public final class BansMenu implements GuiScreen {
                 Placeholders.text("reason", reasonText),
                 Placeholders.raw("banned-at", ban.bannedAt().toString().substring(0, 10)));
 
-        return ItemUtil.createPlayerHead(ban.uuid(), ban.name(), name, lore);
+        return ItemUtil.createPlayerHead(ban.uuid(), ban.name(), name, lore, menuService.heads());
     }
 
     @Override
