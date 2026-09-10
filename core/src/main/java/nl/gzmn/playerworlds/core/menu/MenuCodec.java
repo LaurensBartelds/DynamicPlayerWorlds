@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.jspecify.annotations.Nullable;
@@ -47,6 +48,7 @@ public final class MenuCodec {
     public static final byte INTENT_DECLINE_TRANSFER = 14;
     public static final byte INTENT_ACCEPT_INVITE = 15;
     public static final byte INTENT_HARD_DELETE_WORLD = 16;
+    public static final byte INTENT_REDEEM_UPGRADE = 17;
 
     private MenuCodec() {}
 
@@ -604,6 +606,11 @@ public final class MenuCodec {
                 out.writeByte(INTENT_HARD_DELETE_WORLD);
                 writeWorldId(out, hardDelete.worldId());
             }
+            case MenuIntent.RedeemUpgrade redeem -> {
+                out.writeByte(INTENT_REDEEM_UPGRADE);
+                writeWorldId(out, redeem.worldId());
+                out.writeUTF(redeem.kind().name());
+            }
         }
     }
 
@@ -639,6 +646,14 @@ public final class MenuCodec {
             case INTENT_DECLINE_TRANSFER -> new MenuIntent.DeclineTransfer(in.readUTF());
             case INTENT_ACCEPT_INVITE -> new MenuIntent.AcceptInvite(in.readUTF());
             case INTENT_HARD_DELETE_WORLD -> new MenuIntent.HardDeleteWorld(readWorldId(in));
+            case INTENT_REDEEM_UPGRADE -> {
+                WorldId redeemWorld = readWorldId(in);
+                String kind = in.readUTF();
+                yield new MenuIntent.RedeemUpgrade(
+                        redeemWorld,
+                        UpgradeKind.parse(kind)
+                                .orElseThrow(() -> new MenuCodecException("Unknown upgrade kind: " + kind)));
+            }
             default -> throw new MenuCodecException("Unknown intent type: " + intentType);
         };
     }

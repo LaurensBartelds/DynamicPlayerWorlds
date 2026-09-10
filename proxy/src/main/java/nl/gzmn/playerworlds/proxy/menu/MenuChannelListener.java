@@ -7,6 +7,7 @@ import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.messages.MinecraftChannelIdentifier;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
@@ -26,6 +27,7 @@ import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.menu.OpenMenu;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.menu.WorldPresenceNotice;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.proxy.command.ActionResult;
@@ -114,7 +116,7 @@ public final class MenuChannelListener {
 
     private void handleOpenMenu(ServerConnection connection, Player player, OpenMenu openMenu) {
         var _ = viewService
-                .buildMainMenu(player.getUniqueId(), player::hasPermission, openMenu.correlationId())
+                .buildMainMenu(player, openMenu.correlationId())
                 .whenComplete((payload, throwable) -> sendRenderMenu(connection, payload, throwable));
     }
 
@@ -145,12 +147,10 @@ public final class MenuChannelListener {
         String target = parts.get(1).toUpperCase(Locale.ROOT);
         CompletableFuture<RenderMenuPayload> future =
                 switch (target) {
-                    case "MAIN" ->
-                        viewService.buildMainMenu(player.getUniqueId(), player::hasPermission, correlationId);
+                    case "MAIN" -> viewService.buildMainMenu(player, correlationId);
                     case "MY_WORLDS" -> {
                         int page = parts.size() >= 3 ? parsePage(parts.get(2)) : 0;
-                        yield viewService.buildMyWorldsMenu(
-                                player.getUniqueId(), player::hasPermission, page, correlationId);
+                        yield viewService.buildMyWorldsMenu(player, page, correlationId);
                     }
                     case "WORLD" -> {
                         if (parts.size() < 3) yield null;
@@ -170,8 +170,7 @@ public final class MenuChannelListener {
                         int page = parts.size() >= 4 ? parsePage(parts.get(3)) : 0;
                         yield worldId != null ? viewService.buildMembersMenu(worldId, page, correlationId) : null;
                     }
-                    case "STORAGE" ->
-                        viewService.buildStorageMenu(player.getUniqueId(), player::hasPermission, correlationId);
+                    case "STORAGE" -> viewService.buildStorageMenu(player, correlationId);
                     case "INVITES" -> {
                         int page = parts.size() >= 3 ? parsePage(parts.get(2)) : 0;
                         yield viewService.buildInvitesMenu(player.getUniqueId(), page, correlationId);
@@ -229,8 +228,7 @@ public final class MenuChannelListener {
                         connection,
                         player,
                         actions.create(player, name, null, hardcore),
-                        () -> viewService.buildMyWorldsMenu(
-                                player.getUniqueId(), player::hasPermission, 0, correlationId));
+                        () -> viewService.buildMyWorldsMenu(player, 0, correlationId));
             }
             case "ARCHIVE" -> {
                 if (parts.size() >= 3) {
@@ -239,8 +237,7 @@ public final class MenuChannelListener {
                             connection,
                             player,
                             actions.delete(player, worldName, true),
-                            () -> viewService.buildMyWorldsMenu(
-                                    player.getUniqueId(), player::hasPermission, 0, correlationId));
+                            () -> viewService.buildMyWorldsMenu(player, 0, correlationId));
                 }
             }
             case "RESTORE" -> {
@@ -250,8 +247,22 @@ public final class MenuChannelListener {
                             connection,
                             player,
                             actions.restore(player, worldName),
-                            () -> viewService.buildMyWorldsMenu(
-                                    player.getUniqueId(), player::hasPermission, 0, correlationId));
+                            () -> viewService.buildMyWorldsMenu(player, 0, correlationId));
+                }
+            }
+            case "REDEEM" -> {
+                if (parts.size() >= 4) {
+                    WorldId worldId = parseWorldId(parts.get(2));
+                    Optional<UpgradeKind> kind = UpgradeKind.parse(parts.get(3));
+                    if (worldId != null && kind.isPresent()) {
+                        executeActionAndRerender(
+                                connection,
+                                player,
+                                actions.redeemOldestUpgrade(player, kind.get(), worldId),
+                                // Redrawn because spending an upgrade changes the screen that
+                                // offered it: the entry is gone, or its count has dropped.
+                                () -> viewService.buildWorldMenu(worldId, player.getUniqueId(), correlationId));
+                    }
                 }
             }
             case "SET_VISIBILITY" -> {
@@ -480,6 +491,8 @@ public final class MenuChannelListener {
             case MenuIntent.DeclineTransfer declineTransfer ->
                 actions.transferDecline(player, declineTransfer.ownerName());
             case MenuIntent.AcceptInvite acceptInvite -> actions.accept(player, acceptInvite.ownerName());
+            case MenuIntent.RedeemUpgrade redeem ->
+                actions.redeemOldestUpgrade(player, redeem.kind(), redeem.worldId());
             case MenuIntent.HardDeleteWorld hardDelete ->
                 // ConfirmMenu is FR-37's confirmation substitute (admin hard-delete).
                 actions.deleteHard(player, hardDelete.worldId());

@@ -39,6 +39,40 @@ public final class StorageTiers {
 
     private volatile @org.jspecify.annotations.Nullable Boolean enumerable;
 
+    /**
+     * Where a player's whole permission set comes from, when something can list it.
+     *
+     * <p>A seam, and the only one: LuckPerms is reached through {@code Class.forName} and a
+     * static provider, so without this there is no way to exercise the enumerated route at
+     * all — every test would silently take the probing fallback and prove nothing about the
+     * half of FR-43 that an operator running LuckPerms actually gets.
+     */
+    @FunctionalInterface
+    public interface PermissionEnumerator {
+
+        /**
+         * @param player the player to list permissions for
+         * @return every node they hold, or empty when this backend cannot list them
+         */
+        Optional<Collection<String>> permissionsOf(Player player);
+    }
+
+    private final @org.jspecify.annotations.Nullable PermissionEnumerator enumerator;
+
+    /** Reads tiers from LuckPerms where it is installed, and by probing where it is not. */
+    public StorageTiers() {
+        this(null);
+    }
+
+    /**
+     * Reads tiers from a supplied backend.
+     *
+     * @param enumerator the permission source, or {@code null} for the LuckPerms default
+     */
+    public StorageTiers(@org.jspecify.annotations.Nullable PermissionEnumerator enumerator) {
+        this.enumerator = enumerator;
+    }
+
     /** How the last evaluation answered, for {@code /world storage} to explain itself. */
     public enum Source {
         /** LuckPerms listed the player's permissions, so any tier is honoured. */
@@ -136,6 +170,10 @@ public final class StorageTiers {
 
     /** The player's whole permission set, when something can list it. */
     private Optional<Collection<String>> enumeratedPermissions(Player player) {
+        PermissionEnumerator supplied = enumerator;
+        if (supplied != null) {
+            return supplied.permissionsOf(player);
+        }
         return luckPermsPresent() ? LuckPermsTiers.heldPermissions(player) : Optional.empty();
     }
 

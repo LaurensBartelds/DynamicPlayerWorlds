@@ -501,6 +501,8 @@ public final class CommandMessages {
                     "<red>That upgrade has already been spent on a world.</red>"),
             MessageKey.of("messages.command.upgrades.not-yours", "<red>No unspent upgrade of yours has that id.</red>"),
             MessageKey.of(
+                    "messages.command.upgrades.none-of-kind", "<red>You have no unspent upgrade of that kind.</red>"),
+            MessageKey.of(
                     "messages.command.upgrades.redeemed-storage",
                     "<green><size> added to your storage allowance, from the upgrade you spent on <world>.</green>",
                     Set.of("size", "world")),

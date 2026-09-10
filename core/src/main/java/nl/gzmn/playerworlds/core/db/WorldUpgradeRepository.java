@@ -164,6 +164,29 @@ public final class WorldUpgradeRepository extends Repository {
     }
 
     /**
+     * A player's unspent upgrades, oldest grant first (FR-45).
+     *
+     * <p>Oldest first because that is the order they should be spent in: an upgrade bought in
+     * March and one bought in June are interchangeable, and spending the older one leaves the
+     * player holding the one whose purchase they are likelier to still remember. It also gives
+     * the menu a deterministic "redeem one of these" without putting an id in a button.
+     *
+     * @param ownerUuid the player
+     * @return their unspent upgrades, oldest first
+     */
+    public List<WorldUpgrade> listUnredeemed(UUID ownerUuid) throws SQLException {
+        Objects.requireNonNull(ownerUuid, "ownerUuid");
+        return database.withConnection(connection -> queryList(
+                connection, """
+                SELECT id, owner_uuid, world_id, kind, amount, reference, granted_at, redeemed_at
+                  FROM world_upgrade
+                 WHERE owner_uuid = ?
+                   AND world_id IS NULL
+                 ORDER BY granted_at, id
+                """, statement -> statement.setObject(1, ownerUuid), WorldUpgradeRepository::mapUpgrade));
+    }
+
+    /**
      * The bytes a player's redeemed {@code STORAGE} upgrades add to their allowance (FR-45).
      *
      * <p>Unredeemed upgrades count for nothing: an upgrade does nothing until it is spent,

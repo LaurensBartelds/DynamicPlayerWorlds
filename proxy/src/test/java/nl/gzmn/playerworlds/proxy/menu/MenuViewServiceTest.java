@@ -3,9 +3,15 @@ package nl.gzmn.playerworlds.proxy.menu;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.velocitypowered.api.permission.Tristate;
+import com.velocitypowered.api.proxy.Player;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
+import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
+import java.util.function.Predicate;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.db.Database;
@@ -20,10 +26,14 @@ import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.proxy.menu.screens.MainScreenBuilder;
+import nl.gzmn.playerworlds.proxy.menu.screens.MyWorldsScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.WorldDetailScreenBuilder;
+import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
 import nl.gzmn.playerworlds.testing.TestDatabase;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -46,6 +56,9 @@ class MenuViewServiceTest {
     private UUID playerUuid;
     private String playerName;
 
+    /** The caller of every screen that states an allowance; see {@link #mockPlayer}. */
+    private Player player;
+
     @BeforeEach
     void setUp() throws Exception {
         database = TestDatabase.openFresh();
@@ -66,11 +79,13 @@ class MenuViewServiceTest {
                 banRepo,
                 nameRepo,
                 upgradeRepo,
+                new StorageTiers(),
                 NetworkPolicy::defaults,
                 executors);
 
         playerUuid = UUID.randomUUID();
         playerName = "TestPlayer";
+        player = mockPlayer(playerUuid, playerName, node -> false);
         nameRepo.remember(playerUuid, playerName);
     }
 
@@ -111,7 +126,7 @@ class MenuViewServiceTest {
                     Duration.ofMinutes(10));
             memberRepo.invite(otherWorld.id(), playerUuid, inviterUuid, Duration.ofHours(1));
 
-            RenderMenuPayload payload = service.buildMainMenu(playerUuid, 1001L).get();
+            RenderMenuPayload payload = service.buildMainMenu(player, 1001L).get();
 
             assertThat(payload.correlationId()).isEqualTo(1001L);
             assertThat(payload.screenType()).isEqualTo("MAIN");
@@ -154,6 +169,70 @@ class MenuViewServiceTest {
     }
 
     @Nested
+    @DisplayName("Subscription tiers on the screens")
+    class SubscriptionTierTests {
+
+        /**
+         * A tier LuckPerms knows about but {@code worlds.slot-tiers} does not.
+         *
+         * <p>This is exactly the case the screens used to get wrong: they could only probe the
+         * configured tiers, so a subscriber was shown the network cap of 2 while
+         * {@code /world create} — which enumerates — let them past it (FR-42, FR-43).
+         */
+        @Test
+        @DisplayName("an enumerated tier outside the configured list reaches the menu_FR43")
+        void enumeratedTierReachesTheScreens() throws Exception {
+            Player subscriber = mockPlayer(playerUuid, playerName, node -> false);
+            MenuViewService enumerating = new MenuViewService(
+                    worldRepo,
+                    memberRepo,
+                    transferRepo,
+                    banRepo,
+                    nameRepo,
+                    upgradeRepo,
+                    new StorageTiers(p -> Optional.of(List.of("gzmn.worlds.slots.7"))),
+                    NetworkPolicy::defaults,
+                    executors);
+
+            assertThat(NetworkPolicy.defaults().slotTiers())
+                    .as("the tier has to be one probing would miss, or this proves nothing")
+                    .doesNotContain("7");
+
+            RenderMenuPayload main =
+                    enumerating.buildMainMenu(subscriber, 1200L).get();
+            RenderMenuPayload myWorlds =
+                    enumerating.buildMyWorldsMenu(subscriber, 1201L).get();
+
+            assertThat(main.items().get(MainScreenBuilder.SLOT_MY_WORLDS).lore())
+                    .anyMatch(line -> line.contains("0 / 7"));
+            assertThat(myWorlds.items().get(MyWorldsScreenBuilder.SLOT_CREATE).lore())
+                    .anyMatch(line -> line.contains("Owned: 0 / 7"));
+        }
+
+        @Test
+        @DisplayName("a purchased storage upgrade is shown on the storage screen_FR45")
+        void purchasedStorageIsShownOnTheScreens() throws Exception {
+            PlayerWorld world = worldRepo.create(
+                    WorldId.random(),
+                    playerUuid,
+                    "home",
+                    1L,
+                    500,
+                    Visibility.PRIVATE,
+                    "node-1",
+                    Duration.ofMinutes(10));
+            var grant = upgradeRepo.grant(playerUuid, UpgradeKind.STORAGE, 2L * 1024 * 1024 * 1024, "tebex-menu-1");
+            assertThat(upgradeRepo.redeem(grant.upgrade().id(), playerUuid, world.id()))
+                    .isPresent();
+
+            RenderMenuPayload payload = service.buildStorageMenu(player, 1202L).get();
+
+            // 5 GB of network default plus the 2 GB they bought.
+            assertThat(payload.items().get(4).lore()).anyMatch(line -> line.contains("7.00 GB"));
+        }
+    }
+
+    @Nested
     @DisplayName("My Worlds screen")
     class MyWorldsScreenTests {
 
@@ -183,8 +262,8 @@ class MenuViewServiceTest {
             worldRepo.transitionState(archivedWorld.id(), WorldState.CREATING, WorldState.READY);
             worldRepo.transitionState(archivedWorld.id(), WorldState.READY, WorldState.ARCHIVED);
 
-            RenderMenuPayload payload = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1002L)
-                    .get();
+            RenderMenuPayload payload =
+                    service.buildMyWorldsMenu(player, 0, 1002L).get();
 
             assertThat(payload.correlationId()).isEqualTo(1002L);
             assertThat(payload.screenType()).isEqualTo("MY_WORLDS");
@@ -232,15 +311,15 @@ class MenuViewServiceTest {
                 worldRepo.transitionState(w.id(), WorldState.CREATING, WorldState.READY);
             }
 
-            RenderMenuPayload page0 = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1003L)
-                    .get();
+            RenderMenuPayload page0 =
+                    service.buildMyWorldsMenu(player, 0, 1003L).get();
             assertThat(page0.title()).isEqualTo("§8My Worlds (Page 1/2)");
             assertThat(page0.items().get(53).materialName()).isEqualTo("ARROW");
             assertThat(page0.items().get(53).actionTag()).isEqualTo("NAV:MY_WORLDS:1");
             assertThat(page0.items().get(45).materialName()).isEqualTo("GRAY_STAINED_GLASS_PANE");
 
-            RenderMenuPayload page1 = service.buildMyWorldsMenu(playerUuid, node -> false, 1, 1004L)
-                    .get();
+            RenderMenuPayload page1 =
+                    service.buildMyWorldsMenu(player, 1, 1004L).get();
             assertThat(page1.title()).isEqualTo("§8My Worlds (Page 2/2)");
             assertThat(page1.items().get(45).materialName()).isEqualTo("ARROW");
             assertThat(page1.items().get(45).actionTag()).isEqualTo("NAV:MY_WORLDS:0");
@@ -289,8 +368,8 @@ class MenuViewServiceTest {
                     Duration.ofMinutes(10));
             memberRepo.invite(unaccepted.id(), playerUuid, hostUuid, Duration.ofMinutes(10));
 
-            RenderMenuPayload payload = service.buildMyWorldsMenu(playerUuid, node -> false, 0, 1010L)
-                    .get();
+            RenderMenuPayload payload =
+                    service.buildMyWorldsMenu(player, 0, 1010L).get();
 
             MenuItemDescriptor owned = payload.items().get(0);
             assertThat(owned.displayName()).contains("mine");
@@ -585,8 +664,7 @@ class MenuViewServiceTest {
                     Duration.ofMinutes(10));
             worldRepo.transitionState(world.id(), WorldState.CREATING, WorldState.READY);
 
-            RenderMenuPayload payload =
-                    service.buildStorageMenu(playerUuid, 1009L).get();
+            RenderMenuPayload payload = service.buildStorageMenu(player, 1009L).get();
 
             assertThat(payload.screenType()).isEqualTo("STORAGE");
             assertThat(payload.size()).isEqualTo(36);
@@ -802,5 +880,25 @@ class MenuViewServiceTest {
                     .isInstanceOf(ExecutionException.class)
                     .hasCauseInstanceOf(IllegalArgumentException.class);
         }
+    }
+
+    /**
+     * A Velocity {@link Player} that answers only about the permissions a test grants it.
+     *
+     * <p>The screens take a Player rather than a uuid and a predicate because they resolve
+     * subscription tiers through {@link StorageTiers}, which enumerates a player's whole
+     * permission set where LuckPerms can supply it (FR-43).
+     */
+    private static Player mockPlayer(UUID uuid, String name, Predicate<String> permissions) {
+        return (Player) Proxy.newProxyInstance(
+                MenuViewServiceTest.class.getClassLoader(), new Class<?>[] {Player.class}, (proxyObj, method, args) -> {
+                    if (method.getName().equals("getUniqueId")) return uuid;
+                    if (method.getName().equals("getUsername")) return name;
+                    if (method.getName().equals("hasPermission")) return permissions.test((String) args[0]);
+                    if (method.getName().equals("getPermissionValue")) {
+                        return permissions.test((String) args[0]) ? Tristate.TRUE : Tristate.FALSE;
+                    }
+                    return null;
+                });
     }
 }

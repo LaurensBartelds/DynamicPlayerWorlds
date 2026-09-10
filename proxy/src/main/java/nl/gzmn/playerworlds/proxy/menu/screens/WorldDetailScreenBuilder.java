@@ -2,12 +2,14 @@ package nl.gzmn.playerworlds.proxy.menu.screens;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import nl.gzmn.playerworlds.core.menu.MenuItemDescriptor;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import nl.gzmn.playerworlds.proxy.command.Messages;
@@ -40,6 +42,11 @@ public final class WorldDetailScreenBuilder {
     public static final int SLOT_ARCHIVE = 16;
     public static final int SLOT_BACK = 18;
 
+    /** Drawn only when the owner holds an unspent upgrade of that kind (FR-45). */
+    public static final int SLOT_REDEEM_STORAGE = 22;
+
+    public static final int SLOT_REDEEM_BORDER = 23;
+
     private static final LegacyComponentSerializer LEGACY = LegacyComponentSerializer.legacySection();
 
     private WorldDetailScreenBuilder() {}
@@ -56,6 +63,19 @@ public final class WorldDetailScreenBuilder {
      *     the same screen without the controls only an owner may use.
      */
     public static RenderMenuPayload build(Messages messages, long correlationId, PlayerWorld world, boolean manage) {
+        return build(messages, correlationId, world, manage, Map.of());
+    }
+
+    /**
+     * @param unspentUpgrades how many unspent upgrades of each kind the viewer holds (FR-45);
+     *     empty for a viewer who is not the owner, since only an owner may spend one here
+     */
+    public static RenderMenuPayload build(
+            Messages messages,
+            long correlationId,
+            PlayerWorld world,
+            boolean manage,
+            Map<UpgradeKind, Integer> unspentUpgrades) {
         Objects.requireNonNull(messages, "messages");
         Objects.requireNonNull(world, "world");
         String title = legacy(messages.render(
@@ -125,6 +145,7 @@ public final class WorldDetailScreenBuilder {
 
         if (manage) {
             addManagementControls(messages, items, world);
+            addRedeemControls(messages, items, world, unspentUpgrades);
         }
 
         // Slot 18: Back
@@ -140,6 +161,49 @@ public final class WorldDetailScreenBuilder {
                         "NAV:MY_WORLDS"));
 
         return new RenderMenuPayload(correlationId, SCREEN_TYPE, title, SIZE, items);
+    }
+
+    /**
+     * The GUI's route to FR-45's redemption, drawn only for a kind the owner actually holds.
+     *
+     * <p>One entry per kind rather than one "redeem" button: a player may hold both, and a
+     * single button could not say which it would spend.
+     */
+    private static void addRedeemControls(
+            Messages messages,
+            List<MenuItemDescriptor> items,
+            PlayerWorld world,
+            Map<UpgradeKind, Integer> unspentUpgrades) {
+        int storage = unspentUpgrades.getOrDefault(UpgradeKind.STORAGE, 0);
+        if (storage > 0) {
+            items.set(
+                    SLOT_REDEEM_STORAGE,
+                    new MenuItemDescriptor(
+                            SLOT_REDEEM_STORAGE,
+                            "ENDER_CHEST",
+                            1,
+                            legacy(messages.render("messages.gui.world-menu.item.redeem-storage.name")),
+                            legacyLore(messages.renderLore(
+                                    "messages.gui.world-menu.item.redeem-storage.lore",
+                                    Placeholders.count("count", storage))),
+                            null,
+                            "ACTION:REDEEM:" + world.id().value() + ":" + UpgradeKind.STORAGE.name()));
+        }
+        int border = unspentUpgrades.getOrDefault(UpgradeKind.BORDER, 0);
+        if (border > 0) {
+            items.set(
+                    SLOT_REDEEM_BORDER,
+                    new MenuItemDescriptor(
+                            SLOT_REDEEM_BORDER,
+                            "MAP",
+                            1,
+                            legacy(messages.render("messages.gui.world-menu.item.redeem-border.name")),
+                            legacyLore(messages.renderLore(
+                                    "messages.gui.world-menu.item.redeem-border.lore",
+                                    Placeholders.count("count", border))),
+                            null,
+                            "ACTION:REDEEM:" + world.id().value() + ":" + UpgradeKind.BORDER.name()));
+        }
     }
 
     /** The half of the screen only {@code owner_uuid} may act on (FR-31a). */

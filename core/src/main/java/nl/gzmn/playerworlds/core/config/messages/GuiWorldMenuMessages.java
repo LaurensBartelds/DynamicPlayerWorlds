@@ -116,5 +116,27 @@ public final class GuiWorldMenuMessages {
             MessageKey.of(
                     "messages.gui.world-menu.confirm.archive.body",
                     "<gray>This packs the world to cold storage. You can restore it later.</gray>",
-                    Set.of()));
+                    Set.of()),
+
+            // --- spending a purchased upgrade from the menu (FR-45) ------------------
+            MessageKey.of(
+                    "messages.gui.world-menu.item.redeem-storage.name",
+                    "<gold><bold>Spend Storage Upgrade</bold></gold>"),
+            MessageKey.lore(
+                    "messages.gui.world-menu.item.redeem-storage.lore",
+                    List.of(
+                            "<gray>You have <count> unspent storage upgrade(s).</gray>",
+                            "<gray>Adds to your allowance across every world you own.</gray>",
+                            "<dark_gray>▶ Click to spend the oldest one</dark_gray>"),
+                    Set.of("count")),
+            MessageKey.of(
+                    "messages.gui.world-menu.item.redeem-border.name",
+                    "<gold><bold>Spend Border Upgrade</bold></gold>"),
+            MessageKey.lore(
+                    "messages.gui.world-menu.item.redeem-border.lore",
+                    List.of(
+                            "<gray>You have <count> unspent border upgrade(s).</gray>",
+                            "<gray>Lets you raise this world's border further.</gray>",
+                            "<dark_gray>▶ Then use /world border to set it</dark_gray>"),
+                    Set.of("count")));
 }

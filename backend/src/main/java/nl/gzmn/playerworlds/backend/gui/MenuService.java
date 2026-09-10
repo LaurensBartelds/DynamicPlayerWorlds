@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.gui;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,11 +41,13 @@ import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldInvite;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
+import nl.gzmn.playerworlds.core.model.WorldUpgrade;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.jspecify.annotations.Nullable;
@@ -380,9 +383,10 @@ public class MenuService {
                         CompletableFuture.supplyAsync(
                                 () -> {
                                     MainThread.assertOff();
+                                    Optional<PlayerWorld> found = Optional.empty();
                                     if (worldRepository != null) {
                                         try {
-                                            return worldRepository.findById(worldId);
+                                            found = worldRepository.findById(worldId);
                                         } catch (SQLException e) {
                                             log.warn(
                                                     "Failed to fetch world {} for player {}",
@@ -391,15 +395,24 @@ public class MenuService {
                                                     e);
                                         }
                                     }
-                                    return Optional.<PlayerWorld>empty();
+                                    // Only the owner can spend one here (FR-31a), so only the
+                                    // owner's screen needs the count.
+                                    boolean owns = found.map(PlayerWorld::ownerUuid)
+                                            .filter(player.getUniqueId()::equals)
+                                            .isPresent();
+                                    return new WorldMenuData(
+                                            found, owns ? unspentUpgrades(player.getUniqueId()) : Map.of());
                                 },
                                 executors.db()),
-                        worldOpt ->
-                                worldOpt.map(PlayerWorld::ownerUuid).stream().toList())
+                        data -> data.world().map(PlayerWorld::ownerUuid).stream()
+                                .toList())
                 .thenAcceptAsync(
-                        worldOpt -> {
-                            if (worldOpt.isPresent()) {
-                                openScreen(player, new WorldMenu(this, channel, worldOpt.get()));
+                        data -> {
+                            if (data.world().isPresent()) {
+                                openScreen(
+                                        player,
+                                        new WorldMenu(
+                                                this, channel, data.world().get(), data.unspentUpgrades()));
                             } else {
                                 player.sendMessage(Component.text("World not found", NamedTextColor.RED));
                                 var _ = openMyWorldsMenu(player);
@@ -856,6 +869,31 @@ public class MenuService {
             return 0L;
         }
     }
+
+    /**
+     * How many unspent upgrades of each kind this player holds (FR-45), for the world menu's
+     * redeem entries. Empty where there is no database to ask. Called on the database
+     * executor, never on the main thread.
+     */
+    private Map<UpgradeKind, Integer> unspentUpgrades(UUID playerUuid) {
+        if (upgradeRepository == null) {
+            return Map.of();
+        }
+        try {
+            Map<UpgradeKind, Integer> counts = new EnumMap<>(UpgradeKind.class);
+            for (WorldUpgrade upgrade : upgradeRepository.listUnredeemed(playerUuid)) {
+                counts.merge(upgrade.kind(), 1, Integer::sum);
+            }
+            return Map.copyOf(counts);
+        } catch (SQLException e) {
+            // Drawing no redeem entry understates what they own; failing to open the world
+            // menu at all would cost them everything else on it.
+            log.warn("Failed to read unspent upgrades for player {}", playerUuid, e);
+            return Map.of();
+        }
+    }
+
+    private record WorldMenuData(Optional<PlayerWorld> world, Map<UpgradeKind, Integer> unspentUpgrades) {}
 
     private record StorageMenuData(StorageQuota quota, List<PlayerWorld> owned) {}
 

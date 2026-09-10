@@ -1,8 +1,7 @@
 # Implementation Plan 06 — Paid Tiers
 
-Status: **T1–T8 landed**, `./gradlew check` green. T9 is partly done: the
-storage screens show the purchased allowance, and redeeming is `/world upgrades
-redeem` rather than a menu entry. See §5.
+Status: **T1–T9 landed**, `./gradlew check` green. See §4 for where the
+implementation differs from §2, and §5 for what that left open (nothing).
 Covers: FR-3c and FR-41–FR-47, added to the specification by this change
 Spec baseline: `docs/spec/v0.4.md` (§2, §4, §5.1, §5.10, §6, §7 amended)
 Predecessors: `05-audit-remediation.md`
@@ -142,7 +141,8 @@ re-asserts.
 ### T9 — GUI
 
 The storage screens show the bonus as its own line. The world menu grows a
-redeem entry when the viewer owns an unredeemed upgrade.
+redeem entry per kind, drawn only when the viewer owns an unredeemed upgrade of
+that kind, spending the oldest of them on the world being managed.
 
 ## 3. What this plan does not do
 
@@ -174,18 +174,28 @@ redeem entry when the viewer owns an unredeemed upgrade.
 
 ## 5. Still open
 
-- **T9 is half done.** The storage screens show the purchased allowance and the
-  effective limit (a player who bought storage sees it). There is no redeem
-  entry in the world menu yet: `/world upgrades redeem <id> [world]` is the only
-  way to spend one. The command is the load-bearing half — the menu entry is a
-  second route to it.
-- **The GUI reads tiers by probing, the command by enumeration.** `/world
-  storage` goes through `StorageTiers`, which uses LuckPerms where it is
-  installed; `MenuViewService` only has a permission predicate and so can only
-  ask about configured tiers. This predates paid tiers — the storage screen
-  already behaved this way — but it now affects the slot cap the menu prints
-  too. Fixing it means giving `MenuViewService` the `Player` rather than a
-  `Predicate`, which is a wider change than this plan needed.
+Nothing from §4 is outstanding. The two gaps this section used to record are
+closed:
+
+- **T9's menu half.** `MenuViewService` and the backend `MenuService` load the
+  viewer's unspent upgrades and the world menu draws a *Spend Storage Upgrade*
+  entry at slot 22 and a *Spend Border Upgrade* at slot 23, each only for a kind
+  the owner actually holds. A click sends `MenuIntent.RedeemUpgrade(worldId,
+  kind)` (codec byte 17), which the proxy answers by spending the oldest
+  unredeemed upgrade of that kind — `WorldUpgradeRepository.listUnredeemed`
+  orders them for exactly this. Neither entry is drawn for a viewer who is not
+  the owner, and the click path refuses them there too (FR-31a), so the
+  screen is not the only thing standing between a visitor and somebody else's
+  purchase. `/world upgrades redeem <id> [world]` remains the way to spend one
+  specific upgrade.
+- **Tier resolution in the menus.** `MenuViewService` now takes the `Player` and
+  shares `WorldActions`' `StorageTiers`, so a screen resolves a subscription
+  exactly as the command does: enumerated through LuckPerms where it is
+  installed, probed against the configured tiers where it is not. A
+  `gzmn.worlds.slots.7` node that no operator named in `worlds.slot-tiers` now
+  reaches the screens as well as the commands (FR-43). `StorageTiers` grew a
+  `PermissionEnumerator` seam so the enumerated route is testable without a
+  LuckPerms instance.
 
 ## 6. Open question
 

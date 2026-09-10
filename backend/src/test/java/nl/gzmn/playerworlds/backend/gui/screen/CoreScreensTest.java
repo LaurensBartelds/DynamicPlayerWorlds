@@ -38,6 +38,7 @@ import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldState;
@@ -89,6 +90,7 @@ class CoreScreensTest {
         transferRepository = new TransferRequestRepository(database);
         banRepository = new WorldBanRepository(database);
         nameRepository = new PlayerNameRepository(database);
+        upgradeRepo = new WorldUpgradeRepository(database);
 
         channel = new MenuChannel(plugin, executors, null, Duration.ofSeconds(5));
         menuService = new MenuService(
@@ -353,6 +355,61 @@ class CoreScreensTest {
         menu.handleClick(viewer, WorldMenu.SLOT_VISIBILITY, ClickType.LEFT);
         assertThatThrownBy(viewer::nextSentMessage)
                 .as("no intent may leave the node for an action the viewer cannot take")
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("WorldMenu offers a redeem entry only for a kind the owner actually holds (FR-45)")
+    void worldMenuDrawsRedeemEntriesForHeldKinds() throws Exception {
+        RecordingPlayerMock owner = createRecordingPlayer("Frank");
+        WorldId worldId = WorldId.random();
+        PlayerWorld world = readyWorld(worldId, owner.getUniqueId(), "franks-world");
+
+        WorldMenu menu = new WorldMenu(menuService, channel, world, Map.of(UpgradeKind.STORAGE, 2));
+        Inventory inv = menu.render(owner);
+
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_STORAGE).getType()).isEqualTo(Material.ENDER_CHEST);
+        List<Component> lore =
+                inv.getItem(WorldMenu.SLOT_REDEEM_STORAGE).getItemMeta().lore();
+        assertThat(lore).isNotNull();
+        assertThat(lore.stream()
+                        .map(line -> PlainTextComponentSerializer.plainText().serialize(line))
+                        .toList())
+                .as("the entry says how many are left to spend")
+                .anyMatch(line -> line.contains("2"));
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_BORDER).getType())
+                .as("a kind they hold none of is not drawn")
+                .isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+
+        menu.handleClick(owner, WorldMenu.SLOT_REDEEM_STORAGE, ClickType.LEFT);
+        IntentEnvelope env = (IntentEnvelope) MenuCodec.decode(owner.nextSentMessage());
+        assertThat(env.intent()).isEqualTo(new MenuIntent.RedeemUpgrade(worldId, UpgradeKind.STORAGE));
+
+        // The kind they hold none of is filler, and a click on filler asks for nothing.
+        menu.handleClick(owner, WorldMenu.SLOT_REDEEM_BORDER, ClickType.LEFT);
+        assertThatThrownBy(owner::nextSentMessage)
+                .as("no intent may leave the node for an upgrade the owner does not hold")
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("WorldMenu never offers redemption on somebody else's world (FR-31a)")
+    void worldMenuHidesRedeemFromNonOwners() {
+        RecordingPlayerMock viewer = createRecordingPlayer("Grace");
+        PlayerWorld someoneElses = readyWorld(WorldId.random(), UUID.randomUUID(), "not-graces");
+
+        // The counts a non-owner could never legitimately be handed, to prove the screen
+        // and the click path both refuse them rather than only the loader.
+        WorldMenu menu = new WorldMenu(
+                menuService, channel, someoneElses, Map.of(UpgradeKind.STORAGE, 1, UpgradeKind.BORDER, 1));
+        Inventory inv = menu.render(viewer);
+
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_STORAGE).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_BORDER).getType()).isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
+
+        menu.handleClick(viewer, WorldMenu.SLOT_REDEEM_STORAGE, ClickType.LEFT);
+        assertThatThrownBy(viewer::nextSentMessage)
+                .as("spending an upgrade on a world you do not own is not a thing the GUI can ask for")
                 .isInstanceOf(IllegalStateException.class);
     }
 
@@ -659,6 +716,34 @@ class CoreScreensTest {
             return f4.isDone();
         });
         assertThat(menuService.activeScreen(player).get()).isInstanceOf(StorageMenu.class);
+    }
+
+    @Test
+    @DisplayName("openWorldMenu counts the owner's unspent upgrades so the entry can be drawn (FR-45)")
+    void openWorldMenuLoadsUnspentUpgrades() throws Exception {
+        RecordingPlayerMock owner = createRecordingPlayer("Heidi");
+        WorldId worldId = WorldId.random();
+        onDb(() ->
+                worldRepository.create(worldId, owner.getUniqueId(), "heidis-world", 321L, 5000, Visibility.PRIVATE));
+        onDb(() -> upgradeRepo.grant(owner.getUniqueId(), UpgradeKind.BORDER, 1000L, "order-heidi-1"));
+        // Spent already, so it must not be offered a second time.
+        var spent = onDb(() -> upgradeRepo.grant(owner.getUniqueId(), UpgradeKind.STORAGE, 1024L, "order-heidi-2"));
+        onDb(() -> upgradeRepo.redeem(spent.upgrade().id(), owner.getUniqueId(), worldId));
+
+        CompletableFuture<Void> opened = menuService.openWorldMenu(owner, worldId);
+        awaitCondition(() -> {
+            drainMain();
+            return opened.isDone();
+        });
+
+        WorldMenu menu = (WorldMenu) menuService.activeScreen(owner).orElseThrow();
+        Inventory inv = menu.render(owner);
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_BORDER).getType())
+                .as("the unspent border upgrade reached the screen")
+                .isEqualTo(Material.MAP);
+        assertThat(inv.getItem(WorldMenu.SLOT_REDEEM_STORAGE).getType())
+                .as("an upgrade already spent is not offered again")
+                .isEqualTo(Material.GRAY_STAINED_GLASS_PANE);
     }
 
     private void drainMain() {

@@ -127,6 +127,7 @@ class MenuChannelListenerTest {
                 bans,
                 names,
                 new WorldUpgradeRepository(database),
+                actions.storageTiers(),
                 () -> policy,
                 executors);
         listener = new MenuChannelListener(actions, viewService);

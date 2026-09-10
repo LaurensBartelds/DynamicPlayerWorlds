@@ -2103,6 +2103,42 @@ public final class WorldActions {
     }
 
     /**
+     * Spends the caller's oldest unredeemed upgrade of {@code kind} on a world (FR-45).
+     *
+     * <p>The GUI's route to redemption. A menu button cannot carry an upgrade id, and it does
+     * not need one: upgrades of a kind are interchangeable, so the oldest is spent and the
+     * player keeps the rest. {@code /world upgrades redeem <id>} remains for picking one.
+     *
+     * @param caller the owner
+     * @param kind which dial to spend on
+     * @param worldId the world to spend it on, or null to resolve it as §6.1 says
+     * @return the outcome
+     */
+    public CompletableFuture<ActionResult> redeemOldestUpgrade(
+            Player caller, UpgradeKind kind, @Nullable WorldId worldId) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(kind, "kind");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Optional<WorldUpgrade> oldest = upgrades.listUnredeemed(caller.getUniqueId()).stream()
+                                .filter(upgrade -> upgrade.kind() == kind)
+                                .findFirst();
+                        if (oldest.isEmpty()) {
+                            return ActionResult.failure(
+                                    FailureCode.WORLD_NOT_FOUND, error("messages.command.upgrades.none-of-kind"));
+                        }
+                        return redeemUpgrade(caller, oldest.get().id(), worldId).join();
+                    } catch (SQLException e) {
+                        log.error("menu upgrade redeem failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
      * {@code /world admin upgrade grant} — records a purchase (FR-44).
      *
      * <p>This is the whole integration surface a webstore needs, and it is idempotent on
@@ -2437,6 +2473,18 @@ public final class WorldActions {
     /** One-time purchased upgrades (FR-44, FR-45). */
     public WorldUpgradeRepository upgrades() {
         return upgrades;
+    }
+
+    /**
+     * The subscription tier resolver (FR-43), shared so the menus answer as the commands do.
+     *
+     * <p>One instance rather than one per surface: {@link StorageTiers} decides once whether
+     * LuckPerms can enumerate permissions and remembers it, so a second instance would repeat
+     * that detection and log it twice — and, worse, could reach a different answer if it were
+     * constructed before the permission plugin had loaded.
+     */
+    public StorageTiers storageTiers() {
+        return storageTiers;
     }
 
     public Component refuseForQuota(
