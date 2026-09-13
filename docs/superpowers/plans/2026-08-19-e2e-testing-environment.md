@@ -38,7 +38,7 @@ Expose host port `5432` for `postgres`, `9000` (S3 API) and `9001` (Web Console)
     networks: [e2e]
 
   minio:
-    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${E2E_MINIO_USER:-gzmn-e2e}

@@ -38,7 +38,7 @@ graph TD
 | Service | Image / Base | Host Port | Internal Port | Purpose |
 | :--- | :--- | :--- | :--- | :--- |
 | `postgres` | `postgres:18.3` | `5432` | `5432` | Authoritative database for player worlds, leases, memberships, and network policy. |
-| `minio` | `minio/minio:RELEASE.2025-04-22T22-12-26Z` | `9000` (API)<br>`9001` (Web) | `9000`<br>`9001` | S3-compatible world storage source of truth. |
+| `minio` | `quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z` | `9000` (API)<br>`9001` (Web) | `9000`<br>`9001` | S3-compatible world storage source of truth. |
 | `minio-init` | `minio/mc:RELEASE.2025-04-16T18-13-26Z` | — | — | One-shot container creating the `gzmn-worlds` bucket on stack startup. |
 | `paper-a` | `eclipse-temurin:25-jre` | `25575` (RCON) | `25565` (MC)<br>`25575` (RCON) | Primary backend node (Lobby + Player Worlds). Staged at `e2e/runtime/paper-a`. |
 | `paper-b` | `eclipse-temurin:25-jre` | `25576` (RCON) | `25565` (MC)<br>`25575` (RCON) | Secondary backend node for multi-node migration testing. Staged at `e2e/runtime/paper-b`. |

@@ -45,7 +45,7 @@ The stack is composed of 5 services defined in [`e2e/compose.yml`](compose.yml):
 | Service | Image / Version | Role |
 | --- | --- | --- |
 | `postgres` | `postgres:18.3` | Shared PostgreSQL database storing worlds, leases, members, profiles, and node metadata. |
-| `minio` + `minio-init` | `minio/minio` | S3-compatible object store managing world snapshot archives in bucket `gzmn-worlds`. |
+| `minio` + `minio-init` | `quay.io/minio/minio` | S3-compatible object store managing world snapshot archives in bucket `gzmn-worlds`. |
 | `paper-a` | `eclipse-temurin:25-jre` + Paper 26.2 | Primary backend lobby node running `gzmn-worlds` and `e2e-harness`. |
 | `paper-b` | `eclipse-temurin:25-jre` + Paper 26.2 | Secondary backend node for multi-node routing and lease transfers. |
 | `velocity` | `eclipse-temurin:25-jre` + Velocity 4 | Velocity proxy running `gzmn-worlds-proxy`, forwarding traffic and routing players. |
