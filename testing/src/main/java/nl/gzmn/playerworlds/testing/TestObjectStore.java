@@ -47,8 +47,10 @@ public final class TestObjectStore {
     public static synchronized MinIOContainer container() {
         MinIOContainer current = container;
         if (current == null) {
-            MinIOContainer started =
-                    new MinIOContainer(org.testcontainers.utility.DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("minio/minio")).withUserName(USER).withPassword(PASSWORD);
+            MinIOContainer started = new MinIOContainer(org.testcontainers.utility.DockerImageName.parse(IMAGE)
+                            .asCompatibleSubstituteFor("minio/minio"))
+                    .withUserName(USER)
+                    .withPassword(PASSWORD);
             started.start();
             container = started;
             current = started;
