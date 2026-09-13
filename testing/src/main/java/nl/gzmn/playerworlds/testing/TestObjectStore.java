@@ -48,7 +48,7 @@ public final class TestObjectStore {
         MinIOContainer current = container;
         if (current == null) {
             MinIOContainer started =
-                    new MinIOContainer(IMAGE).withUserName(USER).withPassword(PASSWORD);
+                    new MinIOContainer(org.testcontainers.utility.DockerImageName.parse(IMAGE).asCompatibleSubstituteFor("minio/minio")).withUserName(USER).withPassword(PASSWORD);
             started.start();
             container = started;
             current = started;
