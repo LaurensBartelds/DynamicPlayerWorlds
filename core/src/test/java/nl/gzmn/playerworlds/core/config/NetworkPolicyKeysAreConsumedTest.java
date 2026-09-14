@@ -86,7 +86,8 @@ class NetworkPolicyKeysAreConsumedTest {
                 continue;
             }
             try (Stream<Path> files = Files.walk(srcDir)) {
-                for (Path file : files.filter(p -> p.toString().endsWith(".java")).toList()) {
+                for (Path file :
+                        files.filter(p -> p.toString().endsWith(".java")).toList()) {
                     if (excludedFileNames.contains(file.getFileName().toString())) {
                         continue;
                     }

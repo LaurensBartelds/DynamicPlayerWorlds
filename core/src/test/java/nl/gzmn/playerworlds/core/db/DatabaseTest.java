@@ -92,7 +92,9 @@ class DatabaseTest {
         AdvisoryLock lock = AdvisoryLock.forTesting(database, raw, AdvisoryLock.MAINTENANCE_KEY + 999);
         lock.close();
 
-        assertThat(raw.isClosed()).as("the connection is always closed from the caller's view").isTrue();
+        assertThat(raw.isClosed())
+                .as("the connection is always closed from the caller's view")
+                .isTrue();
         // Eviction destroys the physical connection synchronously in Hikari's
         // own bookkeeping; the old behaviour (a plain connection.close())
         // would have left this count unchanged, ready for a future,
