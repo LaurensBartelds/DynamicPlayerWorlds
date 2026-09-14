@@ -1,5 +1,6 @@
 package nl.gzmn.playerworlds.lobby;
 
+import com.destroystokyo.paper.profile.PlayerProfile;
 import java.util.List;
 import java.util.Objects;
 import net.kyori.adventure.text.Component;
@@ -12,6 +13,7 @@ import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Pure utility class for converting {@link MenuItemDescriptor}s into Bukkit {@link ItemStack}s.
@@ -27,6 +29,22 @@ public final class LobbyItemUtil {
      * @return constructed ItemStack
      */
     public static ItemStack create(MenuItemDescriptor descriptor) {
+        return create(descriptor, null);
+    }
+
+    /**
+     * Converts a {@link MenuItemDescriptor} into a Bukkit {@link ItemStack}, preferring a
+     * texture already resolved by {@link LobbyHeadProfiles}.
+     *
+     * <p>{@code Bukkit.getOfflinePlayer} remains the fallback, but it is only ever a
+     * fallback: the profile it returns for a player the lobby has never seen carries no
+     * texture, and the head then renders as the default skin.
+     *
+     * @param descriptor the item descriptor
+     * @param heads resolved textures, or {@code null} where none have been resolved
+     * @return constructed ItemStack
+     */
+    public static ItemStack create(MenuItemDescriptor descriptor, @Nullable LobbyHeadProfiles heads) {
         Objects.requireNonNull(descriptor, "descriptor");
 
         Material material = Material.matchMaterial(descriptor.materialName());
@@ -44,7 +62,12 @@ public final class LobbyItemUtil {
             meta.lore(lore);
 
             if (descriptor.skullOwner() != null && meta instanceof SkullMeta skullMeta) {
-                skullMeta.setOwningPlayer(Bukkit.getOfflinePlayer(descriptor.skullOwner()));
+                PlayerProfile profile = heads == null ? null : heads.cached(descriptor.skullOwner());
+                if (profile != null) {
+                    skullMeta.setPlayerProfile(profile);
+                } else {
+                    skullMeta.setOwningPlayer(Bukkit.getOfflinePlayer(descriptor.skullOwner()));
+                }
             }
 
             meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);

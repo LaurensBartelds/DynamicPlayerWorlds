@@ -1,8 +1,10 @@
 package nl.gzmn.playerworlds.lobby;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,9 +37,11 @@ public final class LobbyMenuChannel implements PluginMessageListener {
     private static final AtomicLong CORRELATION_SEQUENCE = new AtomicLong(1);
 
     private final Plugin plugin;
+    private final LobbyHeadProfiles heads;
 
     public LobbyMenuChannel(Plugin plugin) {
         this.plugin = Objects.requireNonNull(plugin, "plugin");
+        this.heads = new LobbyHeadProfiles(plugin);
     }
 
     /**
@@ -112,13 +116,36 @@ public final class LobbyMenuChannel implements PluginMessageListener {
         Inventory inventory = Bukkit.createInventory(holder, payload.size(), title);
         holder.setInventory(inventory);
 
+        fillItems(inventory, payload);
+        player.openInventory(inventory);
+
+        // The menu never waits on Mojang. Resolving a head texture is an HTTP call, so the
+        // screen opens now with whatever is already known -- the default skin, on the first
+        // sight of a player -- and the heads are replaced in place once the lookup lands.
+        // Deferring the open instead would put a network round trip in front of every menu
+        // the first time it is drawn.
+        List<UUID> unresolved = payload.items().stream()
+                .map(MenuItemDescriptor::skullOwner)
+                .filter(Objects::nonNull)
+                .distinct()
+                .toList();
+        if (!heads.allKnown(unresolved)) {
+            heads.resolveThen(unresolved, () -> {
+                // Only if they are still looking at this very screen. A player who has
+                // clicked on to another one must not have it redrawn underneath them.
+                if (player.isOnline() && player.getOpenInventory().getTopInventory() == inventory) {
+                    fillItems(inventory, payload);
+                }
+            });
+        }
+    }
+
+    private void fillItems(Inventory inventory, RenderMenuPayload payload) {
         for (MenuItemDescriptor item : payload.items()) {
             if (item.slot() >= 0 && item.slot() < payload.size()) {
-                inventory.setItem(item.slot(), LobbyItemUtil.create(item));
+                inventory.setItem(item.slot(), LobbyItemUtil.create(item, heads));
             }
         }
-
-        player.openInventory(inventory);
     }
 
     /**

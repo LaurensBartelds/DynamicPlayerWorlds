@@ -1,7 +1,9 @@
 package nl.gzmn.playerworlds.proxy.menu;
 
+import com.velocitypowered.api.proxy.Player;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,27 +13,28 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
-import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.db.MembershipRepository;
 import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.RenderMenuPayload;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldInvite;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
+import nl.gzmn.playerworlds.core.model.WorldUpgrade;
 import nl.gzmn.playerworlds.proxy.command.Messages;
 import nl.gzmn.playerworlds.proxy.menu.screens.BansScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.BrowseScreenBuilder;
@@ -43,6 +46,7 @@ import nl.gzmn.playerworlds.proxy.menu.screens.MyWorldsScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.SettingsScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.StorageScreenBuilder;
 import nl.gzmn.playerworlds.proxy.menu.screens.WorldDetailScreenBuilder;
+import nl.gzmn.playerworlds.proxy.permission.StorageTiers;
 import org.jspecify.annotations.Nullable;
 
 /**
@@ -56,6 +60,18 @@ public final class MenuViewService {
     private final TransferRequestRepository transferRepository;
     private final WorldBanRepository banRepository;
     private final PlayerNameRepository nameRepository;
+    private final WorldUpgradeRepository upgradeRepository;
+
+    /**
+     * Subscription tiers (FR-43), shared with the commands.
+     *
+     * <p>The screens have to answer the same as {@code /world create} does. Resolved here from
+     * a bare permission predicate they could only probe the configured tiers, so a subscriber
+     * whose tier LuckPerms knows about but {@code worlds.slot-tiers} does not was shown the
+     * network default while the command let them past it.
+     */
+    private final StorageTiers storageTiers;
+
     private final Supplier<NetworkPolicy> policySupplier;
     private final Executor dbExecutor;
     private final Messages messages;
@@ -66,6 +82,8 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
+            StorageTiers storageTiers,
             Supplier<NetworkPolicy> policySupplier,
             PluginExecutors executors) {
         this(
@@ -74,6 +92,8 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
+                storageTiers,
                 policySupplier,
                 executors,
                 null);
@@ -85,6 +105,8 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
+            StorageTiers storageTiers,
             Supplier<NetworkPolicy> policySupplier,
             PluginExecutors executors,
             @Nullable Supplier<MessageCatalog> messageCatalog) {
@@ -94,6 +116,8 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
+                storageTiers,
                 policySupplier,
                 Objects.requireNonNull(executors, "executors").db(),
                 messageCatalog);
@@ -105,6 +129,8 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
+            StorageTiers storageTiers,
             Supplier<NetworkPolicy> policySupplier,
             Executor dbExecutor) {
         this(
@@ -113,6 +139,8 @@ public final class MenuViewService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
+                storageTiers,
                 policySupplier,
                 dbExecutor,
                 null);
@@ -124,6 +152,8 @@ public final class MenuViewService {
             TransferRequestRepository transferRepository,
             WorldBanRepository banRepository,
             PlayerNameRepository nameRepository,
+            WorldUpgradeRepository upgradeRepository,
+            StorageTiers storageTiers,
             Supplier<NetworkPolicy> policySupplier,
             Executor dbExecutor,
             @Nullable Supplier<MessageCatalog> messageCatalog) {
@@ -132,6 +162,8 @@ public final class MenuViewService {
         this.transferRepository = Objects.requireNonNull(transferRepository, "transferRepository");
         this.banRepository = Objects.requireNonNull(banRepository, "banRepository");
         this.nameRepository = Objects.requireNonNull(nameRepository, "nameRepository");
+        this.upgradeRepository = Objects.requireNonNull(upgradeRepository, "upgradeRepository");
+        this.storageTiers = Objects.requireNonNull(storageTiers, "storageTiers");
         this.policySupplier = Objects.requireNonNull(policySupplier, "policySupplier");
         this.dbExecutor = Objects.requireNonNull(dbExecutor, "dbExecutor");
         this.messages = new Messages(messageCatalog);
@@ -145,17 +177,9 @@ public final class MenuViewService {
     /**
      * Builds the main hub menu screen payload.
      */
-    public CompletableFuture<RenderMenuPayload> buildMainMenu(UUID playerUuid, long correlationId) {
-        return buildMainMenu(playerUuid, permission -> false, correlationId);
-    }
-
-    /**
-     * Builds the main hub menu screen payload with a permission checker for storage tiers.
-     */
-    public CompletableFuture<RenderMenuPayload> buildMainMenu(
-            UUID playerUuid, Predicate<String> permissionCheck, long correlationId) {
-        Objects.requireNonNull(playerUuid, "playerUuid");
-        Objects.requireNonNull(permissionCheck, "permissionCheck");
+    public CompletableFuture<RenderMenuPayload> buildMainMenu(Player player, long correlationId) {
+        Objects.requireNonNull(player, "player");
+        UUID playerUuid = player.getUniqueId();
 
         return CompletableFuture.supplyAsync(
                 () -> {
@@ -166,14 +190,11 @@ public final class MenuViewService {
                                 .findLiveInvitesFor(playerUuid)
                                 .size();
                         NetworkPolicy pol = policySupplier.get();
-                        StorageQuota quota = StorageQuotaResolver.evaluate(
-                                playerUuid,
-                                used,
-                                permissionCheck,
-                                pol.storageQuotaTiers(),
-                                pol.defaultStorageLimitBytes());
-                        return MainScreenBuilder.build(
-                                messages, correlationId, owned, pol.maxWorldsPerPlayer(), invites, quota);
+                        StorageQuota quota = storageTiers
+                                .evaluate(player, used, pol, upgradeRepository.bonusStorageBytes(playerUuid))
+                                .quota();
+                        int slots = storageTiers.slots(player, pol);
+                        return MainScreenBuilder.build(messages, correlationId, owned, slots, invites, quota);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -184,15 +205,20 @@ public final class MenuViewService {
     /**
      * Builds page 0 of the owned worlds menu screen.
      */
-    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(UUID playerUuid, long correlationId) {
-        return buildMyWorldsMenu(playerUuid, 0, correlationId);
+    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(Player player, long correlationId) {
+        return buildMyWorldsMenu(player, 0, correlationId);
     }
 
     /**
      * Builds a specific page of the owned worlds menu screen.
+     *
+     * <p>Takes the permission check because the screen states the world cap, and a
+     * subscriber's cap is not the network's (FR-43). Showing them the default would tell a
+     * player who has paid for ten slots that they have two.
      */
-    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(UUID playerUuid, int page, long correlationId) {
-        Objects.requireNonNull(playerUuid, "playerUuid");
+    public CompletableFuture<RenderMenuPayload> buildMyWorldsMenu(Player player, int page, long correlationId) {
+        Objects.requireNonNull(player, "player");
+        UUID playerUuid = player.getUniqueId();
 
         return CompletableFuture.supplyAsync(
                 () -> {
@@ -201,8 +227,8 @@ public final class MenuViewService {
                         List<PlayerWorld> shared = worldRepository.listSharedWith(playerUuid);
                         Map<WorldId, Role> roles = sharedRoles(playerUuid, shared);
                         NetworkPolicy pol = policySupplier.get();
-                        return MyWorldsScreenBuilder.build(
-                                messages, correlationId, owned, shared, roles, page, pol.maxWorldsPerPlayer());
+                        int slots = storageTiers.slots(player, pol);
+                        return MyWorldsScreenBuilder.build(messages, correlationId, owned, shared, roles, page, slots);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -217,6 +243,15 @@ public final class MenuViewService {
      * already bounded by how many invites a player has accepted, and the menu is
      * rendered on a database thread that other menus are queueing behind.
      */
+    /** How many unspent upgrades of each kind a player is holding (FR-45). */
+    private Map<UpgradeKind, Integer> unspentByKind(UUID ownerUuid) throws SQLException {
+        Map<UpgradeKind, Integer> counts = new EnumMap<>(UpgradeKind.class);
+        for (WorldUpgrade upgrade : upgradeRepository.listUnredeemed(ownerUuid)) {
+            counts.merge(upgrade.kind(), 1, Integer::sum);
+        }
+        return counts;
+    }
+
     private Map<WorldId, Role> sharedRoles(UUID playerUuid, List<PlayerWorld> shared) throws SQLException {
         if (shared.isEmpty()) {
             return Map.of();
@@ -259,7 +294,11 @@ public final class MenuViewService {
                         }
                         PlayerWorld world = worldOpt.get();
                         boolean manage = viewerUuid == null || world.ownerUuid().equals(viewerUuid);
-                        return WorldDetailScreenBuilder.build(messages, correlationId, world, manage);
+                        // Only an owner may spend an upgrade here, and only their own: the
+                        // redeem entries are drawn from the viewer's unspent upgrades (FR-45).
+                        Map<UpgradeKind, Integer> unspent =
+                                manage && viewerUuid != null ? unspentByKind(viewerUuid) : Map.of();
+                        return WorldDetailScreenBuilder.build(messages, correlationId, world, manage, unspent);
                     } catch (SQLException e) {
                         throw new CompletionException(e);
                     }
@@ -332,17 +371,9 @@ public final class MenuViewService {
     /**
      * Builds the storage breakdown screen for a player.
      */
-    public CompletableFuture<RenderMenuPayload> buildStorageMenu(UUID playerUuid, long correlationId) {
-        return buildStorageMenu(playerUuid, permission -> false, correlationId);
-    }
-
-    /**
-     * Builds the storage breakdown screen with a permission checker for a player.
-     */
-    public CompletableFuture<RenderMenuPayload> buildStorageMenu(
-            UUID playerUuid, Predicate<String> permissionCheck, long correlationId) {
-        Objects.requireNonNull(playerUuid, "playerUuid");
-        Objects.requireNonNull(permissionCheck, "permissionCheck");
+    public CompletableFuture<RenderMenuPayload> buildStorageMenu(Player player, long correlationId) {
+        Objects.requireNonNull(player, "player");
+        UUID playerUuid = player.getUniqueId();
 
         return CompletableFuture.supplyAsync(
                 () -> {
@@ -350,12 +381,9 @@ public final class MenuViewService {
                         List<PlayerWorld> owned = worldRepository.listOwnedBy(playerUuid);
                         long used = worldRepository.totalStorageUsedBy(playerUuid);
                         NetworkPolicy pol = policySupplier.get();
-                        StorageQuota quota = StorageQuotaResolver.evaluate(
-                                playerUuid,
-                                used,
-                                permissionCheck,
-                                pol.storageQuotaTiers(),
-                                pol.defaultStorageLimitBytes());
+                        StorageQuota quota = storageTiers
+                                .evaluate(player, used, pol, upgradeRepository.bonusStorageBytes(playerUuid))
+                                .quota();
                         return StorageScreenBuilder.build(messages, correlationId, quota, owned);
                     } catch (SQLException e) {
                         throw new CompletionException(e);

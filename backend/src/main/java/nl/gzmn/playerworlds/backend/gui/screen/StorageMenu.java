@@ -71,7 +71,7 @@ public final class StorageMenu implements GuiScreen {
                                         "limit",
                                         quota.unlimited()
                                                 ? "Unlimited"
-                                                : StorageQuotaResolver.formatBytes(quota.limitBytes())),
+                                                : StorageQuotaResolver.formatBytes(quota.effectiveLimitBytes())),
                                 Placeholders.raw(
                                         "usage",
                                         quota.unlimited()

@@ -83,7 +83,7 @@ public final class MainMenu implements GuiScreen {
                                         data.storageQuota().unlimited()
                                                 ? "Unlimited"
                                                 : StorageQuotaResolver.formatBytes(
-                                                        data.storageQuota().limitBytes())))));
+                                                        data.storageQuota().effectiveLimitBytes())))));
 
         inventory.setItem(
                 SLOT_INVITES,

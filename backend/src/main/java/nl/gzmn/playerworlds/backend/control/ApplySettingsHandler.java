@@ -1,8 +1,10 @@
 package nl.gzmn.playerworlds.backend.control;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import nl.gzmn.playerworlds.backend.platform.DimensionKind;
 import nl.gzmn.playerworlds.backend.platform.Platform;
 import nl.gzmn.playerworlds.backend.platform.WorldRuntime;
@@ -12,10 +14,12 @@ import nl.gzmn.playerworlds.backend.world.WorldFolders;
 import nl.gzmn.playerworlds.backend.world.WorldRegistry;
 import nl.gzmn.playerworlds.backend.world.WorldSettingsCache;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.control.CommandHandler;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandResult;
 import nl.gzmn.playerworlds.core.control.NodeCommand;
+import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
 import org.bukkit.Bukkit;
@@ -36,6 +40,10 @@ import org.slf4j.LoggerFactory;
  * dimension. Container and interact rules only need the settings cache (see
  * {@link nl.gzmn.playerworlds.backend.world.RoleEnforcementListener}).
  *
+ * <p>Since FR-3c the same command also carries a border raise. {@code border_radius} is no
+ * longer fixed at creation, and like a gamerule it lives in {@code level.dat} as well as the
+ * database, so a loaded world needs it re-asserted rather than merely cached.
+ *
  * <p>Idempotent (CP-5): a missing world, or a world not held here, completes
  * {@code OK} after refreshing (or dropping) the cache. Completing the row means
  * the effect has happened — the main-thread gamerule write is waited on.
@@ -53,6 +61,9 @@ public final class ApplySettingsHandler implements CommandHandler {
     private final @Nullable Platform platform;
     private final @Nullable PluginExecutors executors;
 
+    /** Supplies {@code worlds.nether-border-divisor} for the FR-3 border re-assert. */
+    private final @Nullable Supplier<NetworkPolicy> policy;
+
     public ApplySettingsHandler(
             WorldCacheLoader caches,
             WorldSettingsCache settingsCache,
@@ -60,12 +71,24 @@ public final class ApplySettingsHandler implements CommandHandler {
             @Nullable WorldFolders folders,
             @Nullable Platform platform,
             @Nullable PluginExecutors executors) {
+        this(caches, settingsCache, registry, folders, platform, executors, null);
+    }
+
+    public ApplySettingsHandler(
+            WorldCacheLoader caches,
+            WorldSettingsCache settingsCache,
+            @Nullable WorldRegistry registry,
+            @Nullable WorldFolders folders,
+            @Nullable Platform platform,
+            @Nullable PluginExecutors executors,
+            @Nullable Supplier<NetworkPolicy> policy) {
         this.caches = Objects.requireNonNull(caches, "caches");
         this.settingsCache = Objects.requireNonNull(settingsCache, "settingsCache");
         this.registry = registry;
         this.folders = folders;
         this.platform = platform;
         this.executors = executors;
+        this.policy = policy;
     }
 
     @Override
@@ -77,7 +100,8 @@ public final class ApplySettingsHandler implements CommandHandler {
 
         // Inline JDBC refresh (CP-5): completed means the node is already answering
         // from the new settings, not that a refresh was scheduled elsewhere.
-        if (!caches.refresh(worldId)) {
+        Optional<PlayerWorld> row = caches.reload(worldId);
+        if (row.isEmpty()) {
             return CommandResult.ok();
         }
 
@@ -87,6 +111,9 @@ public final class ApplySettingsHandler implements CommandHandler {
             // Keep LoadedWorld in step so a dimension materialised later (portal)
             // applies the same FR-9e values rather than the load-time snapshot.
             loaded.updateSettingsJson(settings.toJson());
+            // FR-3c. Raise-only here too: a stale command must not be able to shrink a
+            // border behind the requirement's back.
+            var _ = loaded.raiseBorderRadius(row.get().borderRadius());
         }
 
         WorldFolders worldFolders = folders;
@@ -100,11 +127,11 @@ public final class ApplySettingsHandler implements CommandHandler {
             return CommandResult.ok();
         }
 
-        applyGamerulesOnMain(worldId, loaded, settings, worldFolders, worldPlatform, pools);
+        applyOnMain(worldId, loaded, settings, worldFolders, worldPlatform, pools);
         return CommandResult.ok();
     }
 
-    private void applyGamerulesOnMain(
+    private void applyOnMain(
             WorldId worldId,
             LoadedWorld loaded,
             WorldSettings settings,
@@ -112,6 +139,7 @@ public final class ApplySettingsHandler implements CommandHandler {
             Platform worldPlatform,
             PluginExecutors pools)
             throws Exception {
+        int netherDivisor = (policy != null ? policy.get() : NetworkPolicy.defaults()).netherBorderDivisor();
         CompletableFuture<Void> applied = new CompletableFuture<>();
         pools.main().execute(() -> {
             try {
@@ -122,6 +150,10 @@ public final class ApplySettingsHandler implements CommandHandler {
                     if (world == null) {
                         continue;
                     }
+                    // FR-3, FR-3c: re-asserted from the database value on every apply, for the
+                    // same reason FR-3 re-asserts on every load -- level.dat's copy is not to
+                    // be trusted, and since FR-3c the database's copy can have moved.
+                    runtime.applyBorder(world, dimension, loaded.borderRadius(), netherDivisor);
                     runtime.setPvp(world, settings.pvp());
                     runtime.setMobGriefing(world, settings.mobGriefing());
                     runtime.setGameRule(world, GameRules.KEEP_INVENTORY, settings.keepInventory());

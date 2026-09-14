@@ -4,6 +4,7 @@ import com.velocitypowered.api.proxy.Player;
 import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
+import nl.gzmn.playerworlds.core.config.EntitlementTiers;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
@@ -11,7 +12,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Resolves a player's storage allowance from their permissions (§4, FR-30a).
+ * Resolves a player's subscription allowances from their permissions (§4, FR-30a, FR-43).
  *
  * <p>Two ways of answering the same question, because the platform decides which is possible.
  * Velocity's {@code PermissionSubject} exposes {@code hasPermission} and {@code getPermissionValue}
@@ -23,6 +24,11 @@ import org.slf4j.LoggerFactory;
  * <p>Detection is deliberately late and cached. A proxy plugin cannot assume LuckPerms has loaded
  * by the time this is constructed, so the first evaluation decides, and everything after it takes
  * the same route.
+ *
+ * <p>Storage was the first of these and gives the class its name; {@link #slots} and
+ * {@link #borderAllowance} are the same mechanism applied to the other two dials FR-42 puts up
+ * for sale. One-time purchases are not here at all — they are rows in {@code world_upgrade},
+ * for the reasons in FR-41 — and reach this class only as the {@code bonusBytes} argument.
  */
 public final class StorageTiers {
 
@@ -32,6 +38,40 @@ public final class StorageTiers {
     private static final String LUCKPERMS_PROVIDER = "net.luckperms.api.LuckPermsProvider";
 
     private volatile @org.jspecify.annotations.Nullable Boolean enumerable;
+
+    /**
+     * Where a player's whole permission set comes from, when something can list it.
+     *
+     * <p>A seam, and the only one: LuckPerms is reached through {@code Class.forName} and a
+     * static provider, so without this there is no way to exercise the enumerated route at
+     * all — every test would silently take the probing fallback and prove nothing about the
+     * half of FR-43 that an operator running LuckPerms actually gets.
+     */
+    @FunctionalInterface
+    public interface PermissionEnumerator {
+
+        /**
+         * @param player the player to list permissions for
+         * @return every node they hold, or empty when this backend cannot list them
+         */
+        Optional<Collection<String>> permissionsOf(Player player);
+    }
+
+    private final @org.jspecify.annotations.Nullable PermissionEnumerator enumerator;
+
+    /** Reads tiers from LuckPerms where it is installed, and by probing where it is not. */
+    public StorageTiers() {
+        this(null);
+    }
+
+    /**
+     * Reads tiers from a supplied backend.
+     *
+     * @param enumerator the permission source, or {@code null} for the LuckPerms default
+     */
+    public StorageTiers(@org.jspecify.annotations.Nullable PermissionEnumerator enumerator) {
+        this.enumerator = enumerator;
+    }
 
     /** How the last evaluation answered, for {@code /world storage} to explain itself. */
     public enum Source {
@@ -55,25 +95,26 @@ public final class StorageTiers {
      * @param player the player to evaluate, who must be online
      * @param usedBytes storage already attributed to them
      * @param policy the network policy supplying the default limit and the configured tiers
+     * @param bonusBytes bytes from their redeemed one-time {@code STORAGE} upgrades (FR-45),
+     *     which are a purchase rather than a subscription and so are read from
+     *     {@code world_upgrade} rather than from any permission
      */
-    public Resolution evaluate(Player player, long usedBytes, NetworkPolicy policy) {
+    public Resolution evaluate(Player player, long usedBytes, NetworkPolicy policy, long bonusBytes) {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(policy, "policy");
 
-        if (luckPermsPresent()) {
-            Optional<Collection<String>> held = LuckPermsTiers.heldPermissions(player);
-            if (held.isPresent()) {
-                // The admin and unlimited nodes are in the same map, so one lookup settles both
-                // the tier and the exemption.
-                boolean unlimited = held.get().stream()
-                        .anyMatch(node -> node.equalsIgnoreCase(StorageQuotaResolver.PERMISSION_ADMIN)
-                                || node.equalsIgnoreCase(StorageQuotaResolver.PERMISSION_STORAGE_UNLIMITED)
-                                || node.equals("*"));
-                long limit =
-                        StorageQuotaResolver.resolveLimitBytes(held.get(), false, policy.defaultStorageLimitBytes());
-                return new Resolution(
-                        new StorageQuota(player.getUniqueId(), usedBytes, limit, unlimited), Source.ENUMERATED);
-            }
+        Optional<Collection<String>> enumerated = enumeratedPermissions(player);
+        if (enumerated.isPresent()) {
+            Collection<String> held = enumerated.get();
+            // The admin and unlimited nodes are in the same map, so one lookup settles both
+            // the tier and the exemption.
+            boolean unlimited = held.stream()
+                    .anyMatch(node -> node.equalsIgnoreCase(StorageQuotaResolver.PERMISSION_ADMIN)
+                            || node.equalsIgnoreCase(StorageQuotaResolver.PERMISSION_STORAGE_UNLIMITED)
+                            || node.equals("*"));
+            long limit = StorageQuotaResolver.resolveLimitBytes(held, false, policy.defaultStorageLimitBytes());
+            return new Resolution(
+                    new StorageQuota(player.getUniqueId(), usedBytes, limit, bonusBytes, unlimited), Source.ENUMERATED);
         }
 
         return new Resolution(
@@ -82,8 +123,58 @@ public final class StorageTiers {
                         usedBytes,
                         player::hasPermission,
                         policy.storageQuotaTiers(),
-                        policy.defaultStorageLimitBytes()),
+                        policy.defaultStorageLimitBytes(),
+                        bonusBytes),
                 Source.PROBED);
+    }
+
+    /**
+     * How many worlds a player may own (FR-1, FR-43).
+     *
+     * @param player the player, who must be online
+     * @param policy the network policy supplying the default cap and the configured tiers
+     * @return the effective cap, never below {@code worlds.max-per-player}
+     */
+    public int slots(Player player, NetworkPolicy policy) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(policy, "policy");
+
+        return enumeratedPermissions(player)
+                .map(held -> EntitlementTiers.resolveSlots(held, policy.maxWorldsPerPlayer()))
+                .orElseGet(() -> EntitlementTiers.resolveSlots(
+                        player::hasPermission, policy.slotTiers(), policy.maxWorldsPerPlayer()));
+    }
+
+    /**
+     * The largest border radius a player's subscription lets them raise a world to (FR-3c,
+     * FR-43), already clamped to {@code worlds.max-border-radius}.
+     *
+     * <p>The clamp is here rather than left to callers because it is not an entitlement
+     * question: NFR-3 bounds a world's disk usage by its border and by nothing else, so the
+     * ceiling applies to everyone including whoever mistyped a tier.
+     *
+     * @param player the player, who must be online
+     * @param policy the network policy supplying the default radius, tiers and ceiling
+     * @return the largest radius they may ask for, before any per-world upgrade is added
+     */
+    public int borderAllowance(Player player, NetworkPolicy policy) {
+        Objects.requireNonNull(player, "player");
+        Objects.requireNonNull(policy, "policy");
+
+        int allowance = enumeratedPermissions(player)
+                .map(held -> EntitlementTiers.resolveBorder(held, policy.defaultBorderRadius()))
+                .orElseGet(() -> EntitlementTiers.resolveBorder(
+                        player::hasPermission, policy.borderTiers(), policy.defaultBorderRadius()));
+        return Math.min(allowance, policy.maxBorderRadius());
+    }
+
+    /** The player's whole permission set, when something can list it. */
+    private Optional<Collection<String>> enumeratedPermissions(Player player) {
+        PermissionEnumerator supplied = enumerator;
+        if (supplied != null) {
+            return supplied.permissionsOf(player);
+        }
+        return luckPermsPresent() ? LuckPermsTiers.heldPermissions(player) : Optional.empty();
     }
 
     /** Whether LuckPerms is usable, decided once and remembered. */

@@ -5,6 +5,7 @@ import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -22,6 +23,7 @@ import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
 import nl.gzmn.playerworlds.core.config.MessageCatalog;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
+import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
 import nl.gzmn.playerworlds.core.control.CommandKind;
 import nl.gzmn.playerworlds.core.control.CommandOutcomes;
@@ -38,17 +40,20 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
 import nl.gzmn.playerworlds.core.model.WorldState;
+import nl.gzmn.playerworlds.core.model.WorldUpgrade;
 import nl.gzmn.playerworlds.core.placement.PlacementDecision;
 import nl.gzmn.playerworlds.proxy.node.NodeRegistry;
 import nl.gzmn.playerworlds.proxy.node.Placement;
@@ -84,6 +89,13 @@ public final class WorldActions {
 
     /** For the one place that has to compose a delete and an enqueue into one transaction (R25). */
     private final Database database;
+
+    /**
+     * One-time purchased upgrades (FR-44). Built here rather than passed in: it is derived
+     * from the {@link Database} this class already holds, and threading it through every
+     * constructor overload would say it were a separate collaborator when it is not.
+     */
+    private final WorldUpgradeRepository upgrades;
 
     private final Supplier<NetworkPolicy> policy;
     private final StorageTiers storageTiers;
@@ -189,6 +201,7 @@ public final class WorldActions {
         this.placement = Objects.requireNonNull(placement, "placement");
         this.nodeCommands = Objects.requireNonNull(nodeCommands, "nodeCommands");
         this.database = Objects.requireNonNull(database, "database");
+        this.upgrades = new WorldUpgradeRepository(database);
         this.policy = Objects.requireNonNull(policy, "policy");
         this.storageTiers = Objects.requireNonNull(storageTiers, "storageTiers");
         this.messages = new Messages(messageCatalog);
@@ -225,13 +238,14 @@ public final class WorldActions {
                         NetworkPolicy current = policy.get();
                         UUID owner = caller.getUniqueId();
                         int owned = worlds.countOwnedBy(owner);
-                        if (owned >= current.maxWorldsPerPlayer()) {
+                        int slots = slotsFor(caller, current);
+                        if (owned >= slots) {
                             return ActionResult.failure(
                                     FailureCode.CAP_REACHED,
                                     error(
                                             "messages.command.create.cap-reached",
                                             Placeholders.count("owned", owned),
-                                            Placeholders.count("max", current.maxWorldsPerPlayer())));
+                                            Placeholders.count("max", slots)));
                         }
                         if (worlds.findByOwnerAndName(owner, name).isPresent()) {
                             return ActionResult.failure(
@@ -554,13 +568,14 @@ public final class WorldActions {
                                                     "state", world.state().name())));
                         }
                         int owned = worlds.countOwnedBy(caller.getUniqueId());
-                        if (owned >= current.maxWorldsPerPlayer()) {
+                        int slots = slotsFor(caller, current);
+                        if (owned >= slots) {
                             return ActionResult.failure(
                                     FailureCode.CAP_REACHED,
                                     error(
                                             "messages.command.restore.cap-reached",
                                             Placeholders.count("owned", owned),
-                                            Placeholders.count("max", current.maxWorldsPerPlayer())));
+                                            Placeholders.count("max", slots)));
                         }
                         StorageQuota quota = quotaFor(caller, current);
                         if (quota.isExceeded()) {
@@ -1100,13 +1115,14 @@ public final class WorldActions {
                                             Placeholders.text("world", world.name())));
                         }
                         int ownedCount = worlds.countOwnedBy(target.get());
-                        if (ownedCount >= current.maxWorldsPerPlayer()) {
+                        int targetSlots = slotsFor(target.get(), current);
+                        if (ownedCount >= targetSlots) {
                             return ActionResult.failure(
                                     FailureCode.CAP_REACHED,
                                     error(
                                             "messages.command.transfer.cap-reached",
                                             Placeholders.text("target", targetName),
-                                            Placeholders.count("max", current.maxWorldsPerPlayer())));
+                                            Placeholders.count("max", targetSlots)));
                         }
 
                         if (!confirmed) {
@@ -1186,12 +1202,13 @@ public final class WorldActions {
                                             Placeholders.text("owner", ownerName)));
                         }
                         int ownedCount = worlds.countOwnedBy(caller.getUniqueId());
-                        if (ownedCount >= current.maxWorldsPerPlayer()) {
+                        int slots = slotsFor(caller, current);
+                        if (ownedCount >= slots) {
                             return ActionResult.failure(
                                     FailureCode.CAP_REACHED,
                                     error(
                                             "messages.command.transfer-accept.cap-reached",
-                                            Placeholders.count("max", current.maxWorldsPerPlayer())));
+                                            Placeholders.count("max", slots)));
                         }
                         Optional<PlayerWorld> worldOpt =
                                 worlds.findById(matching.get().worldId());
@@ -1201,7 +1218,8 @@ public final class WorldActions {
                         }
                         PlayerWorld world = worldOpt.get();
                         StorageQuota quota = quotaFor(caller, current);
-                        if (!quota.unlimited() && quota.usedBytes() + world.storageBytes() > quota.limitBytes()) {
+                        if (!quota.unlimited()
+                                && quota.usedBytes() + world.storageBytes() > quota.effectiveLimitBytes()) {
                             return ActionResult.failure(
                                     FailureCode.QUOTA_EXCEEDED,
                                     refuseForQuota(
@@ -1210,6 +1228,7 @@ public final class WorldActions {
                                                     quota.playerUuid(),
                                                     quota.usedBytes() + world.storageBytes(),
                                                     quota.limitBytes(),
+                                                    quota.bonusBytes(),
                                                     false),
                                             "messages.command.generic.quota-attempted-accept",
                                             Placeholders.text("world", world.name())));
@@ -1912,6 +1931,351 @@ public final class WorldActions {
     }
 
     /**
+     * {@code /world border <radius> [world]} — raises a world's border (FR-3c).
+     *
+     * <p>Three ceilings apply and they are not the same thing. The owner's subscription tier
+     * says how far <em>they</em> may go; a redeemed {@code BORDER} upgrade adds to that for
+     * <em>this world only</em>; and {@code worlds.max-border-radius} caps everyone, because
+     * NFR-3 bounds disk usage by the border and nothing else does.
+     *
+     * @param caller the owner
+     * @param radius the radius to raise to, in blocks
+     * @param worldId the world, or null to resolve it as §6.1 says
+     * @return the outcome
+     */
+    public CompletableFuture<ActionResult> border(Player caller, int radius, @Nullable WorldId worldId) {
+        Objects.requireNonNull(caller, "caller");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        NetworkPolicy current = policy.get();
+                        Target scope = targetWorld(caller, worldId, "/world border <radius> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
+                        }
+                        PlayerWorld world = ((Target.Found) scope).world();
+
+                        if (radius < 1) {
+                            return ActionResult.failure(
+                                    FailureCode.INVALID_NAME,
+                                    error("messages.command.border.invalid", Placeholders.count("radius", radius)));
+                        }
+                        // FR-3c forbids lowering, and says why: the ring a smaller border
+                        // removes may have anything built in it, on the wrong side of a
+                        // barrier the player cannot cross.
+                        if (radius <= world.borderRadius()) {
+                            return ActionResult.failure(
+                                    FailureCode.STATE_CONFLICT,
+                                    error(
+                                            "messages.command.border.not-larger",
+                                            Placeholders.text("world", world.name()),
+                                            Placeholders.count("current", world.borderRadius()),
+                                            Placeholders.count("radius", radius)));
+                        }
+
+                        long bought = upgrades.borderBonusBlocks(world.id());
+                        int subscription = storageTiers.borderAllowance(caller, current);
+                        long allowedLong = subscription + bought;
+                        int allowed = (int) Math.min(allowedLong, current.maxBorderRadius());
+                        if (radius > allowed) {
+                            return ActionResult.failure(
+                                    FailureCode.PERMISSION_DENIED,
+                                    error(
+                                            "messages.command.border.beyond-allowance",
+                                            Placeholders.count("radius", radius),
+                                            Placeholders.count("allowed", allowed),
+                                            Placeholders.count("ceiling", current.maxBorderRadius())));
+                        }
+
+                        if (!worlds.raiseBorderRadius(world.id(), radius)) {
+                            // The statement is conditional on the border still being smaller,
+                            // so losing that race means somebody else already raised it.
+                            return ActionResult.failure(
+                                    FailureCode.STATE_CONFLICT, error("messages.command.border.not-raised"));
+                        }
+                        // FR-3 re-asserts the border from the database on every load, so an
+                        // unloaded world needs nothing; a loaded one needs telling.
+                        enqueueToWorldOrAliveNodes(
+                                world, CommandKind.APPLY_SETTINGS, NodeCommand.EMPTY_PAYLOAD, current);
+
+                        return ActionResult.success(success(
+                                "messages.command.border.success",
+                                Placeholders.text("world", world.name()),
+                                Placeholders.count("radius", radius),
+                                Placeholders.count("nether", radius / current.netherBorderDivisor())));
+                    } catch (SQLException e) {
+                        log.error("/world border failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * {@code /world upgrades} — what the caller has bought and what is still unspent (FR-45).
+     *
+     * @param caller the player
+     * @return the outcome, whose message is the listing
+     */
+    public CompletableFuture<ActionResult> listUpgrades(Player caller) {
+        Objects.requireNonNull(caller, "caller");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        List<WorldUpgrade> held = upgrades.listOwnedBy(caller.getUniqueId());
+                        if (held.isEmpty()) {
+                            return ActionResult.success(info("messages.command.upgrades.none"));
+                        }
+                        Map<WorldId, String> worldNames = new HashMap<>();
+                        for (PlayerWorld owned : worlds.listOwnedBy(caller.getUniqueId())) {
+                            worldNames.put(owned.id(), owned.name());
+                        }
+                        Component out = info("messages.command.upgrades.header");
+                        for (WorldUpgrade upgrade : held) {
+                            out = out.append(Component.newline()).append(renderUpgradeLine(upgrade, worldNames));
+                        }
+                        return ActionResult.success(out);
+                    } catch (SQLException e) {
+                        log.error("/world upgrades failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * {@code /world upgrades redeem <id> [world]} — spends one upgrade on a world (FR-45).
+     *
+     * <p>A {@code STORAGE} upgrade adds to the owner's pool; a {@code BORDER} one raises what
+     * they may set that world's border to, and is not the raise itself — {@code /world border}
+     * is, so that a player chooses the radius rather than having it moved under them.
+     *
+     * @param caller the player
+     * @param upgradeId the upgrade to spend
+     * @param worldId the world to spend it on, or null to resolve it as §6.1 says
+     * @return the outcome
+     */
+    public CompletableFuture<ActionResult> redeemUpgrade(Player caller, UUID upgradeId, @Nullable WorldId worldId) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(upgradeId, "upgradeId");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Target scope = targetWorld(caller, worldId, "/world upgrades redeem <id> <world>");
+                        if (scope instanceof Target.None none) {
+                            return none.refusal();
+                        }
+                        PlayerWorld world = ((Target.Found) scope).world();
+
+                        Optional<WorldUpgrade> redeemed = upgrades.redeem(upgradeId, caller.getUniqueId(), world.id());
+                        if (redeemed.isEmpty()) {
+                            // The conditional UPDATE covers three refusals at once: no such
+                            // upgrade, not theirs, or already spent. Re-reading says which.
+                            Optional<WorldUpgrade> existing = upgrades.findById(upgradeId);
+                            if (existing.isPresent()
+                                    && existing.get().ownerUuid().equals(caller.getUniqueId())
+                                    && !existing.get().unredeemed()) {
+                                return ActionResult.failure(
+                                        FailureCode.STATE_CONFLICT, error("messages.command.upgrades.already-spent"));
+                            }
+                            return ActionResult.failure(
+                                    FailureCode.WORLD_NOT_FOUND, error("messages.command.upgrades.not-yours"));
+                        }
+
+                        WorldUpgrade upgrade = redeemed.get();
+                        String key = upgrade.kind() == UpgradeKind.STORAGE
+                                ? "messages.command.upgrades.redeemed-storage"
+                                : "messages.command.upgrades.redeemed-border";
+                        return ActionResult.success(success(
+                                key,
+                                Placeholders.text("world", world.name()),
+                                Placeholders.bytes("size", upgrade.amount()),
+                                Placeholders.count("blocks", (int) Math.min(upgrade.amount(), Integer.MAX_VALUE))));
+                    } catch (SQLException e) {
+                        log.error("/world upgrades redeem failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * Spends the caller's oldest unredeemed upgrade of {@code kind} on a world (FR-45).
+     *
+     * <p>The GUI's route to redemption. A menu button cannot carry an upgrade id, and it does
+     * not need one: upgrades of a kind are interchangeable, so the oldest is spent and the
+     * player keeps the rest. {@code /world upgrades redeem <id>} remains for picking one.
+     *
+     * @param caller the owner
+     * @param kind which dial to spend on
+     * @param worldId the world to spend it on, or null to resolve it as §6.1 says
+     * @return the outcome
+     */
+    public CompletableFuture<ActionResult> redeemOldestUpgrade(
+            Player caller, UpgradeKind kind, @Nullable WorldId worldId) {
+        Objects.requireNonNull(caller, "caller");
+        Objects.requireNonNull(kind, "kind");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        Optional<WorldUpgrade> oldest = upgrades.listUnredeemed(caller.getUniqueId()).stream()
+                                .filter(upgrade -> upgrade.kind() == kind)
+                                .findFirst();
+                        if (oldest.isEmpty()) {
+                            return ActionResult.failure(
+                                    FailureCode.WORLD_NOT_FOUND, error("messages.command.upgrades.none-of-kind"));
+                        }
+                        return redeemUpgrade(caller, oldest.get().id(), worldId).join();
+                    } catch (SQLException e) {
+                        log.error("menu upgrade redeem failed for {}", caller.getUsername(), e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * {@code /world admin upgrade grant} — records a purchase (FR-44).
+     *
+     * <p>This is the whole integration surface a webstore needs, and it is idempotent on
+     * {@code reference}: a retried delivery grants one upgrade and says the second was
+     * already there. Nothing here sees a price or a currency.
+     *
+     * @param targetUuid the player who bought it
+     * @param kind what it raises
+     * @param amount bytes for STORAGE, blocks of radius for BORDER
+     * @param reference the grantor's transaction id
+     * @return the outcome, which distinguishes a new grant from a repeat
+     */
+    public CompletableFuture<ActionResult> grantUpgrade(
+            UUID targetUuid, UpgradeKind kind, long amount, String reference) {
+        Objects.requireNonNull(targetUuid, "targetUuid");
+        Objects.requireNonNull(kind, "kind");
+        Objects.requireNonNull(reference, "reference");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    if (amount <= 0) {
+                        return ActionResult.failure(
+                                FailureCode.INVALID_NAME, error("messages.command.admin.upgrade.invalid-amount"));
+                    }
+                    try {
+                        WorldUpgradeRepository.Grant grant = upgrades.grant(targetUuid, kind, amount, reference);
+                        String key = grant.created()
+                                ? "messages.command.admin.upgrade.granted"
+                                : "messages.command.admin.upgrade.already-granted";
+                        return ActionResult.success(success(
+                                key,
+                                Placeholders.raw("kind", kind.name()),
+                                Placeholders.raw("amount", describeAmount(grant.upgrade())),
+                                Placeholders.raw("reference", reference),
+                                Placeholders.raw("id", grant.upgrade().id().toString())));
+                    } catch (SQLException e) {
+                        log.error("/world admin upgrade grant failed for {}", targetUuid, e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * {@code /world admin upgrade revoke <ref>} — a refund or a mis-delivery.
+     *
+     * <p>Refuses one that has been spent. Clawing back a redeemed border upgrade would leave
+     * that world enlarged past its owner's allowance, and FR-3c forbids the only correction
+     * that would fix it.
+     *
+     * @param reference the grantor's transaction id
+     * @return the outcome
+     */
+    public CompletableFuture<ActionResult> revokeUpgrade(String reference) {
+        Objects.requireNonNull(reference, "reference");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        if (upgrades.revoke(reference)) {
+                            return ActionResult.success(success(
+                                    "messages.command.admin.upgrade.revoked",
+                                    Placeholders.raw("reference", reference)));
+                        }
+                        return ActionResult.failure(
+                                FailureCode.STATE_CONFLICT,
+                                error(
+                                        "messages.command.admin.upgrade.not-revocable",
+                                        Placeholders.raw("reference", reference)));
+                    } catch (SQLException e) {
+                        log.error("/world admin upgrade revoke failed for {}", reference, e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    /**
+     * {@code /world admin upgrade list <player>} — what a player holds, online or not.
+     *
+     * @param targetUuid the player
+     * @return the outcome, whose message is the listing
+     */
+    public CompletableFuture<ActionResult> listUpgradesOf(UUID targetUuid) {
+        Objects.requireNonNull(targetUuid, "targetUuid");
+        return CompletableFuture.supplyAsync(
+                () -> {
+                    try {
+                        List<WorldUpgrade> held = upgrades.listOwnedBy(targetUuid);
+                        if (held.isEmpty()) {
+                            return ActionResult.success(info("messages.command.upgrades.none"));
+                        }
+                        Map<WorldId, String> worldNames = new HashMap<>();
+                        for (PlayerWorld owned : worlds.listOwnedBy(targetUuid)) {
+                            worldNames.put(owned.id(), owned.name());
+                        }
+                        Component out = info("messages.command.upgrades.header");
+                        for (WorldUpgrade upgrade : held) {
+                            out = out.append(Component.newline()).append(renderUpgradeLine(upgrade, worldNames));
+                        }
+                        return ActionResult.success(out);
+                    } catch (SQLException e) {
+                        log.error("/world admin upgrade list failed for {}", targetUuid, e);
+                        return ActionResult.failure(
+                                FailureCode.GENERIC_ERROR, error("messages.command.generic-failure"));
+                    }
+                },
+                executors.db());
+    }
+
+    private Component renderUpgradeLine(WorldUpgrade upgrade, Map<WorldId, String> worldNames) {
+        if (upgrade.unredeemed()) {
+            return info(
+                    "messages.command.upgrades.entry-unspent",
+                    Placeholders.raw("id", upgrade.id().toString()),
+                    Placeholders.raw("kind", upgrade.kind().name()),
+                    Placeholders.raw("amount", describeAmount(upgrade)));
+        }
+        WorldId on = upgrade.worldId();
+        return info(
+                "messages.command.upgrades.entry-spent",
+                Placeholders.raw("kind", upgrade.kind().name()),
+                Placeholders.raw("amount", describeAmount(upgrade)),
+                Placeholders.text(
+                        "world",
+                        on == null
+                                ? "?"
+                                : worldNames.getOrDefault(on, on.value().toString())));
+    }
+
+    private static String describeAmount(WorldUpgrade upgrade) {
+        return upgrade.kind() == UpgradeKind.STORAGE
+                ? StorageQuotaResolver.formatBytes(upgrade.amount())
+                : upgrade.amount() + " blocks";
+    }
+
+    /**
      * Shows storage allowance and usage (FR-30a).
      */
     public CompletableFuture<ActionResult> storage(Player caller) {
@@ -1921,7 +2285,8 @@ public final class WorldActions {
                     try {
                         NetworkPolicy current = policy.get();
                         long used = worlds.totalStorageUsedBy(caller.getUniqueId());
-                        StorageTiers.Resolution resolved = storageTiers.evaluate(caller, used, current);
+                        long bought = upgrades.bonusStorageBytes(caller.getUniqueId());
+                        StorageTiers.Resolution resolved = storageTiers.evaluate(caller, used, current, bought);
                         renderStorage(
                                 caller,
                                 caller.getUsername(),
@@ -2070,7 +2435,56 @@ public final class WorldActions {
 
     public StorageQuota quotaFor(Player caller, NetworkPolicy current) throws SQLException {
         long used = worlds.totalStorageUsedBy(caller.getUniqueId());
-        return storageTiers.evaluate(caller, used, current).quota();
+        long bought = upgrades.bonusStorageBytes(caller.getUniqueId());
+        return storageTiers.evaluate(caller, used, current, bought).quota();
+    }
+
+    /**
+     * How many worlds this player may own: the network cap, raised by their subscription
+     * tier if they hold one (FR-1, FR-42, FR-43).
+     *
+     * @param caller the player
+     * @param current the policy in force
+     * @return the effective cap
+     */
+    public int slotsFor(Player caller, NetworkPolicy current) {
+        return storageTiers.slots(caller, current);
+    }
+
+    /**
+     * How many worlds a player may own when they may not be online (FR-43).
+     *
+     * <p>A subscription is permissions, and Velocity can only answer about a player it has
+     * a connection to. For an offline target the network default is the honest answer: it is
+     * what every player is entitled to, so the check refuses only what it is certain about
+     * and lets a subscriber's own {@code /world create} — where they are online by
+     * definition — be the place their tier is read.
+     *
+     * @param uuid the player, online or not
+     * @param current the policy in force
+     * @return their effective cap, or the network default when nothing can be read
+     */
+    public int slotsFor(UUID uuid, NetworkPolicy current) {
+        return proxy.getPlayer(uuid)
+                .map(online -> storageTiers.slots(online, current))
+                .orElseGet(current::maxWorldsPerPlayer);
+    }
+
+    /** One-time purchased upgrades (FR-44, FR-45). */
+    public WorldUpgradeRepository upgrades() {
+        return upgrades;
+    }
+
+    /**
+     * The subscription tier resolver (FR-43), shared so the menus answer as the commands do.
+     *
+     * <p>One instance rather than one per surface: {@link StorageTiers} decides once whether
+     * LuckPerms can enumerate permissions and remembers it, so a second instance would repeat
+     * that detection and log it twice — and, worse, could reach a different answer if it were
+     * constructed before the permission plugin had loaded.
+     */
+    public StorageTiers storageTiers() {
+        return storageTiers;
     }
 
     public Component refuseForQuota(
@@ -2080,7 +2494,7 @@ public final class WorldActions {
                 "messages.command.generic.quota-exceeded",
                 Placeholders.component("attempted", attempted),
                 Placeholders.bytes("used", quota.usedBytes()),
-                Placeholders.bytes("limit", quota.limitBytes()));
+                Placeholders.bytes("limit", quota.effectiveLimitBytes()));
         tell(caller, info("messages.command.generic.quota-hint"));
         return err;
     }
@@ -2100,7 +2514,7 @@ public final class WorldActions {
                             "messages.command.storage.summary-limited",
                             Placeholders.text("who", who),
                             Placeholders.bytes("used", quota.usedBytes()),
-                            Placeholders.bytes("limit", quota.limitBytes()),
+                            Placeholders.bytes("limit", quota.effectiveLimitBytes()),
                             Placeholders.raw("bar", progressBar(quota.percentage())),
                             Placeholders.raw("percent", String.format(Locale.ROOT, "%.0f", quota.percentage()))));
         }

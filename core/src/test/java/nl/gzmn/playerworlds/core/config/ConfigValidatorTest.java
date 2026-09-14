@@ -28,6 +28,29 @@ class ConfigValidatorTest {
     }
 
     @Test
+    @DisplayName("the border ceiling must be reachable from the default_FR3c")
+    void borderCeilingMustBeReachable() {
+        // Below the default, every world in the network is already over it and no raise can
+        // ever succeed, which is never what an operator meant.
+        NetworkPolicy policy = policyWith(Map.of(NetworkPolicy.KEY_MAX_BORDER_RADIUS, "1000"));
+
+        assertThatThrownBy(() -> ConfigValidator.validatePolicy(policy))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining(NetworkPolicy.KEY_MAX_BORDER_RADIUS);
+    }
+
+    @Test
+    @DisplayName("the nether border divisor must be at least 1 (FR-3)")
+    void netherBorderDivisorMustBePositive() {
+        // FR-3 divides by it, and since FR-3c so does the proxy when reporting a raise.
+        NetworkPolicy policy = policyWith(Map.of(NetworkPolicy.KEY_NETHER_BORDER_DIVISOR, "0"));
+
+        assertThatThrownBy(() -> ConfigValidator.validatePolicy(policy))
+                .isInstanceOf(ConfigException.class)
+                .hasMessageContaining(NetworkPolicy.KEY_NETHER_BORDER_DIVISOR);
+    }
+
+    @Test
     @DisplayName("dead-after must stay strictly below the lease (MN-18)")
     void deadAfterMustStayStrictlyBelowTheLease() {
         NetworkPolicy policy = policyWith(Map.of(

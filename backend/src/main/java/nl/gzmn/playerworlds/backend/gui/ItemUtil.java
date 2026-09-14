@@ -1,5 +1,6 @@
 package nl.gzmn.playerworlds.backend.gui;
 
+import com.destroystokyo.paper.profile.PlayerProfile;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -79,6 +80,30 @@ public final class ItemUtil {
      */
     public static ItemStack createPlayerHead(
             @Nullable UUID ownerUuid, @Nullable String fallbackOwnerName, Component name, List<Component> lore) {
+        return createPlayerHead(ownerUuid, fallbackOwnerName, name, lore, null);
+    }
+
+    /**
+     * Creates a player head {@link ItemStack}, preferring a texture already resolved by
+     * {@link HeadProfiles}.
+     *
+     * <p>{@code Bukkit.getOfflinePlayer} is the fallback rather than the first choice: the
+     * profile it returns for a player this node has never seen carries no texture, and the
+     * head then renders as the default skin. See {@link HeadProfiles}.
+     *
+     * @param ownerUuid the player UUID
+     * @param fallbackOwnerName fallback username if offline/unresolved
+     * @param name the display name component
+     * @param lore the lore lines
+     * @param heads resolved textures, or {@code null} where none have been prefetched
+     * @return constructed player head ItemStack
+     */
+    public static ItemStack createPlayerHead(
+            @Nullable UUID ownerUuid,
+            @Nullable String fallbackOwnerName,
+            Component name,
+            List<Component> lore,
+            @Nullable HeadProfiles heads) {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(lore, "lore");
 
@@ -87,7 +112,10 @@ public final class ItemUtil {
         if (meta != null) {
             meta.displayName(clean(name));
             meta.lore(lore.stream().map(ItemUtil::clean).toList());
-            if (ownerUuid != null) {
+            PlayerProfile profile = heads == null ? null : heads.cached(ownerUuid);
+            if (profile != null) {
+                meta.setPlayerProfile(profile);
+            } else if (ownerUuid != null) {
                 meta.setOwningPlayer(Bukkit.getOfflinePlayer(ownerUuid));
             } else if (fallbackOwnerName != null && !fallbackOwnerName.isBlank()) {
                 meta.setOwningPlayer(Bukkit.getOfflinePlayer(fallbackOwnerName));

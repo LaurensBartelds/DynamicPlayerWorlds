@@ -27,6 +27,7 @@ import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import nl.gzmn.playerworlds.core.concurrent.PluginExecutors;
+import nl.gzmn.playerworlds.core.config.EntitlementTiers;
 import nl.gzmn.playerworlds.core.config.NetworkPolicy;
 import nl.gzmn.playerworlds.core.config.StorageQuotaResolver;
 import nl.gzmn.playerworlds.core.control.ArchivePayload;
@@ -1412,7 +1413,7 @@ class WorldCommandTest {
     }
 
     private Player registerPlayer(UUID uuid, String username) {
-        return registerPlayer(uuid, username, permission -> true);
+        return registerPlayer(uuid, username, WorldCommandTest::ordinaryPermission);
     }
 
     /** A player whose permission answers are scripted, for the storage tier probe. */
@@ -1489,7 +1490,7 @@ class WorldCommandTest {
     }
 
     private Player mockPlayer(UUID uuid, String username, List<Component> receivedMessages) {
-        return mockPlayer(uuid, username, receivedMessages, permission -> true);
+        return mockPlayer(uuid, username, receivedMessages, WorldCommandTest::ordinaryPermission);
     }
 
     private Player mockPlayer(
@@ -1519,6 +1520,19 @@ class WorldCommandTest {
                     }
                     return defaultValue(method.getReturnType());
                 });
+    }
+
+    /**
+     * The permission set a test player is meant to have: every ordinary node, and no
+     * subscription tier.
+     *
+     * <p>These mocks predate FR-43 and answered {@code true} to everything, which now reads as
+     * a player holding the top {@code gzmn.worlds.slots.<n>} tier on the network — so the cap
+     * tests stopped hitting a cap. A test that wants a subscriber grants it a tier explicitly.
+     */
+    private static boolean ordinaryPermission(String permission) {
+        return !permission.startsWith(EntitlementTiers.PERMISSION_SLOTS_PREFIX)
+                && !permission.startsWith(EntitlementTiers.PERMISSION_BORDER_PREFIX);
     }
 
     private RegisteredServer mockServer(String name, InetSocketAddress address) {

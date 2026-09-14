@@ -1,6 +1,7 @@
 package nl.gzmn.playerworlds.core.menu;
 
 import java.util.Objects;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import org.jspecify.annotations.Nullable;
@@ -27,7 +28,23 @@ public sealed interface MenuIntent
                 MenuIntent.AcceptTransfer,
                 MenuIntent.DeclineTransfer,
                 MenuIntent.AcceptInvite,
-                MenuIntent.HardDeleteWorld {
+                MenuIntent.HardDeleteWorld,
+                MenuIntent.RedeemUpgrade {
+
+    /**
+     * Spends the owner's oldest unredeemed upgrade of {@code kind} on this world (FR-45).
+     *
+     * <p>The kind rather than an upgrade id, because a button cannot carry one and because
+     * upgrades of a kind are interchangeable — {@code WorldUpgradeRepository.listUnredeemed}
+     * orders them oldest first and the proxy spends the first that matches. A player who
+     * wants a specific one still has {@code /world upgrades redeem <id>}.
+     */
+    record RedeemUpgrade(WorldId worldId, UpgradeKind kind) implements MenuIntent {
+        public RedeemUpgrade {
+            Objects.requireNonNull(worldId, "worldId");
+            Objects.requireNonNull(kind, "kind");
+        }
+    }
 
     record HardDeleteWorld(WorldId worldId) implements MenuIntent {
         public HardDeleteWorld {

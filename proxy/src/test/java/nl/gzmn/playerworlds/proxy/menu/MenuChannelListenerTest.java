@@ -36,6 +36,7 @@ import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.Schema;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.menu.CloseMenuMessage;
 import nl.gzmn.playerworlds.core.menu.FailureCode;
 import nl.gzmn.playerworlds.core.menu.MenuClickIntent;
@@ -119,8 +120,16 @@ class MenuChannelListenerTest {
                 nodeCommands,
                 database,
                 () -> policy);
-        MenuViewService viewService =
-                new MenuViewService(worlds, membership, transferRequests, bans, names, () -> policy, executors);
+        MenuViewService viewService = new MenuViewService(
+                worlds,
+                membership,
+                transferRequests,
+                bans,
+                names,
+                new WorldUpgradeRepository(database),
+                actions.storageTiers(),
+                () -> policy,
+                executors);
         listener = new MenuChannelListener(actions, viewService);
     }
 

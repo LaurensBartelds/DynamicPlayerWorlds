@@ -169,7 +169,7 @@ public final class MembersMenu implements GuiScreen {
             lore.add(messages.render("messages.gui.members-menu.item.member.kick-hint"));
         }
 
-        return ItemUtil.createPlayerHead(member.uuid(), member.name(), name, lore);
+        return ItemUtil.createPlayerHead(member.uuid(), member.name(), name, lore, menuService.heads());
     }
 
     private static TextColor roleColor(Role role) {

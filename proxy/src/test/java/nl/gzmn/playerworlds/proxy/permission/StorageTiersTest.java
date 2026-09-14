@@ -60,7 +60,7 @@ class StorageTiersTest {
         Player player = playerWith(uuid, "gzmn.worlds.storage.10gb"::equals);
 
         StorageTiers.Resolution resolved =
-                new StorageTiers().evaluate(player, 0L, withTiers(List.of("1gb", "10gb"), 2));
+                new StorageTiers().evaluate(player, 0L, withTiers(List.of("1gb", "10gb"), 2), 0L);
 
         assertThat(resolved.source()).isEqualTo(StorageTiers.Source.PROBED);
         assertThat(resolved.quota().limitBytes()).isEqualTo(10L * 1024 * 1024 * 1024);
@@ -74,11 +74,11 @@ class StorageTiersTest {
 
         // Not in the shipped ladder, so it only resolves because the operator configured it.
         StorageTiers.Resolution configured =
-                new StorageTiers().evaluate(player, 0L, withTiers(List.of("500mb", "3500mb"), 2));
+                new StorageTiers().evaluate(player, 0L, withTiers(List.of("500mb", "3500mb"), 2), 0L);
         assertThat(configured.quota().limitBytes()).isEqualTo(3500L * 1024 * 1024);
 
         StorageTiers.Resolution unconfigured =
-                new StorageTiers().evaluate(player, 0L, withTiers(List.of("500mb", "1gb"), 2));
+                new StorageTiers().evaluate(player, 0L, withTiers(List.of("500mb", "1gb"), 2), 0L);
         assertThat(unconfigured.quota().limitBytes()).isEqualTo(2L * 1024 * 1024 * 1024);
     }
 
@@ -88,7 +88,7 @@ class StorageTiersTest {
         Player player = playerWith(UUID.randomUUID(), "gzmn.worlds.storage.unlimited"::equals);
 
         StorageQuota quota = new StorageTiers()
-                .evaluate(player, 9_999_999L, withTiers(List.of("1gb"), 2))
+                .evaluate(player, 9_999_999L, withTiers(List.of("1gb"), 2), 0L)
                 .quota();
 
         assertThat(quota.unlimited()).isTrue();
@@ -100,8 +100,9 @@ class StorageTiersTest {
     void emptyTierListUsesDefault() {
         Player player = playerWith(UUID.randomUUID(), permission -> true);
 
-        StorageQuota quota =
-                new StorageTiers().evaluate(player, 0L, withTiers(List.of(), 2)).quota();
+        StorageQuota quota = new StorageTiers()
+                .evaluate(player, 0L, withTiers(List.of(), 2), 0L)
+                .quota();
 
         // Every node answers true here, so the default is only reached because nothing was asked.
         assertThat(quota.limitBytes()).isEqualTo(2L * 1024 * 1024 * 1024);

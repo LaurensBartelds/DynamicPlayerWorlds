@@ -1,5 +1,6 @@
 package nl.gzmn.playerworlds.backend.gui.screen;
 
+import java.util.Map;
 import java.util.Objects;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
 import nl.gzmn.playerworlds.backend.gui.GuiScreen;
@@ -12,6 +13,7 @@ import nl.gzmn.playerworlds.backend.gui.Placeholders;
 import nl.gzmn.playerworlds.core.menu.MenuIntent;
 import nl.gzmn.playerworlds.core.menu.MenuResult;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.Visibility;
 import nl.gzmn.playerworlds.core.model.WorldState;
 import org.bukkit.Bukkit;
@@ -45,14 +47,33 @@ public final class WorldMenu implements GuiScreen {
     public static final int SLOT_ARCHIVE = 16;
     public static final int SLOT_BACK = 18;
 
+    /** Drawn only when the owner holds an unspent upgrade of that kind (FR-45). */
+    public static final int SLOT_REDEEM_STORAGE = 22;
+
+    public static final int SLOT_REDEEM_BORDER = 23;
+
     private final MenuService menuService;
     private final @Nullable MenuChannel menuChannel;
     private final PlayerWorld world;
+    private final Map<UpgradeKind, Integer> unspentUpgrades;
 
     public WorldMenu(MenuService menuService, @Nullable MenuChannel menuChannel, PlayerWorld world) {
+        this(menuService, menuChannel, world, Map.of());
+    }
+
+    /**
+     * @param unspentUpgrades how many unspent upgrades of each kind the viewer holds (FR-45);
+     *     empty for a viewer who is not the owner, since only an owner may spend one here
+     */
+    public WorldMenu(
+            MenuService menuService,
+            @Nullable MenuChannel menuChannel,
+            PlayerWorld world,
+            Map<UpgradeKind, Integer> unspentUpgrades) {
         this.menuService = Objects.requireNonNull(menuService, "menuService");
         this.menuChannel = menuChannel;
         this.world = Objects.requireNonNull(world, "world");
+        this.unspentUpgrades = Map.copyOf(Objects.requireNonNull(unspentUpgrades, "unspentUpgrades"));
     }
 
     public PlayerWorld world() {
@@ -127,6 +148,7 @@ public final class WorldMenu implements GuiScreen {
 
         if (manage) {
             renderManagementControls(inventory, messages);
+            renderRedeemControls(inventory, messages);
         }
 
         // Slot 18: Back
@@ -145,10 +167,12 @@ public final class WorldMenu implements GuiScreen {
         // Slot 11: Members
         inventory.setItem(
                 SLOT_MEMBERS,
-                ItemUtil.create(
-                        Material.PLAYER_HEAD,
+                ItemUtil.createPlayerHead(
+                        world.ownerUuid(),
+                        null,
                         messages.render("messages.gui.world-menu.item.members.name"),
-                        messages.renderLore("messages.gui.world-menu.item.members.lore")));
+                        messages.renderLore("messages.gui.world-menu.item.members.lore"),
+                        menuService.heads()));
 
         // Slot 12: Settings
         inventory.setItem(
@@ -207,6 +231,37 @@ public final class WorldMenu implements GuiScreen {
                             Material.TNT,
                             messages.render("messages.gui.world-menu.item.archive.name"),
                             messages.renderLore("messages.gui.world-menu.item.archive.lore")));
+        }
+    }
+
+    /**
+     * The GUI's route to FR-45's redemption, drawn only for a kind the owner actually holds.
+     *
+     * <p>One entry per kind rather than one "redeem" button: a player may hold both, and a
+     * single button could not say which it would spend.
+     */
+    private void renderRedeemControls(Inventory inventory, Messages messages) {
+        int storage = unspentUpgrades.getOrDefault(UpgradeKind.STORAGE, 0);
+        if (storage > 0) {
+            inventory.setItem(
+                    SLOT_REDEEM_STORAGE,
+                    ItemUtil.create(
+                            Material.ENDER_CHEST,
+                            messages.render("messages.gui.world-menu.item.redeem-storage.name"),
+                            messages.renderLore(
+                                    "messages.gui.world-menu.item.redeem-storage.lore",
+                                    Placeholders.count("count", storage))));
+        }
+        int border = unspentUpgrades.getOrDefault(UpgradeKind.BORDER, 0);
+        if (border > 0) {
+            inventory.setItem(
+                    SLOT_REDEEM_BORDER,
+                    ItemUtil.create(
+                            Material.MAP,
+                            messages.render("messages.gui.world-menu.item.redeem-border.name"),
+                            messages.renderLore(
+                                    "messages.gui.world-menu.item.redeem-border.lore",
+                                    Placeholders.count("count", border))));
         }
     }
 
@@ -340,6 +395,8 @@ public final class WorldMenu implements GuiScreen {
                             });
                 }
             }
+            case SLOT_REDEEM_STORAGE -> redeem(player, UpgradeKind.STORAGE);
+            case SLOT_REDEEM_BORDER -> redeem(player, UpgradeKind.BORDER);
             case SLOT_BACK -> {
                 var _ = menuService.openMyWorldsMenu(player);
             }
@@ -347,6 +404,30 @@ public final class WorldMenu implements GuiScreen {
                 // Non-clickable filler
             }
         }
+    }
+
+    /**
+     * Spends the oldest upgrade of a kind, then re-renders either way: on success the count
+     * has dropped by one, and on failure the screen was drawn from a stale count.
+     */
+    private void redeem(Player player, UpgradeKind kind) {
+        if (unspentUpgrades.getOrDefault(kind, 0) <= 0) {
+            // Nothing was drawn there, so this is a click on filler.
+            return;
+        }
+        if (menuChannel == null) {
+            return;
+        }
+        var _ = menuChannel
+                .sendIntent(player, new MenuIntent.RedeemUpgrade(world.id(), kind))
+                .whenComplete((result, ex) -> {
+                    if (result instanceof MenuResult.Ok ok) {
+                        player.sendMessage(GsonComponentSerializer.gson().deserialize(ok.message()));
+                    } else if (result instanceof MenuResult.Failed failed) {
+                        player.sendMessage(GsonComponentSerializer.gson().deserialize(failed.message()));
+                    }
+                    var _ = menuService.openWorldMenu(player, world.id());
+                });
     }
 
     @Override

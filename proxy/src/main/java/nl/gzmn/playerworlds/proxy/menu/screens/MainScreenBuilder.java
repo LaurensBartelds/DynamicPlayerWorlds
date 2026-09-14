@@ -76,7 +76,8 @@ public final class MainScreenBuilder {
                                         "limit",
                                         storageQuota.unlimited()
                                                 ? "Unlimited"
-                                                : StorageQuotaResolver.formatBytes(storageQuota.limitBytes())))),
+                                                : StorageQuotaResolver.formatBytes(
+                                                        storageQuota.effectiveLimitBytes())))),
                         null,
                         "NAV:STORAGE"));
 

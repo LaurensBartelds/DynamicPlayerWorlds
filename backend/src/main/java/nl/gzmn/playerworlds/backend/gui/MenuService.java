@@ -2,6 +2,7 @@ package nl.gzmn.playerworlds.backend.gui;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,15 +36,18 @@ import nl.gzmn.playerworlds.core.db.PlayerNameRepository;
 import nl.gzmn.playerworlds.core.db.PlayerWorldRepository;
 import nl.gzmn.playerworlds.core.db.TransferRequestRepository;
 import nl.gzmn.playerworlds.core.db.WorldBanRepository;
+import nl.gzmn.playerworlds.core.db.WorldUpgradeRepository;
 import nl.gzmn.playerworlds.core.model.PlayerWorld;
 import nl.gzmn.playerworlds.core.model.Role;
 import nl.gzmn.playerworlds.core.model.StorageQuota;
 import nl.gzmn.playerworlds.core.model.TransferRequest;
+import nl.gzmn.playerworlds.core.model.UpgradeKind;
 import nl.gzmn.playerworlds.core.model.WorldBan;
 import nl.gzmn.playerworlds.core.model.WorldId;
 import nl.gzmn.playerworlds.core.model.WorldInvite;
 import nl.gzmn.playerworlds.core.model.WorldMember;
 import nl.gzmn.playerworlds.core.model.WorldSettings;
+import nl.gzmn.playerworlds.core.model.WorldUpgrade;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.jspecify.annotations.Nullable;
@@ -65,10 +69,21 @@ public class MenuService {
     private final @Nullable TransferRequestRepository transferRepository;
     private final @Nullable WorldBanRepository banRepository;
     private final @Nullable PlayerNameRepository nameRepository;
+
+    /**
+     * One-time purchased upgrades (FR-44). Nullable like every other repository here: the
+     * GUI tests build a MenuService without a database at all, and a screen with no upgrade
+     * data shows the tier allowance rather than refusing to open.
+     */
+    private final @Nullable WorldUpgradeRepository upgradeRepository;
+
     private final @Nullable MenuChannel channel;
     private final PluginExecutors executors;
     private final @Nullable Supplier<NetworkPolicy> policy;
     private final Messages messages;
+
+    /** Head textures for every screen that renders a skull. Owned here so one node has one cache. */
+    private final HeadProfiles heads = new HeadProfiles();
 
     private final ConcurrentMap<UUID, GuiScreen> activeScreens = new ConcurrentHashMap<>();
     private @Nullable Function<Player, GuiScreen> mainMenuFactory;
@@ -79,6 +94,7 @@ public class MenuService {
             @Nullable TransferRequestRepository transferRepository,
             @Nullable WorldBanRepository banRepository,
             @Nullable PlayerNameRepository nameRepository,
+            @Nullable WorldUpgradeRepository upgradeRepository,
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy) {
@@ -88,6 +104,7 @@ public class MenuService {
                 transferRepository,
                 banRepository,
                 nameRepository,
+                upgradeRepository,
                 channel,
                 executors,
                 policy,
@@ -100,6 +117,7 @@ public class MenuService {
             @Nullable TransferRequestRepository transferRepository,
             @Nullable WorldBanRepository banRepository,
             @Nullable PlayerNameRepository nameRepository,
+            @Nullable WorldUpgradeRepository upgradeRepository,
             @Nullable MenuChannel channel,
             PluginExecutors executors,
             @Nullable Supplier<NetworkPolicy> policy,
@@ -109,6 +127,7 @@ public class MenuService {
         this.transferRepository = transferRepository;
         this.banRepository = banRepository;
         this.nameRepository = nameRepository;
+        this.upgradeRepository = upgradeRepository;
         this.channel = channel;
         this.executors = Objects.requireNonNull(executors, "executors");
         this.policy = policy;
@@ -135,12 +154,35 @@ public class MenuService {
         return nameRepository;
     }
 
+    public @Nullable WorldUpgradeRepository upgradeRepository() {
+        return upgradeRepository;
+    }
+
     public @Nullable MenuChannel channel() {
         return channel;
     }
 
     public PluginExecutors executors() {
         return executors;
+    }
+
+    /** Resolved player-head textures, shared by every screen that renders a skull. */
+    public HeadProfiles heads() {
+        return heads;
+    }
+
+    /**
+     * Resolves the head textures a screen is about to render, between the database read and
+     * the render itself.
+     *
+     * <p>The render runs on the main thread and can only use textures that are already
+     * resolved, so the resolution has to happen somewhere earlier in the chain; this is that
+     * place. It never fails and never waits long (see {@link HeadProfiles}), so a screen is
+     * at worst as fast as it was before and at worst as correct as it was before.
+     */
+    private <T> CompletableFuture<T> withHeads(CompletableFuture<T> data, Function<T, List<UUID>> owners) {
+        return data.thenCompose(
+                value -> heads.prefetch(owners.apply(value), executors.io()).thenApply(ignored -> value));
     }
 
     public @Nullable Supplier<NetworkPolicy> policy() {
@@ -256,7 +298,8 @@ public class MenuService {
                                     used,
                                     player::hasPermission,
                                     pol.storageQuotaTiers(),
-                                    pol.defaultStorageLimitBytes());
+                                    pol.defaultStorageLimitBytes(),
+                                    bonusStorageBytes(player.getUniqueId()));
                             return new MainMenu.MainMenuData(owned, pol.maxWorldsPerPlayer(), invites, quota);
                         },
                         executors.db())
@@ -283,28 +326,34 @@ public class MenuService {
     public CompletableFuture<Void> openMyWorldsMenu(Player player, int page) {
         Objects.requireNonNull(player, "player");
 
-        return CompletableFuture.supplyAsync(
-                        () -> {
-                            MainThread.assertOff();
-                            List<PlayerWorld> owned = List.of();
-                            List<PlayerWorld> shared = List.of();
-                            Map<WorldId, Role> roles = Map.of();
-                            if (worldRepository != null) {
-                                try {
-                                    owned = worldRepository.listOwnedBy(player.getUniqueId());
-                                    // FR-7: a world reached by accepting an invite belongs on
-                                    // this list too, or the only way back to it is remembering
-                                    // whose it was.
-                                    shared = worldRepository.listSharedWith(player.getUniqueId());
-                                    roles = sharedRoles(player.getUniqueId(), shared);
-                                } catch (SQLException e) {
-                                    log.warn("Failed to fetch worlds for player {}", player.getUniqueId(), e);
-                                }
-                            }
-                            NetworkPolicy pol = policy != null ? policy.get() : NetworkPolicy.defaults();
-                            return new MyWorldsData(owned, shared, roles, pol.maxWorldsPerPlayer());
-                        },
-                        executors.db())
+        // Only the shared entries render as heads (an owned world is a grass block), so
+        // they are the only owners worth resolving here.
+        return withHeads(
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    MainThread.assertOff();
+                                    List<PlayerWorld> owned = List.of();
+                                    List<PlayerWorld> shared = List.of();
+                                    Map<WorldId, Role> roles = Map.of();
+                                    if (worldRepository != null) {
+                                        try {
+                                            owned = worldRepository.listOwnedBy(player.getUniqueId());
+                                            // FR-7: a world reached by accepting an invite belongs on
+                                            // this list too, or the only way back to it is remembering
+                                            // whose it was.
+                                            shared = worldRepository.listSharedWith(player.getUniqueId());
+                                            roles = sharedRoles(player.getUniqueId(), shared);
+                                        } catch (SQLException e) {
+                                            log.warn("Failed to fetch worlds for player {}", player.getUniqueId(), e);
+                                        }
+                                    }
+                                    NetworkPolicy pol = policy != null ? policy.get() : NetworkPolicy.defaults();
+                                    return new MyWorldsData(owned, shared, roles, pol.maxWorldsPerPlayer());
+                                },
+                                executors.db()),
+                        data -> data.shared().stream()
+                                .map(PlayerWorld::ownerUuid)
+                                .toList())
                 .thenAcceptAsync(
                         data -> openScreen(
                                 player,
@@ -330,24 +379,40 @@ public class MenuService {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(worldId, "worldId");
 
-        return CompletableFuture.supplyAsync(
-                        () -> {
-                            MainThread.assertOff();
-                            if (worldRepository != null) {
-                                try {
-                                    return worldRepository.findById(worldId);
-                                } catch (SQLException e) {
-                                    log.warn(
-                                            "Failed to fetch world {} for player {}", worldId, player.getUniqueId(), e);
-                                }
-                            }
-                            return Optional.<PlayerWorld>empty();
-                        },
-                        executors.db())
+        return withHeads(
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    MainThread.assertOff();
+                                    Optional<PlayerWorld> found = Optional.empty();
+                                    if (worldRepository != null) {
+                                        try {
+                                            found = worldRepository.findById(worldId);
+                                        } catch (SQLException e) {
+                                            log.warn(
+                                                    "Failed to fetch world {} for player {}",
+                                                    worldId,
+                                                    player.getUniqueId(),
+                                                    e);
+                                        }
+                                    }
+                                    // Only the owner can spend one here (FR-31a), so only the
+                                    // owner's screen needs the count.
+                                    boolean owns = found.map(PlayerWorld::ownerUuid)
+                                            .filter(player.getUniqueId()::equals)
+                                            .isPresent();
+                                    return new WorldMenuData(
+                                            found, owns ? unspentUpgrades(player.getUniqueId()) : Map.of());
+                                },
+                                executors.db()),
+                        data -> data.world().map(PlayerWorld::ownerUuid).stream()
+                                .toList())
                 .thenAcceptAsync(
-                        worldOpt -> {
-                            if (worldOpt.isPresent()) {
-                                openScreen(player, new WorldMenu(this, channel, worldOpt.get()));
+                        data -> {
+                            if (data.world().isPresent()) {
+                                openScreen(
+                                        player,
+                                        new WorldMenu(
+                                                this, channel, data.world().get(), data.unspentUpgrades()));
                             } else {
                                 player.sendMessage(Component.text("World not found", NamedTextColor.RED));
                                 var _ = openMyWorldsMenu(player);
@@ -384,7 +449,8 @@ public class MenuService {
                                     used,
                                     player::hasPermission,
                                     pol.storageQuotaTiers(),
-                                    pol.defaultStorageLimitBytes());
+                                    pol.defaultStorageLimitBytes(),
+                                    bonusStorageBytes(player.getUniqueId()));
                             return new StorageMenuData(quota, owned);
                         },
                         executors.db())
@@ -436,36 +502,41 @@ public class MenuService {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(worldId, "worldId");
 
-        return CompletableFuture.supplyAsync(
-                        () -> {
-                            MainThread.assertOff();
-                            Optional<PlayerWorld> worldOpt = Optional.empty();
-                            List<MembersMenu.MemberEntry> entries = List.of();
-                            try {
-                                if (worldRepository != null) {
-                                    worldOpt = worldRepository.findById(worldId);
-                                }
-                                if (membershipRepository != null && nameRepository != null) {
-                                    List<WorldMember> members = membershipRepository.listMembers(worldId);
-                                    List<UUID> uuids = members.stream()
-                                            .map(WorldMember::uuid)
-                                            .toList();
-                                    Map<UUID, String> names = nameRepository.namesOf(uuids);
-                                    entries = members.stream()
-                                            .map(m -> new MembersMenu.MemberEntry(
-                                                    m.uuid(),
-                                                    names.getOrDefault(
-                                                            m.uuid(), m.uuid().toString()),
-                                                    m.role(),
-                                                    m.joinedAt()))
-                                            .toList();
-                                }
-                            } catch (SQLException e) {
-                                log.warn("Failed to fetch members for world {}", worldId, e);
-                            }
-                            return new MembersData(worldOpt, entries);
-                        },
-                        executors.db())
+        return withHeads(
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    MainThread.assertOff();
+                                    Optional<PlayerWorld> worldOpt = Optional.empty();
+                                    List<MembersMenu.MemberEntry> entries = List.of();
+                                    try {
+                                        if (worldRepository != null) {
+                                            worldOpt = worldRepository.findById(worldId);
+                                        }
+                                        if (membershipRepository != null && nameRepository != null) {
+                                            List<WorldMember> members = membershipRepository.listMembers(worldId);
+                                            List<UUID> uuids = members.stream()
+                                                    .map(WorldMember::uuid)
+                                                    .toList();
+                                            Map<UUID, String> names = nameRepository.namesOf(uuids);
+                                            entries = members.stream()
+                                                    .map(m -> new MembersMenu.MemberEntry(
+                                                            m.uuid(),
+                                                            names.getOrDefault(
+                                                                    m.uuid(),
+                                                                    m.uuid().toString()),
+                                                            m.role(),
+                                                            m.joinedAt()))
+                                                    .toList();
+                                        }
+                                    } catch (SQLException e) {
+                                        log.warn("Failed to fetch members for world {}", worldId, e);
+                                    }
+                                    return new MembersData(worldOpt, entries);
+                                },
+                                executors.db()),
+                        data -> data.entries().stream()
+                                .map(MembersMenu.MemberEntry::uuid)
+                                .toList())
                 .thenAcceptAsync(
                         data -> {
                             if (data.world().isPresent()) {
@@ -637,35 +708,41 @@ public class MenuService {
         Objects.requireNonNull(player, "player");
         Objects.requireNonNull(worldId, "worldId");
 
-        return CompletableFuture.supplyAsync(
-                        () -> {
-                            MainThread.assertOff();
-                            Optional<PlayerWorld> worldOpt = Optional.empty();
-                            List<BansMenu.BanEntry> entries = List.of();
-                            try {
-                                if (worldRepository != null) {
-                                    worldOpt = worldRepository.findById(worldId);
-                                }
-                                if (banRepository != null && nameRepository != null) {
-                                    List<WorldBan> bans = banRepository.listBans(worldId);
-                                    List<UUID> uuids =
-                                            bans.stream().map(WorldBan::uuid).toList();
-                                    Map<UUID, String> names = nameRepository.namesOf(uuids);
-                                    entries = bans.stream()
-                                            .map(b -> new BansMenu.BanEntry(
-                                                    b.uuid(),
-                                                    names.getOrDefault(
-                                                            b.uuid(), b.uuid().toString()),
-                                                    b.reason(),
-                                                    b.bannedAt()))
-                                            .toList();
-                                }
-                            } catch (SQLException e) {
-                                log.warn("Failed to fetch bans for world {}", worldId, e);
-                            }
-                            return new BansData(worldOpt, entries);
-                        },
-                        executors.db())
+        return withHeads(
+                        CompletableFuture.supplyAsync(
+                                () -> {
+                                    MainThread.assertOff();
+                                    Optional<PlayerWorld> worldOpt = Optional.empty();
+                                    List<BansMenu.BanEntry> entries = List.of();
+                                    try {
+                                        if (worldRepository != null) {
+                                            worldOpt = worldRepository.findById(worldId);
+                                        }
+                                        if (banRepository != null && nameRepository != null) {
+                                            List<WorldBan> bans = banRepository.listBans(worldId);
+                                            List<UUID> uuids = bans.stream()
+                                                    .map(WorldBan::uuid)
+                                                    .toList();
+                                            Map<UUID, String> names = nameRepository.namesOf(uuids);
+                                            entries = bans.stream()
+                                                    .map(b -> new BansMenu.BanEntry(
+                                                            b.uuid(),
+                                                            names.getOrDefault(
+                                                                    b.uuid(),
+                                                                    b.uuid().toString()),
+                                                            b.reason(),
+                                                            b.bannedAt()))
+                                                    .toList();
+                                        }
+                                    } catch (SQLException e) {
+                                        log.warn("Failed to fetch bans for world {}", worldId, e);
+                                    }
+                                    return new BansData(worldOpt, entries);
+                                },
+                                executors.db()),
+                        data -> data.entries().stream()
+                                .map(BansMenu.BanEntry::uuid)
+                                .toList())
                 .thenAcceptAsync(
                         data -> {
                             if (data.world().isPresent()) {
@@ -774,6 +851,49 @@ public class MenuService {
 
     private record MyWorldsData(
             List<PlayerWorld> owned, List<PlayerWorld> shared, Map<WorldId, Role> sharedRoles, int maxWorlds) {}
+
+    /**
+     * Bytes this player's redeemed {@code STORAGE} upgrades add (FR-45), or zero where there
+     * is no database to ask. Called on the database executor, never on the main thread.
+     */
+    private long bonusStorageBytes(UUID playerUuid) {
+        if (upgradeRepository == null) {
+            return 0L;
+        }
+        try {
+            return upgradeRepository.bonusStorageBytes(playerUuid);
+        } catch (SQLException e) {
+            // Showing the tier allowance is wrong by however much they have bought, but it
+            // is a screen: refusing to open it would be worse than understating it.
+            log.warn("Failed to read purchased storage for player {}", playerUuid, e);
+            return 0L;
+        }
+    }
+
+    /**
+     * How many unspent upgrades of each kind this player holds (FR-45), for the world menu's
+     * redeem entries. Empty where there is no database to ask. Called on the database
+     * executor, never on the main thread.
+     */
+    private Map<UpgradeKind, Integer> unspentUpgrades(UUID playerUuid) {
+        if (upgradeRepository == null) {
+            return Map.of();
+        }
+        try {
+            Map<UpgradeKind, Integer> counts = new EnumMap<>(UpgradeKind.class);
+            for (WorldUpgrade upgrade : upgradeRepository.listUnredeemed(playerUuid)) {
+                counts.merge(upgrade.kind(), 1, Integer::sum);
+            }
+            return Map.copyOf(counts);
+        } catch (SQLException e) {
+            // Drawing no redeem entry understates what they own; failing to open the world
+            // menu at all would cost them everything else on it.
+            log.warn("Failed to read unspent upgrades for player {}", playerUuid, e);
+            return Map.of();
+        }
+    }
+
+    private record WorldMenuData(Optional<PlayerWorld> world, Map<UpgradeKind, Integer> unspentUpgrades) {}
 
     private record StorageMenuData(StorageQuota quota, List<PlayerWorld> owned) {}
 

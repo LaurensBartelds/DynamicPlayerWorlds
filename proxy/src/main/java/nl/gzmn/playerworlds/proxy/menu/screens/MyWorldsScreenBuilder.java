@@ -213,13 +213,16 @@ public final class MyWorldsScreenBuilder {
                 "messages.gui.my-worlds-menu.item.world-entry.manage-hint",
                 Placeholders.raw("action", owned ? "Manage World" : "World Details")));
 
+        // A shared world's entry is a head, and the head is the owner's. Leaving the skull
+        // owner null rendered every one of them as the default skin, which told the viewer
+        // nothing — the entry uses a head precisely to say whose world it is.
         return new MenuItemDescriptor(
                 slot,
                 material,
                 1,
                 legacy(name),
                 legacyLore(lore),
-                null,
+                "PLAYER_HEAD".equals(material) ? world.ownerUuid() : null,
                 "NAV:WORLD:" + world.id().value());
     }
 
