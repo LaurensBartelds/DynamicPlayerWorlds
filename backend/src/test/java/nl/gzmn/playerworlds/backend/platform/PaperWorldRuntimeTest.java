@@ -47,8 +47,10 @@ class PaperWorldRuntimeTest {
     @Test
     @DisplayName("mutators succeed on the marked main thread")
     void mutatorsSucceedOnMain() {
-        assertThatCode(() -> PaperWorldRuntime.INSTANCE.setAutoSave(world, true)).doesNotThrowAnyException();
-        assertThatCode(() -> PaperWorldRuntime.INSTANCE.setHardcore(world, false)).doesNotThrowAnyException();
+        assertThatCode(() -> PaperWorldRuntime.INSTANCE.setAutoSave(world, true))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> PaperWorldRuntime.INSTANCE.setHardcore(world, false))
+                .doesNotThrowAnyException();
         assertThatCode(() -> PaperWorldRuntime.INSTANCE.setPvp(world, true)).doesNotThrowAnyException();
         assertThatCode(() -> PaperWorldRuntime.INSTANCE.applyBorder(world, DimensionKind.OVERWORLD, 5000, 8))
                 .doesNotThrowAnyException();
