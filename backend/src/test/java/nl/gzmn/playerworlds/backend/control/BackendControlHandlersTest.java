@@ -63,12 +63,31 @@ class BackendControlHandlersTest {
     void setUp() throws Exception {
         database = TestDatabase.openFresh();
         nl.gzmn.playerworlds.core.db.Schema.migrate(database);
-        executors = PluginExecutors.create(2, 2, Runnable::run);
+        Thread testThread = Thread.currentThread();
+        // PaperWorldRuntime's mutators assert MainThread (plan 05 section 6). A
+        // plain Runnable::run would run the hopped task inline on whatever
+        // thread called pools.main().execute(...) -- here, the db thread
+        // offMain() dispatches through -- while MainThread still has
+        // `testThread` marked, tripping the guard on a false positive. This
+        // moves the mark onto the thread that actually runs the task, and
+        // back again after, so the guard checks what it means to: did the
+        // handler really hop to *a* single consistent thread before touching
+        // Bukkit, not "is it literally the JUnit thread".
+        executors = PluginExecutors.create(2, 2, task -> {
+            MainThread.clear();
+            MainThread.enter(Thread.currentThread());
+            try {
+                task.run();
+            } finally {
+                MainThread.clear();
+                MainThread.enter(testThread);
+            }
+        });
         metrics = WorldsMetrics.create();
         platform = Platform.create(new ServerIdentity("26.2", Platform.BUILD_DATA_VERSION));
         folders = new WorldFolders(platform.worldLayout());
 
-        MainThread.enter(Thread.currentThread());
+        MainThread.enter(testThread);
         server = MockBukkit.mock();
     }
 

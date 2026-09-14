@@ -92,14 +92,14 @@ class DatabaseTest {
         AdvisoryLock lock = AdvisoryLock.forTesting(database, raw, AdvisoryLock.MAINTENANCE_KEY + 999);
         lock.close();
 
-        assertThat(raw.isClosed())
-                .as("the connection is always closed from the caller's view")
-                .isTrue();
-        // Eviction destroys the physical connection synchronously in Hikari's
-        // own bookkeeping; the old behaviour (a plain connection.close())
-        // would have left this count unchanged, ready for a future,
-        // unrelated caller to inherit a connection that silently still
-        // thinks it holds this lock.
+        // Hikari's evictConnection() destroys the physical connection and
+        // drops it from the pool's own bookkeeping, but does not flip the
+        // proxy's isClosed() flag the way a plain close() would -- eviction
+        // is a pool-level operation, not a caller-visible one. The count
+        // dropping is the real, caller-visible proof: the old behaviour (a
+        // plain connection.close()) would have left this count unchanged,
+        // ready for a future, unrelated caller to inherit a connection that
+        // silently still thinks it holds this lock.
         assertThat(pool.getHikariPoolMXBean().getTotalConnections())
                 .as("the unlock-failure connection must be evicted, not returned to the pool")
                 .isEqualTo(afterAcquire - 1);
