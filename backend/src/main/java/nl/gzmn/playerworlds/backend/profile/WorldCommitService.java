@@ -407,8 +407,8 @@ public final class WorldCommitService {
                             runtime.setAutoSave(bukkitWorld, false);
                             runtime.save(bukkitWorld);
                             if (executors.sched() != null) {
-                                ScheduledFuture<?> watchdog =
-                                        QuiesceWatchdog.arm(executors.sched(), runtime, bukkitWorld, quiesceTimeout);
+                                ScheduledFuture<?> watchdog = QuiesceWatchdog.arm(
+                                        executors.sched(), executors.main(), runtime, bukkitWorld, quiesceTimeout);
                                 watchdogs.add(watchdog);
                             }
                         }

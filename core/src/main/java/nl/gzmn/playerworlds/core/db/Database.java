@@ -146,6 +146,18 @@ public final class Database implements DbClock, AutoCloseable {
         dataSource.close();
     }
 
+    /**
+     * Evicts {@code connection} from the pool instead of returning it for reuse.
+     *
+     * <p>For the one case an ordinary {@link Connection#close()} is wrong: the connection's
+     * session state cannot be trusted, such as an advisory lock that failed to release ({@link
+     * AdvisoryLock#close()} — see plan 05 section 6). Package-private because every other close()
+     * call in this codebase wants Hikari's normal pooling behaviour, not this.
+     */
+    void evictConnection(Connection connection) {
+        dataSource.evictConnection(connection);
+    }
+
     private static void rollbackQuietly(Connection connection, Exception cause) {
         try {
             connection.rollback();

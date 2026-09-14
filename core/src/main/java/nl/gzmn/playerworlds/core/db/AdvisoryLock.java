@@ -46,12 +46,26 @@ public final class AdvisoryLock implements AutoCloseable {
     /** How long to wait between attempts while a lock is held elsewhere. */
     private static final Duration RETRY_INTERVAL = Duration.ofMillis(250);
 
+    private final Database database;
     private final Connection connection;
     private final long key;
 
-    private AdvisoryLock(Connection connection, long key) {
+    private AdvisoryLock(Database database, Connection connection, long key) {
+        this.database = database;
         this.connection = connection;
         this.key = key;
+    }
+
+    /**
+     * Test seam: wraps {@code connection} as though it held {@code key}, without actually taking
+     * the lock. Package-private on purpose — production code only ever gets an {@code
+     * AdvisoryLock} back from a successful {@link #tryAcquire}. This exists so {@code close()}'s
+     * unlock-failure path can be driven deterministically: {@code pg_advisory_unlock} on a key
+     * the session never locked legitimately returns {@code false}, without needing to fake a
+     * connection failure.
+     */
+    static AdvisoryLock forTesting(Database database, Connection connection, long key) {
+        return new AdvisoryLock(database, connection, key);
     }
 
     /**
@@ -75,7 +89,7 @@ public final class AdvisoryLock implements AutoCloseable {
                 if (tryLock(connection, key)) {
                     acquired = true;
                     log.debug("acquired advisory lock {}", Long.toHexString(key));
-                    return Optional.of(new AdvisoryLock(connection, key));
+                    return Optional.of(new AdvisoryLock(database, connection, key));
                 }
                 if (DbClock.elapsedSince(start).compareTo(timeout) >= 0) {
                     log.debug("advisory lock {} held elsewhere after {}", Long.toHexString(key), timeout);
@@ -90,20 +104,45 @@ public final class AdvisoryLock implements AutoCloseable {
         }
     }
 
-    /** Releases the lock and returns the connection to the pool. */
+    /**
+     * Releases the lock and returns the connection to the pool — unless the unlock did not
+     * actually happen, in which case the connection is evicted instead (plan 05 section 6).
+     *
+     * <p>{@code pg_advisory_unlock} returning {@code false}, or throwing, both mean the same
+     * thing this session's advisory-lock state cannot be trusted. Returning that connection to
+     * Hikari anyway would hand a future, unrelated borrower a connection that silently still
+     * holds {@code key} — MAINTENANCE_KEY's election would then have two holders that both think
+     * they are the only one, exactly what this lock exists to prevent. Evicting closes the
+     * physical connection, which is the same "ending the session releases the lock anyway"
+     * property {@link #tryAcquire} relies on for a crashed holder, applied deliberately instead
+     * of by accident.
+     */
     @Override
     public void close() {
+        boolean released;
         try (PreparedStatement statement = connection.prepareStatement("SELECT pg_advisory_unlock(?)")) {
             statement.setLong(1, key);
-            statement.execute();
+            try (ResultSet rows = statement.executeQuery()) {
+                released = rows.next() && rows.getBoolean(1);
+            }
             connection.commit();
         } catch (SQLException e) {
-            // Not fatal: ending the session releases the lock anyway, which is
-            // the property this design relies on for a crashed holder.
-            log.warn("failed to release advisory lock {}", Long.toHexString(key), e);
-        } finally {
-            closeQuietly(connection);
+            log.error(
+                    "failed to release advisory lock {}; evicting the connection rather than pooling it",
+                    Long.toHexString(key),
+                    e);
+            database.evictConnection(connection);
+            return;
         }
+        if (!released) {
+            log.error(
+                    "pg_advisory_unlock({}) returned false — this session did not hold it; evicting the "
+                            + "connection rather than pooling it",
+                    Long.toHexString(key));
+            database.evictConnection(connection);
+            return;
+        }
+        closeQuietly(connection);
     }
 
     private static boolean tryLock(Connection connection, long key) throws SQLException {

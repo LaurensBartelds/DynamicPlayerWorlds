@@ -165,9 +165,18 @@ class WorldCommitServiceTest {
             world.setAutoSave(false);
             assertThat(world.isAutoSave()).isFalse();
 
-            ScheduledFuture<?> future =
-                    QuiesceWatchdog.arm(sched, PaperWorldRuntime.INSTANCE, world, Duration.ofMillis(50));
-            future.get(); // wait for timeout
+            ScheduledFuture<?> future = QuiesceWatchdog.arm(
+                    sched, executors.main(), PaperWorldRuntime.INSTANCE, world, Duration.ofMillis(50));
+            future.get(); // wait for the deadline; this only proves the check was queued onto main
+
+            // PaperWorldRuntime's mutators assert the main thread (plan 05 section 6), so the
+            // restore must have been dispatched through `main` rather than run inline on `sched` —
+            // draining it here is what actually runs the check-and-restore.
+            Runnable onMain = mainTasks.poll();
+            assertThat(onMain)
+                    .as("QuiesceWatchdog must dispatch its restore onto the main-thread executor")
+                    .isNotNull();
+            onMain.run();
 
             assertThat(world.isAutoSave()).isTrue();
         } finally {
@@ -183,9 +192,15 @@ class WorldCommitServiceTest {
             WorldMock world = server.addSimpleWorld("watchdog-enabled-test");
             world.setAutoSave(true);
 
-            ScheduledFuture<?> future =
-                    QuiesceWatchdog.arm(sched, PaperWorldRuntime.INSTANCE, world, Duration.ofMillis(50));
+            ScheduledFuture<?> future = QuiesceWatchdog.arm(
+                    sched, executors.main(), PaperWorldRuntime.INSTANCE, world, Duration.ofMillis(50));
             future.get();
+
+            Runnable onMain = mainTasks.poll();
+            assertThat(onMain)
+                    .as("QuiesceWatchdog must dispatch its check onto the main-thread executor")
+                    .isNotNull();
+            onMain.run();
 
             assertThat(world.isAutoSave()).isTrue();
         } finally {

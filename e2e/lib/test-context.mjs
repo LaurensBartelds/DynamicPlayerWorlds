@@ -2,6 +2,7 @@ import { BotSession } from './bot-session.mjs';
 import { DbClient } from './db-client.mjs';
 import { S3Helper } from './s3-client.mjs';
 import { sendRcon } from './rcon-client.mjs';
+import * as dockerControl from './docker-control.mjs';
 
 export class TestContext {
   constructor(options = {}) {
@@ -9,6 +10,11 @@ export class TestContext {
     this.bots = [];
     this.db = new DbClient(options.db);
     this.s3 = new S3Helper(options.s3);
+    // Services this scenario has stopped/paused, keyed by which reversal
+    // restores them, so cleanup() can always bring the stack back to a
+    // healthy state even if the scenario itself threw before reaching its
+    // own restore step.
+    this._dockerFaults = new Map();
   }
 
   async spawnBot(username, options = {}) {
@@ -21,6 +27,30 @@ export class TestContext {
 
   async rcon(nodeName, command, options = {}) {
     return await sendRcon(nodeName, command, options);
+  }
+
+  /** Stops a compose service (e.g. 'minio') to simulate an outage. Tracked for auto-restore in cleanup(). */
+  async dockerStop(serviceName) {
+    await dockerControl.stopService(serviceName);
+    this._dockerFaults.set(serviceName, 'stopped');
+  }
+
+  /** Restarts a previously-stopped compose service. */
+  async dockerStart(serviceName) {
+    await dockerControl.startService(serviceName);
+    this._dockerFaults.delete(serviceName);
+  }
+
+  /** Freezes a compose service's processes with SIGSTOP, without terminating it. Tracked for auto-restore. */
+  async dockerPause(serviceName) {
+    await dockerControl.pauseService(serviceName);
+    this._dockerFaults.set(serviceName, 'paused');
+  }
+
+  /** Reverses dockerPause(). */
+  async dockerUnpause(serviceName) {
+    await dockerControl.unpauseService(serviceName);
+    this._dockerFaults.delete(serviceName);
   }
 
   /**
@@ -55,6 +85,22 @@ export class TestContext {
   }
 
   async cleanup() {
+    // Reverse any fault a scenario injected and did not undo itself — a
+    // scenario that asserts and throws mid-outage must not leave MinIO down
+    // or a node paused for whatever runs after it.
+    for (const [serviceName, kind] of this._dockerFaults) {
+      try {
+        if (kind === 'stopped') {
+          await dockerControl.startService(serviceName);
+        } else {
+          await dockerControl.unpauseService(serviceName);
+        }
+      } catch (err) {
+        console.error(`  [cleanup] failed to restore docker service '${serviceName}' (${kind}): ${err.message}`);
+      }
+    }
+    this._dockerFaults.clear();
+
     for (const bot of this.bots) {
       try {
         bot.disconnect();

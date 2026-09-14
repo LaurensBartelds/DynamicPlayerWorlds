@@ -149,15 +149,29 @@ than a log line printed after the lease was already dropped.
 
 ### Worth doing next, in the order they would pay off
 
-1. **The e2e harness needs to drive `/world`.** Every unchecked box above needs
-   either a bot that sends chat commands or console access to Velocity. That one
-   piece of harness work is the prerequisite for believing any of milestone 8's
-   open checkboxes as well as plan 05's — it is the same prerequisite, and it has
-   been the same prerequisite for two milestones.
-2. **Plan 05 §6's four guards**, so each shape cannot come back: every `Listener`
-   registered, Bukkit mutation asserting the main thread, a config key nothing
-   reads failing the build, and no `pg_advisory_unlock` failure returning a
-   connection to the pool.
+~~1. **The e2e harness needs to drive `/world`.**~~ Done: `BotSession.runCommand`
+   sends real chat commands through Velocity, and scenarios 02, 03, 08, 09, 10
+   and 11 drive `/world create|delete|invite|accept|join|set|admin migrate`
+   against a real two-node stack. Scenario 07 was the one gap left — it dated
+   from before this landed and only pinged RCON — and is now a real MN-16
+   placement test (see `e2e/README.md`'s scenario table). Two milestone-8
+   checkboxes below are now covered by 10 and 11; the rest still need writing.
+2. **Plan 05 §6's four guards**, so each shape cannot come back: every
+   `Listener` registered (already landed with R1, `PluginSmokeTest`), Bukkit
+   mutation asserting the main thread (done: `PaperWorldRuntime`'s mutators
+   assert it, `QuiesceWatchdog`'s restore now hops back to main instead of
+   running on `gzmn-sched`), a config key nothing reads failing the build
+   (done: `NetworkPolicyKeysAreConsumedTest`, which also found and fixed
+   `worlds.public.browse-page-size` going unconsumed — `/world browse` was
+   unbounded — and found, but has not fixed, `storage.cold-load-budget-seconds`
+   being validated by `ConfigValidator` and never enforced against an actual
+   cold load; the outer `transfers.holding-timeout-seconds` deadline still
+   bounds the wait, so this is tracked as `KNOWN_GAPS` rather than a live
+   correctness bug), and no `pg_advisory_unlock` failure returning a connection
+   to the pool (done: `AdvisoryLock.close()` evicts the connection instead of
+   pooling it when the unlock returns `false` or throws; `Database` gained a
+   package-private `evictConnection`). None of this could be run against a real
+   build in the session that wrote it — see the note below.
 
 
 ## Milestone 8 — the second node: built, tested and booted on two nodes
