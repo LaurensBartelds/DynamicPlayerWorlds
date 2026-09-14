@@ -214,6 +214,32 @@ the jar filename (`+mc<version>`), not part of the project version.
   convention. In the lobby GUI, right-clicking the create button is the hardcore
   variant. Migration `V6__hardcore.sql`.
 
+- **Plan 05 section 6's four regression guards**, closing the last open item
+  from the audit: every `Listener` registered at enable (`PluginSmokeTest`,
+  already landed with R1); every `PaperWorldRuntime` mutator asserts the main
+  thread (`PaperWorldRuntimeTest`); every `NetworkPolicy` accessor has a real
+  reader outside `NetworkPolicy`/`ConfigValidator` or is a tracked, documented
+  gap (`NetworkPolicyKeysAreConsumedTest`, `:core`); and `AdvisoryLock.close()`
+  evicts its connection instead of pooling it when `pg_advisory_unlock` returns
+  `false` or throws (`DatabaseTest`). The config-key guard is a source scan
+  rather than ArchUnit, because no module's test classpath sees `:core`,
+  `:backend` and `:proxy` compiled together.
+- Two new e2e scenarios and a rewritten one, closing gaps `docs/plans/
+  NEXT-STEPS.md` named as unverified and high-risk: **10** drives
+  `/world admin migrate` with a player inside the world and asserts the
+  countdown, the source unloading, the lease moving, and the player's
+  inventory surviving the commit-and-cold-load round trip on the target
+  (MN-19, MN-21, FR-15); **11** stops MinIO mid-test to force a real
+  object-store outage during a cold load and asserts the FR-11 holding
+  timeout ejects the player rather than hanging, and that the world is
+  joinable again immediately once MinIO recovers (R12+R13); **07** was a
+  smoke check that pinged RCON and swallowed its own assertions in
+  `try`/`catch` — it is now a real MN-16 test that two accounts land the
+  second member on the node already holding the lease rather than the
+  emptier one. `e2e/lib/docker-control.mjs` adds `dockerStop`/`dockerStart`/
+  `dockerPause`/`dockerUnpause` to `TestContext` for this kind of fault
+  injection, with auto-restore in `cleanup()` if a scenario throws mid-fault.
+
 ### Changed
 
 - Target Paper 26.2 (`26.2.build.112-stable`) and Velocity 4.0.0, up from Paper
@@ -380,3 +406,25 @@ the jar filename (`+mc<version>`), not part of the project version.
 - `plugin.yml` declared `api-version: '1.21'` regardless of what the jar was
   built against. It is now expanded from `paperApi`, the same value that names the
   jar, so the API level Paper applies cannot drift from the one we compiled to.
+- **`worlds.public.browse-page-size` was never consulted.** The key, its
+  default and `NetworkPolicy.browsePageSize()` all existed; `/world browse`
+  called `listPublicWorlds()` and printed every row unbounded regardless of
+  what an operator set it to. Found by `NetworkPolicyKeysAreConsumedTest`
+  (plan 05 section 6). `/world browse` now caps the listing at the configured
+  page size and tells the caller how many more are not shown.
+- **`QuiesceWatchdog`'s auto-save restore ran on the scheduler thread, not the
+  main thread.** It called `World#setAutoSave` directly from its
+  `ScheduledExecutorService` callback — Bukkit API off the main thread (NFR-2's
+  shape, one door over from the JDBC case the ArchUnit rule already covers).
+  Invisible to its own tests because MockBukkit's `WorldMock` does not check
+  the calling thread. The restore now runs through the main-thread executor,
+  and `PaperWorldRuntime`'s mutators assert the main thread themselves so this
+  shape cannot come back through a different caller.
+- **A failed `pg_advisory_unlock` returned its connection to the pool anyway.**
+  `AdvisoryLock.close()` ran `SELECT pg_advisory_unlock(?)`, ignored the
+  boolean it returns, and pooled the connection in the `finally` regardless of
+  whether Postgres actually released the lock. A future, unrelated borrower of
+  that connection would silently inherit a session that still holds
+  `MAINTENANCE_KEY`. `close()` now checks the result and evicts the connection
+  from the pool (`Database.evictConnection`, new) rather than reusing it when
+  the unlock returned `false` or threw.

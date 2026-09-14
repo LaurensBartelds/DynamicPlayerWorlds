@@ -179,6 +179,7 @@ e2e/
 │   ├── bot-session.mjs     # BotSession Mineflayer wrapper with assertions
 │   ├── config.mjs          # Configuration parser
 │   ├── db-client.mjs       # PostgreSQL client pool & helper methods
+│   ├── docker-control.mjs  # stop/start/pause/unpause a compose service (fault injection)
 │   ├── rcon-client.mjs     # Native TCP Source RCON client
 │   ├── s3-client.mjs       # AWS S3 / MinIO helper client
 │   ├── test-context.mjs    # TestContext fixture with lifecycle hooks
@@ -195,7 +196,11 @@ e2e/
     ├── 04-visibility-isolation.test.mjs
     ├── 05-inventory-isolation.test.mjs
     ├── 06-s3-persistence.test.mjs
-    └── 07-multi-node-routing.test.mjs
+    ├── 07-multi-node-routing.test.mjs
+    ├── 08-command-guard-and-cache-refresh.test.mjs
+    ├── 09-archive-verify-and-handoff.test.mjs
+    ├── 10-node-migrate-with-player.test.mjs
+    └── 11-minio-outage-cold-load.test.mjs
 ```
 
 ---
@@ -210,7 +215,13 @@ e2e/
 | **04: Visibility Isolation** | `04-visibility-isolation.test.mjs` | Tablist isolation between private world players and lobby players (`FR-21` to `FR-24`). |
 | **05: Inventory Isolation** | `05-inventory-isolation.test.mjs` | Inventory item isolation and profile persistence in `player_world_profile`. |
 | **06: S3 Persistence** | `06-s3-persistence.test.mjs` | MinIO bucket health, object upload, listing, content verification, and deletion. |
-| **07: Multi-Node Routing** | `07-multi-node-routing.test.mjs` | Dual Paper node RCON responsiveness, `worlds_node` cluster registry, lease checks. |
+| **07: Multi-Node Routing** | `07-multi-node-routing.test.mjs` | MN-16: a second member joining a loaded world lands on the node already holding the lease, never the emptier node — the exact placement regression milestone 8 found. |
+| **08: Command Guard & Cache Refresh** | `08-command-guard-and-cache-refresh.test.mjs` | FR-21/FR-22's allow-list is actually registered; FR-9's membership cache is refilled after `INVALIDATE_CACHE` rather than left empty (R1, R4). |
+| **09: Archive Verify & Handoff** | `09-archive-verify-and-handoff.test.mjs` | FR-35 archival: the checksum is verified before the live copy is deleted, and the handoff unloads the world first (R2, R3). |
+| **10: Node Migrate With Player** | `10-node-migrate-with-player.test.mjs` | `/world admin migrate` (MN-19, MN-21) with a player inside: the countdown, the source unloading, the lease moving, and the player's inventory surviving the commit-and-cold-load round trip on the target. |
+| **11: MinIO Outage Cold Load** | `11-minio-outage-cold-load.test.mjs` | R12+R13: a cold load against a down object store ejects the player at the FR-11 holding timeout rather than hanging, and the world is joinable again immediately once the store recovers — not only after the lease expires. |
+
+Scenarios 10 and 11 use `ctx.dockerStop`/`dockerStart`/`dockerPause`/`dockerUnpause` (`lib/docker-control.mjs`) to force a genuinely cold load (migrate the world to a node with no local copy) and to simulate a real object-store outage, rather than waiting out the default 10-minute idle-unload or a node crash to reach the same code paths.
 
 ---
 

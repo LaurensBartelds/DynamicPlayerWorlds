@@ -1897,13 +1897,21 @@ public final class WorldActions {
                             Component msg = info("messages.command.browse.empty");
                             return ActionResult.success(msg);
                         }
-                        List<UUID> owners = publicWorlds.stream()
-                                .map(PlayerWorld::ownerUuid)
-                                .toList();
+                        // FR-9b / worlds.public.browse-page-size: bounded so a network with
+                        // hundreds of public worlds does not flood the caller's chat with one
+                        // command. Spec section 8.2 names this key as enforced here.
+                        // ConfigValidator does not check this key's sign (it never consulted it
+                        // before now), so a misconfigured zero or negative value degrades to
+                        // "show nothing, then say how many are hidden" instead of throwing.
+                        int pageSize = Math.max(policy.get().browsePageSize(), 0);
+                        int shown = Math.min(publicWorlds.size(), pageSize);
+                        List<PlayerWorld> page = publicWorlds.subList(0, shown);
+                        List<UUID> owners =
+                                page.stream().map(PlayerWorld::ownerUuid).toList();
                         Map<UUID, String> ownerNames = names.namesOf(owners);
 
                         tell(source, info("messages.command.browse.header"));
-                        for (PlayerWorld w : publicWorlds) {
+                        for (PlayerWorld w : page) {
                             String ownerName = ownerNames.getOrDefault(
                                     w.ownerUuid(), w.ownerUuid().toString());
                             String desc = w.description() != null ? " - \"" + w.description() + "\"" : "";
@@ -1918,6 +1926,13 @@ public final class WorldActions {
                                             Placeholders.text("owner", ownerName),
                                             Placeholders.raw("status", status),
                                             Placeholders.text("description", desc)));
+                        }
+                        if (publicWorlds.size() > shown) {
+                            tell(
+                                    source,
+                                    info(
+                                            "messages.command.browse.more",
+                                            Placeholders.count("count", publicWorlds.size() - shown)));
                         }
                         tell(source, info("messages.command.browse.footer"));
                         return ActionResult.success(info("messages.command.browse.summary"));

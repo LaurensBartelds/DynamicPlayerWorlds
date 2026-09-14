@@ -1,6 +1,7 @@
 package nl.gzmn.playerworlds.backend.platform;
 
 import java.util.Objects;
+import nl.gzmn.playerworlds.core.concurrent.MainThread;
 import org.bukkit.Difficulty;
 import org.bukkit.GameRule;
 import org.bukkit.GameRules;
@@ -16,6 +17,12 @@ import org.jspecify.annotations.Nullable;
  * matching how operators read {@code border_radius} in the database. Spawn-chunk
  * disabling is a no-op on this API line — see
  * {@link #disableAlwaysLoadedSpawnChunks(World)}.
+ *
+ * <p>Every mutator asserts {@link MainThread#assertOn()} first. Bukkit's
+ * {@link World} is not thread-safe and does not check this itself, so a call
+ * from a background executor corrupts state silently instead of failing —
+ * exactly the shape {@code QuiesceWatchdog} had until its restore callback was
+ * moved back onto the main thread (plan 05 section 6).
  */
 public final class PaperWorldRuntime implements WorldRuntime {
 
@@ -25,6 +32,7 @@ public final class PaperWorldRuntime implements WorldRuntime {
 
     @Override
     public void applyBorder(World world, DimensionKind dimension, int borderRadius, int netherBorderDivisor) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(dimension, "dimension");
         if (borderRadius < 1) {
@@ -58,6 +66,7 @@ public final class PaperWorldRuntime implements WorldRuntime {
 
     @Override
     public void setAutoSave(World world, boolean enabled) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         world.setAutoSave(enabled);
     }
@@ -70,6 +79,7 @@ public final class PaperWorldRuntime implements WorldRuntime {
 
     @Override
     public void save(World world) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         try {
             world.save();
@@ -95,12 +105,14 @@ public final class PaperWorldRuntime implements WorldRuntime {
 
     @Override
     public void setHardcore(World world, boolean hardcore) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         world.setHardcore(hardcore);
     }
 
     @Override
     public void setDifficulty(World world, Difficulty difficulty) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(difficulty, "difficulty");
         world.setDifficulty(difficulty);
@@ -108,6 +120,7 @@ public final class PaperWorldRuntime implements WorldRuntime {
 
     @Override
     public <T> void setGameRule(World world, GameRule<T> rule, T value) {
+        MainThread.assertOn();
         Objects.requireNonNull(world, "world");
         Objects.requireNonNull(rule, "rule");
         Objects.requireNonNull(value, "value");

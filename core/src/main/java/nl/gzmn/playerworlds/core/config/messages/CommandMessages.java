@@ -439,6 +439,10 @@ public final class CommandMessages {
                     "messages.command.browse.entry",
                     "<dark_gray>│</dark_gray> <green>●</green> <white><world></white> <gray>(Owner: <owner>) <status><description></gray>",
                     Set.of("world", "owner", "status", "description")),
+            MessageKey.of(
+                    "messages.command.browse.more",
+                    "<dark_gray>│</dark_gray> <gray>...and <count> more not shown (worlds.public.browse-page-size)</gray>",
+                    Set.of("count")),
             MessageKey.of("messages.command.browse.footer", "<dark_gray>└───────────────────────────────┘</dark_gray>"),
             MessageKey.of("messages.command.browse.summary", "<gray>Public worlds:</gray>"),
 

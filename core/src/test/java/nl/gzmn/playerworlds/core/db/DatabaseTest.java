@@ -3,6 +3,7 @@ package nl.gzmn.playerworlds.core.db;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.zaxxer.hikari.HikariDataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.time.Duration;
@@ -73,6 +74,54 @@ class DatabaseTest {
                 AdvisoryLock.tryAcquire(database, AdvisoryLock.MAINTENANCE_KEY, Duration.ofSeconds(1));
         assertThat(afterRelease).isPresent();
         afterRelease.get().close();
+    }
+
+    @Test
+    @DisplayName("close() evicts the connection rather than pooling it when the unlock did not release anything")
+    void closeEvictsTheConnectionWhenUnlockFails() throws Exception {
+        HikariDataSource pool = (HikariDataSource) database.dataSource();
+
+        Connection raw = pool.getConnection();
+        int afterAcquire = pool.getHikariPoolMXBean().getTotalConnections();
+
+        // Deliberately never locked: pg_advisory_unlock on a key this session
+        // does not hold returns false (Postgres docs), which is the exact
+        // "cannot trust this session's lock state" signal close() must treat
+        // as a reason to destroy the connection rather than pool it — the
+        // bug plan 05 section 6 guards against.
+        AdvisoryLock lock = AdvisoryLock.forTesting(database, raw, AdvisoryLock.MAINTENANCE_KEY + 999);
+        lock.close();
+
+        // Hikari's evictConnection() destroys the physical connection and
+        // drops it from the pool's own bookkeeping, but does not flip the
+        // proxy's isClosed() flag the way a plain close() would -- eviction
+        // is a pool-level operation, not a caller-visible one. The count
+        // dropping is the real, caller-visible proof: the old behaviour (a
+        // plain connection.close()) would have left this count unchanged,
+        // ready for a future, unrelated caller to inherit a connection that
+        // silently still thinks it holds this lock.
+        assertThat(pool.getHikariPoolMXBean().getTotalConnections())
+                .as("the unlock-failure connection must be evicted, not returned to the pool")
+                .isEqualTo(afterAcquire - 1);
+    }
+
+    @Test
+    @DisplayName("close() evicts the connection rather than pooling it when the unlock itself throws")
+    void closeEvictsTheConnectionWhenUnlockThrows() throws Exception {
+        HikariDataSource pool = (HikariDataSource) database.dataSource();
+
+        Connection raw = pool.getConnection();
+        int afterAcquire = pool.getHikariPoolMXBean().getTotalConnections();
+        // Force the unlock statement to fail with a real SQLException rather
+        // than a false return, exercising close()'s other eviction branch.
+        raw.close();
+
+        AdvisoryLock lock = AdvisoryLock.forTesting(database, raw, AdvisoryLock.MAINTENANCE_KEY + 998);
+        lock.close();
+
+        assertThat(pool.getHikariPoolMXBean().getTotalConnections())
+                .as("a connection that failed to unlock must not be handed back for reuse")
+                .isEqualTo(afterAcquire - 1);
     }
 
     @Test

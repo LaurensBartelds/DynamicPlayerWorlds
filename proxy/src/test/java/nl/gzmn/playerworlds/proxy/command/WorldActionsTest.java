@@ -1138,6 +1138,85 @@ class WorldActionsTest {
                 .isEqualTo(quota.limitBytes() + 2L * 1024 * 1024 * 1024);
     }
 
+    @Test
+    @DisplayName("browse caps the listing at worlds.public.browse-page-size and reports the rest (FR-9b)")
+    void browseCapsAtPageSize() throws Exception {
+        UUID owner = UUID.randomUUID();
+        Player player = mockPlayer(owner, "Alice");
+        playersByUuid.put(owner, player);
+
+        policy = withBrowsePageSize(NetworkPolicy.defaults(), 2);
+
+        for (int i = 0; i < 5; i++) {
+            WorldId id = WorldId.random();
+            worlds.create(id, UUID.randomUUID(), "public" + i, 1L, 5000, Visibility.PUBLIC);
+            worlds.transitionState(id, WorldState.CREATING, WorldState.READY);
+        }
+
+        ActionResult result = actions.browse(player).get();
+
+        assertThat(result).isInstanceOf(ActionResult.Ok.class);
+        assertThat(messagesByPlayer.get(owner))
+                .as("only browsePageSize entries should be sent, not all 5 public worlds")
+                .filteredOn(comp ->
+                        PlainTextComponentSerializer.plainText().serialize(comp).contains("●"))
+                .hasSize(2);
+        assertThat(messagesByPlayer.get(owner))
+                .anySatisfy(comp -> assertThat(
+                                PlainTextComponentSerializer.plainText().serialize(comp))
+                        .contains("3 more"));
+    }
+
+    /** {@link NetworkPolicy} is a wide record; this changes the one field a test cares about. */
+    private static NetworkPolicy withBrowsePageSize(NetworkPolicy base, int pageSize) {
+        return new NetworkPolicy(
+                base.maxWorldsPerPlayer(),
+                base.idleUnload(),
+                base.unloadRetry(),
+                base.defaultBorderRadius(),
+                base.netherBorderDivisor(),
+                base.pregenSpawnChunks(),
+                base.createStallBudget(),
+                base.defaultVisibility(),
+                pageSize,
+                base.allowedCommands(),
+                base.archiveAfterDays(),
+                base.archiveWarnDays(),
+                base.archiveCompression(),
+                base.inviteExpiry(),
+                base.transferPendingExpiry(),
+                base.transferExpiry(),
+                base.holdingTimeout(),
+                base.maintenanceInterval(),
+                base.controlPollInterval(),
+                base.controlClaimTimeout(),
+                base.leaseDuration(),
+                base.deadAfter(),
+                base.fenceSafetyMargin(),
+                base.maxWorldsPerNode(),
+                base.maxHeapPercent(),
+                base.minTps(),
+                base.syncInterval(),
+                base.maxSyncFailure(),
+                base.snapshotQuiet(),
+                base.snapshotQuiesceTimeout(),
+                base.snapshotCopyRetries(),
+                base.verifyRegionStructure(),
+                base.commitTimeout(),
+                base.coldLoadBudget(),
+                base.manifestRetentionCount(),
+                base.parallelTransfers(),
+                base.localCacheMaxBytes(),
+                base.quarantineMaxBytes(),
+                base.quarantineRetainDays(),
+                base.excludeGlobs(),
+                base.defaultStorageLimitBytes(),
+                base.storageQuotaTiers(),
+                base.maxBorderRadius(),
+                base.slotTiers(),
+                base.borderTiers());
+    }
+
     /** {@link NetworkPolicy} is a wide record; this changes the one field a test cares about. */
     private static NetworkPolicy withMaxBorderRadius(NetworkPolicy base, int ceiling) {
         return new NetworkPolicy(
