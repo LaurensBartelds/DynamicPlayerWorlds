@@ -34,7 +34,7 @@ public final class TestObjectStore {
      * Pinned MinIO release. Bump deliberately when a storage behaviour needs a
      * newer server; never float.
      */
-    public static final String IMAGE = "minio/minio:RELEASE.2025-04-22T22-12-26Z";
+    public static final String IMAGE = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z";
 
     private static final String USER = "gzmn-test";
     private static final String PASSWORD = "gzmn-test-secret";
@@ -47,8 +47,10 @@ public final class TestObjectStore {
     public static synchronized MinIOContainer container() {
         MinIOContainer current = container;
         if (current == null) {
-            MinIOContainer started =
-                    new MinIOContainer(IMAGE).withUserName(USER).withPassword(PASSWORD);
+            MinIOContainer started = new MinIOContainer(org.testcontainers.utility.DockerImageName.parse(IMAGE)
+                            .asCompatibleSubstituteFor("minio/minio"))
+                    .withUserName(USER)
+                    .withPassword(PASSWORD);
             started.start();
             container = started;
             current = started;

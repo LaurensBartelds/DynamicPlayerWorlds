@@ -27,13 +27,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 25 (toolchain)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "25"
 
       - name: Set up JDK 21 (Gradle daemon)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
