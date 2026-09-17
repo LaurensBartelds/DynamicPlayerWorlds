@@ -608,11 +608,6 @@ public final class PlayerWorldRepository extends Repository {
     }
 
     /**
-     * Updates per-world owner settings (FR-9e).
-     *
-     * @return true if the world was updated
-     */
-    /**
      * Raises a world's border radius (FR-3c).
      *
      * <p>The {@code border_radius < ?} predicate is the requirement, not a convenience: FR-3c
