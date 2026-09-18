@@ -133,7 +133,8 @@ public final class LobbyMenuChannel implements PluginMessageListener {
             heads.resolveThen(unresolved, () -> {
                 // Only if they are still looking at this very screen. A player who has
                 // clicked on to another one must not have it redrawn underneath them.
-                if (player.isOnline() && player.getOpenInventory().getTopInventory() == inventory) {
+                if (player.isOnline()
+                        && player.getOpenInventory().getTopInventory().equals(inventory)) {
                     fillItems(inventory, payload);
                 }
             });
