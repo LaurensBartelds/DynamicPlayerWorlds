@@ -1094,7 +1094,6 @@ public final class WorldCommand {
         });
     }
 
-    /** {@code /world admin storage <player>} — another player's footprint, for support. */
     /** {@code /world admin upgrade grant <player> <kind> <amount> <reference>} — FR-44. */
     private void adminUpgradeGrant(CommandContext<CommandSource> context) {
         CommandSource source = context.getSource();
