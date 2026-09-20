@@ -236,13 +236,6 @@ public final class MenuViewService {
                 dbExecutor);
     }
 
-    /**
-     * The viewer's role in each world they were invited into (FR-7, FR-9c).
-     *
-     * <p>One query for every shared world rather than one per world: the list is
-     * already bounded by how many invites a player has accepted, and the menu is
-     * rendered on a database thread that other menus are queueing behind.
-     */
     /** How many unspent upgrades of each kind a player is holding (FR-45). */
     private Map<UpgradeKind, Integer> unspentByKind(UUID ownerUuid) throws SQLException {
         Map<UpgradeKind, Integer> counts = new EnumMap<>(UpgradeKind.class);
@@ -252,6 +245,13 @@ public final class MenuViewService {
         return counts;
     }
 
+    /**
+     * The viewer's role in each world they were invited into (FR-7, FR-9c).
+     *
+     * <p>One query for every shared world rather than one per world: the list is
+     * already bounded by how many invites a player has accepted, and the menu is
+     * rendered on a database thread that other menus are queueing behind.
+     */
     private Map<WorldId, Role> sharedRoles(UUID playerUuid, List<PlayerWorld> shared) throws SQLException {
         if (shared.isEmpty()) {
             return Map.of();
