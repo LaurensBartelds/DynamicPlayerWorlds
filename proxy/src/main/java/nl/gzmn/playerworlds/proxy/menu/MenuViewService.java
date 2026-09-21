@@ -236,7 +236,7 @@ public final class MenuViewService {
                 dbExecutor);
     }
 
-    /**
+    /*
      * The viewer's role in each world they were invited into (FR-7, FR-9c).
      *
      * <p>One query for every shared world rather than one per world: the list is
