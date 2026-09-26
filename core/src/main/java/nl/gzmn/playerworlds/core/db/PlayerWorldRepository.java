@@ -612,6 +612,17 @@ public final class PlayerWorldRepository extends Repository {
      *
      * @return true if the world was updated
      */
+    public boolean updateSettings(WorldId id, String settingsJson) throws SQLException {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(settingsJson, "settingsJson");
+        return database.inTransaction(connection ->
+                execute(connection, "UPDATE player_world SET settings = ?::jsonb WHERE id = ?", statement -> {
+                            statement.setString(1, settingsJson);
+                            statement.setObject(2, id.value());
+                        })
+                        == 1);
+    }
+
     /**
      * Raises a world's border radius (FR-3c).
      *
@@ -643,17 +654,6 @@ public final class PlayerWorldRepository extends Repository {
                     statement.setInt(3, newRadius);
                 })
                 > 0);
-    }
-
-    public boolean updateSettings(WorldId id, String settingsJson) throws SQLException {
-        Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(settingsJson, "settingsJson");
-        return database.inTransaction(connection ->
-                execute(connection, "UPDATE player_world SET settings = ?::jsonb WHERE id = ?", statement -> {
-                            statement.setString(1, settingsJson);
-                            statement.setObject(2, id.value());
-                        })
-                        == 1);
     }
 
     /**

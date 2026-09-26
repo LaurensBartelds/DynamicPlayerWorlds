@@ -51,6 +51,8 @@ public final class StorageTiers {
     public interface PermissionEnumerator {
 
         /**
+         * Returns every node they hold, or empty when this backend cannot list them.
+         *
          * @param player the player to list permissions for
          * @return every node they hold, or empty when this backend cannot list them
          */
