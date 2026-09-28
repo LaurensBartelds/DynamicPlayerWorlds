@@ -2107,7 +2107,7 @@ public final class WorldActions {
                                 key,
                                 Placeholders.text("world", world.name()),
                                 Placeholders.bytes("size", upgrade.amount()),
-                                Placeholders.count("blocks", (int) Math.min(upgrade.amount(), Integer.MAX_VALUE))));
+                                Placeholders.count("blocks", Math.min(upgrade.amount(), Integer.MAX_VALUE))));
                     } catch (SQLException e) {
                         log.error("/world upgrades redeem failed for {}", caller.getUsername(), e);
                         return ActionResult.failure(
