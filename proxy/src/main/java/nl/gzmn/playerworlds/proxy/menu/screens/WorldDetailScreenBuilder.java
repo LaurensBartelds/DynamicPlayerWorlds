@@ -67,6 +67,7 @@ public final class WorldDetailScreenBuilder {
     }
 
     /**
+     * Builds a screen for the world details menu.
      * @param unspentUpgrades how many unspent upgrades of each kind the viewer holds (FR-45);
      *     empty for a viewer who is not the owner, since only an owner may spend one here
      */
