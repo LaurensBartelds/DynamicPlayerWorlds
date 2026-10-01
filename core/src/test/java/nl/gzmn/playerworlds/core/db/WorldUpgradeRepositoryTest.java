@@ -152,7 +152,7 @@ class WorldUpgradeRepositoryTest {
     @DisplayName("revoking refuses an upgrade that has already been spent")
     void revokeRefusesRedeemed() throws Exception {
         UUID owner = UUID.randomUUID();
-        WorldUpgradeRepository.Grant unspent = upgrades.grant(owner, UpgradeKind.STORAGE, 1024L, "tebex-6");
+        upgrades.grant(owner, UpgradeKind.STORAGE, 1024L, "tebex-6");
         WorldUpgradeRepository.Grant spent = upgrades.grant(owner, UpgradeKind.STORAGE, 2048L, "tebex-7");
         WorldId world = createWorld(owner, "home");
         assertThat(upgrades.redeem(spent.upgrade().id(), owner, world)).isPresent();
